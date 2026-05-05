@@ -80,6 +80,19 @@ async def create_persona_preset(
         raise HTTPException(status_code=403, detail=str(e))
 
 
+@router.post("/batch", response_model=list[PersonaPreset])
+async def batch_create_persona_presets(
+    items: list[PersonaPresetCreate],
+    user: TokenPayload = Depends(require_permissions("persona_preset:write")),
+):
+    """Batch create persona presets."""
+    return await _manager().batch_create_presets(
+        items,
+        user_id=user.sub,
+        is_admin=_is_admin(user),
+    )
+
+
 @router.get("/{preset_id}", response_model=PersonaPreset)
 async def get_persona_preset(
     preset_id: str,

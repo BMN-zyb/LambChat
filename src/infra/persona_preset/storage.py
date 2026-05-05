@@ -43,6 +43,16 @@ class PersonaPresetStorage:
         doc["id"] = str(result.inserted_id)
         return doc
 
+    async def insert_many(self, docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        now = datetime.now()
+        for doc in docs:
+            doc.setdefault("created_at", now)
+            doc.setdefault("updated_at", now)
+        result = await self.collection.insert_many(docs)
+        for doc, inserted_id in zip(docs, result.inserted_ids):
+            doc["id"] = str(inserted_id)
+        return docs
+
     async def get_by_id(self, preset_id: str) -> Optional[dict[str, Any]]:
         try:
             query_id = ObjectId(preset_id)

@@ -323,7 +323,6 @@ export function usePersonaPlaza() {
     async (e: React.ChangeEvent<HTMLInputElement>) => {
       const file = e.target.files?.[0];
       if (!file) return;
-      // Reset so re-selecting same file fires onChange
       e.target.value = "";
 
       let items: PersonaPresetCreate[];
@@ -359,31 +358,20 @@ export function usePersonaPlaza() {
       }
 
       setIsImporting(true);
-      let imported = 0;
-      let failed = 0;
-      for (const data of items) {
-        const result = await createPreset(data);
-        if (result) imported++;
-        else failed++;
-      }
-      setIsImporting(false);
-
-      if (imported > 0) {
+      try {
+        const results = await personaPresetApi.batchCreate(items);
+        setIsImporting(false);
         toast.success(
           t("personaPresets.importSuccess", "成功导入 {{count}} 个角色", {
-            count: imported,
+            count: results.length,
           }),
         );
-      }
-      if (failed > 0) {
-        toast.error(
-          t("personaPresets.importPartialFail", "{{count}} 个角色导入失败", {
-            count: failed,
-          }),
-        );
+      } catch {
+        setIsImporting(false);
+        toast.error(t("personaPresets.importFailed", "导入失败"));
       }
     },
-    [createPreset, t],
+    [t],
   );
 
   return {

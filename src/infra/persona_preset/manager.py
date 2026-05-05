@@ -74,6 +74,36 @@ class PersonaPresetManager:
         created = await self.storage.create(data)
         return PersonaPreset(**created)
 
+    async def batch_create_presets(
+        self,
+        items: list[PersonaPresetCreate],
+        *,
+        user_id: str,
+        is_admin: bool,
+    ) -> list[PersonaPreset]:
+        now = datetime.now()
+        docs = []
+        for item in items:
+            if item.scope == PersonaPresetScope.GLOBAL and not is_admin:
+                continue
+            data = item.model_dump(mode="json")
+            data.update(
+                {
+                    "owner_user_id": None if item.scope == PersonaPresetScope.GLOBAL else user_id,
+                    "version": 1,
+                    "usage_count": 0,
+                    "created_by": user_id,
+                    "updated_by": user_id,
+                    "created_at": now,
+                    "updated_at": now,
+                }
+            )
+            docs.append(data)
+        if not docs:
+            return []
+        inserted = await self.storage.insert_many(docs)
+        return [PersonaPreset(**doc) for doc in inserted]
+
     async def get_preset(self, preset_id: str, *, user_id: str, is_admin: bool) -> PersonaPreset:
         doc = await self.storage.get_by_id(preset_id)
         if not doc or not self._can_view(doc, user_id=user_id, is_admin=is_admin):

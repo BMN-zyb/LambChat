@@ -45,6 +45,13 @@ export const personaPresetApi = {
     });
   },
 
+  async batchCreate(items: PersonaPresetCreate[]): Promise<PersonaPreset[]> {
+    return authFetch(`${PERSONA_PRESETS_API}/batch`, {
+      method: "POST",
+      body: JSON.stringify(items),
+    });
+  },
+
   async update(
     presetId: string,
     data: PersonaPresetUpdate,

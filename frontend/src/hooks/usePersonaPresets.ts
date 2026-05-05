@@ -23,8 +23,18 @@ export function usePersonaPresets(options?: { enabled?: boolean }) {
       setIsLoading(true);
       setError(null);
       try {
-        const response = await personaPresetApi.list(params);
-        setPresets(response.presets);
+        let allPresets: PersonaPreset[] = [];
+        let skip = 0;
+        const pageSize = 200;
+        const listParams = { ...params, limit: pageSize };
+        while (true) {
+          const response = await personaPresetApi.list({ ...listParams, skip });
+          allPresets = allPresets.concat(response.presets);
+          skip += response.presets.length;
+          if (skip >= response.total || response.presets.length < pageSize)
+            break;
+        }
+        setPresets(allPresets);
       } catch (err) {
         setError(
           err instanceof Error
