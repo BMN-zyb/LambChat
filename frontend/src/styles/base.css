@@ -148,6 +148,14 @@ body,
   touch-action: pan-y;
 }
 
+html {
+  background: var(--theme-bg);
+}
+
+body {
+  background: var(--theme-bg);
+}
+
 /* Allow scrolling on full-page public routes (landing, auth, shared, etc.) */
 html.allow-scroll,
 html.allow-scroll body,

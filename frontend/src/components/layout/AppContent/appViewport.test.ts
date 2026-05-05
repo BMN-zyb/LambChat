@@ -2,10 +2,11 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   getAppViewportHeightCssValue,
+  isKeyboardViewport,
   shouldUpdateAppViewportHeight,
 } from "./appViewport.ts";
 
-test("uses visual viewport height when available", () => {
+test("uses visual viewport height only when the keyboard has reduced the viewport", () => {
   assert.equal(
     getAppViewportHeightCssValue({
       visualViewportHeight: 512.4,
@@ -15,23 +16,50 @@ test("uses visual viewport height when available", () => {
   );
 });
 
-test("falls back to window inner height without visual viewport", () => {
+test("lets CSS dynamic viewport units handle normal fullscreen sizing", () => {
+  assert.equal(
+    getAppViewportHeightCssValue({
+      visualViewportHeight: 760,
+      windowInnerHeight: 800,
+    }),
+    null,
+  );
+});
+
+test("does not force a height without visual viewport data", () => {
   assert.equal(
     getAppViewportHeightCssValue({
       visualViewportHeight: null,
       windowInnerHeight: 760,
     }),
-    "760px",
+    null,
   );
 });
 
-test("falls back to dynamic viewport units when no measured height is available", () => {
+test("does not force a height when no measured height is available", () => {
   assert.equal(
     getAppViewportHeightCssValue({
       visualViewportHeight: null,
       windowInnerHeight: null,
     }),
-    "100dvh",
+    null,
+  );
+});
+
+test("detects keyboard viewport only after a significant visual viewport reduction", () => {
+  assert.equal(
+    isKeyboardViewport({
+      visualViewportHeight: 690,
+      windowInnerHeight: 800,
+    }),
+    true,
+  );
+  assert.equal(
+    isKeyboardViewport({
+      visualViewportHeight: 720,
+      windowInnerHeight: 800,
+    }),
+    false,
   );
 });
 

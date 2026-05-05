@@ -55,7 +55,7 @@ export const WelcomePage = memo(function WelcomePage({
   return (
     <div
       ref={rootRef}
-      className="welcome-root relative flex h-full flex-col items-center justify-center px-4 overflow-hidden"
+      className="welcome-root relative flex h-full flex-col items-center justify-center px-4"
     >
       {/* Greeting section */}
       <div className="relative flex flex-col items-center mb-3 sm:mb-4 md:mb-5 xl:mb-6 2xl:mb-7 w-full max-w-[90vw]">

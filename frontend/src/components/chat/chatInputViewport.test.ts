@@ -21,17 +21,17 @@ test("resizeTextareaForContent keeps the newest typed content visible", () => {
 test("getTextareaMaxHeightPx uses a comfortable fraction of small mobile viewports", () => {
   assert.equal(
     getTextareaMaxHeightPx({ isMobile: true, viewportHeight: 500 }),
-    160,
+    120,
   );
 });
 
 test("getTextareaMaxHeightPx keeps the default cap on desktop and roomy mobile viewports", () => {
   assert.equal(
     getTextareaMaxHeightPx({ isMobile: false, viewportHeight: 500 }),
-    250,
+    150,
   );
   assert.equal(
     getTextareaMaxHeightPx({ isMobile: true, viewportHeight: 900 }),
-    250,
+    150,
   );
 });

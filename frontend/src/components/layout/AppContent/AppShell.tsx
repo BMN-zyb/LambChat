@@ -3,10 +3,27 @@ import { ProfileModal } from "../../profile/ProfileModal";
 import { Header } from "./Header";
 import {
   getAppViewportHeightCssValue,
+  isKeyboardViewport,
   shouldUpdateAppViewportHeight,
 } from "./appViewport";
 import type { Project, VersionInfo } from "../../../types";
 import type { TabType } from "./types";
+
+function isEditableElementFocused(): boolean {
+  if (typeof document === "undefined") return false;
+  const activeElement = document.activeElement;
+  if (!activeElement) return false;
+  if (
+    activeElement instanceof HTMLInputElement ||
+    activeElement instanceof HTMLTextAreaElement ||
+    activeElement instanceof HTMLSelectElement
+  ) {
+    return true;
+  }
+  return (
+    activeElement instanceof HTMLElement && activeElement.isContentEditable
+  );
+}
 
 export interface AppShellProps {
   activeTab: TabType;
@@ -66,14 +83,25 @@ export function AppShell({
     const rootStyle = document.documentElement.style;
     let raf = 0;
     let viewportHeightValue: string | null = "";
+    let keyboardOpenValue: string | null = "";
 
     const updateViewportHeight = () => {
       cancelAnimationFrame(raf);
       raf = requestAnimationFrame(() => {
-        const nextViewportHeightValue = getAppViewportHeightCssValue({
-          visualViewportHeight: window.visualViewport?.height ?? null,
-          windowInnerHeight: window.innerHeight,
+        const visualViewportHeight = window.visualViewport?.height ?? null;
+        const windowInnerHeight = window.innerHeight;
+        const keyboardViewport = isKeyboardViewport({
+          visualViewportHeight,
+          windowInnerHeight,
         });
+        const keyboardFocused = keyboardViewport && isEditableElementFocused();
+        const nextViewportHeightValue = keyboardFocused
+          ? getAppViewportHeightCssValue({
+              visualViewportHeight,
+              windowInnerHeight,
+            })
+          : null;
+        const nextKeyboardOpenValue = keyboardFocused ? "true" : null;
 
         if (
           shouldUpdateAppViewportHeight(
@@ -91,13 +119,28 @@ export function AppShell({
             );
           }
         }
+
+        if (keyboardOpenValue !== nextKeyboardOpenValue) {
+          keyboardOpenValue = nextKeyboardOpenValue;
+          if (nextKeyboardOpenValue == null) {
+            document.documentElement.removeAttribute("data-mobile-keyboard");
+          } else {
+            document.documentElement.setAttribute(
+              "data-mobile-keyboard",
+              nextKeyboardOpenValue,
+            );
+          }
+        }
       });
     };
 
     updateViewportHeight();
     window.visualViewport?.addEventListener("resize", updateViewportHeight);
+    window.visualViewport?.addEventListener("scroll", updateViewportHeight);
     window.addEventListener("resize", updateViewportHeight);
     window.addEventListener("orientationchange", updateViewportHeight);
+    document.addEventListener("focusin", updateViewportHeight);
+    document.addEventListener("focusout", updateViewportHeight);
 
     return () => {
       cancelAnimationFrame(raf);
@@ -105,9 +148,16 @@ export function AppShell({
         "resize",
         updateViewportHeight,
       );
+      window.visualViewport?.removeEventListener(
+        "scroll",
+        updateViewportHeight,
+      );
       window.removeEventListener("resize", updateViewportHeight);
       window.removeEventListener("orientationchange", updateViewportHeight);
+      document.removeEventListener("focusin", updateViewportHeight);
+      document.removeEventListener("focusout", updateViewportHeight);
       rootStyle.removeProperty("--app-viewport-height");
+      document.documentElement.removeAttribute("data-mobile-keyboard");
     };
   }, []);
 

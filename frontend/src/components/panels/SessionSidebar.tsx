@@ -669,13 +669,19 @@ export const SessionSidebar = forwardRef<
         className={`fixed inset-0 z-[60] bg-black/40 sm:hidden transition-opacity duration-300 ease-in-out ${
           mobileOpen ? "opacity-100" : "opacity-0 pointer-events-none"
         }`}
+        style={{ height: "var(--app-viewport-height, 100dvh)" }}
         onClick={onMobileClose}
       />
 
       <div
-        className={`rounded-r-lg fixed inset-y-0 left-0 z-[70] w-64 flex flex-col sm:hidden bg-[var(--theme-bg-sidebar)] transition-transform duration-300 ease-in-out ${
+        className={`rounded-r-lg fixed left-0 top-0 z-[70] w-64 flex flex-col sm:hidden bg-[var(--theme-bg-sidebar)] transition-transform duration-300 ease-in-out ${
           mobileOpen ? "translate-x-0" : "-translate-x-full"
         }`}
+        style={{
+          height: "var(--app-viewport-height, 100dvh)",
+          paddingTop: "env(safe-area-inset-top)",
+          paddingBottom: "env(safe-area-inset-bottom)",
+        }}
       >
         {isMobile ? (
           <SessionListContent

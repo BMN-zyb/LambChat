@@ -8,6 +8,19 @@
  */
 const KEYBOARD_THRESHOLD_PX = 100;
 
+export function isKeyboardViewport({
+  visualViewportHeight,
+  windowInnerHeight,
+}: {
+  visualViewportHeight?: number | null;
+  windowInnerHeight?: number | null;
+}): boolean {
+  const vvHeight = visualViewportHeight ?? null;
+  const wHeight = windowInnerHeight ?? null;
+
+  return !!vvHeight && !!wHeight && wHeight - vvHeight > KEYBOARD_THRESHOLD_PX;
+}
+
 export function getAppViewportHeightCssValue({
   visualViewportHeight,
   windowInnerHeight,
@@ -23,7 +36,12 @@ export function getAppViewportHeightCssValue({
   }
 
   // Keyboard likely open — use measured visual viewport height
-  if (wHeight - vvHeight > KEYBOARD_THRESHOLD_PX) {
+  if (
+    isKeyboardViewport({
+      visualViewportHeight: vvHeight,
+      windowInnerHeight: wHeight,
+    })
+  ) {
     return `${Math.round(vvHeight)}px`;
   }
 
