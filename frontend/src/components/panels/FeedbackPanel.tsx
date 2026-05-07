@@ -17,6 +17,7 @@ import {
   Check,
 } from "lucide-react";
 import { PanelHeader } from "../common/PanelHeader";
+import { GlassSelect } from "../common/GlassSelect";
 import { FeedbackPanelSkeleton } from "../skeletons";
 import { Pagination } from "../common/Pagination";
 import { feedbackApi } from "../../services/api/feedback";
@@ -385,35 +386,19 @@ export function FeedbackPanel() {
         subtitle={t("feedback.subtitle")}
         icon={<Star size={20} className="text-stone-600 dark:text-stone-400" />}
         actions={
-          <div className="relative w-full sm:w-44">
-            <select
+          <div className="w-full sm:w-44">
+            <GlassSelect
               value={ratingFilter || ""}
-              onChange={(e) =>
-                setRatingFilter(
-                  e.target.value ? (e.target.value as RatingValue) : undefined,
-                )
+              onChange={(v) =>
+                setRatingFilter(v ? (v as RatingValue) : undefined)
               }
-              className="w-full appearance-none rounded-xl border border-stone-200 bg-stone-50 px-4 py-2.5 pr-10 text-sm font-medium text-stone-700 transition-all focus:border-stone-500 focus:outline-none focus:ring-2 focus:ring-stone-500/20 dark:border-stone-700 dark:bg-stone-900 dark:text-stone-300"
-            >
-              <option value="">{t("feedback.allRatings")}</option>
-              <option value="up">{t("feedback.positive")}</option>
-              <option value="down">{t("feedback.negative")}</option>
-            </select>
-            <div className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-stone-400">
-              <svg
-                className="h-4 w-4"
-                fill="none"
-                viewBox="0 0 24 24"
-                stroke="currentColor"
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                  d="M19 9l-7 7-7-7"
-                />
-              </svg>
-            </div>
+              placeholder={t("feedback.allRatings")}
+              options={[
+                { value: "", label: t("feedback.allRatings") },
+                { value: "up", label: t("feedback.positive") },
+                { value: "down", label: t("feedback.negative") },
+              ]}
+            />
           </div>
         }
       />

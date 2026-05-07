@@ -6,7 +6,7 @@ import { ProtectedRoute } from "./components/auth/ProtectedRoute";
 import { ChatPageSkeleton, FilesPageSkeleton } from "./components/skeletons";
 import { ThemeProvider } from "./contexts/ThemeContext";
 import { ErrorBoundary } from "./components/common/ErrorBoundary";
-import { usePageTitle } from "./hooks/usePageTitle";
+import { useSEO } from "./hooks/usePageTitle";
 import { Permission } from "./types";
 import { sessionApi } from "./services/api";
 
@@ -110,8 +110,10 @@ function ChatPage() {
   }, [sessionId, sessionName]);
 
   // Use session name if available, otherwise use default "nav.chat"
-  usePageTitle(sessionName || "nav.chat", undefined, {
-    description: "navDesc.chat",
+  useSEO({
+    title: sessionName || "seo.chat.title",
+    description: "seo.chat.description",
+    path: sessionId ? `/chat/${sessionId}` : "/chat",
   });
 
   return <AppContent key="chat" activeTab="chat" />;
@@ -119,87 +121,127 @@ function ChatPage() {
 
 // Simple page components that set the page title and render AppContent
 function SkillsPage() {
-  usePageTitle("nav.skills", undefined, { description: "navDesc.skills" });
+  useSEO({
+    title: "seo.skills.title",
+    description: "seo.skills.description",
+    path: "/skills",
+  });
   return <AppContent key="skills" activeTab="skills" />;
 }
 
 function MarketplacePage() {
-  usePageTitle("nav.marketplace", undefined, {
-    description: "navDesc.marketplace",
+  useSEO({
+    title: "seo.marketplace.title",
+    description: "seo.marketplace.description",
+    path: "/marketplace",
   });
   return <AppContent key="marketplace" activeTab="marketplace" />;
 }
 
 function UsersPage() {
-  usePageTitle("nav.users", undefined, { description: "navDesc.users" });
+  useSEO({
+    title: "seo.users.title",
+    description: "seo.users.description",
+    path: "/users",
+  });
   return <AppContent key="users" activeTab="users" />;
 }
 
 function RolesPage() {
-  usePageTitle("nav.roles", undefined, { description: "navDesc.roles" });
+  useSEO({
+    title: "seo.roles.title",
+    description: "seo.roles.description",
+    path: "/roles",
+  });
   return <AppContent key="roles" activeTab="roles" />;
 }
 
 function SettingsPage() {
-  usePageTitle("nav.settings", undefined, {
-    description: "navDesc.settings",
+  useSEO({
+    title: "seo.settings.title",
+    description: "seo.settings.description",
+    path: "/settings",
   });
   return <AppContent key="settings" activeTab="settings" />;
 }
 
 function MCPPage() {
-  usePageTitle("nav.mcp", undefined, { description: "navDesc.mcp" });
+  useSEO({
+    title: "seo.mcp.title",
+    description: "seo.mcp.description",
+    path: "/mcp",
+  });
   return <AppContent key="mcp" activeTab="mcp" />;
 }
 
 function FeedbackPage() {
-  usePageTitle("nav.feedback", undefined, {
-    description: "navDesc.feedback",
+  useSEO({
+    title: "seo.feedback.title",
+    description: "seo.feedback.description",
+    path: "/feedback",
   });
   return <AppContent key="feedback" activeTab="feedback" />;
 }
 
 function ChannelsPage() {
-  usePageTitle("nav.channels", undefined, {
-    description: "navDesc.channels",
+  useSEO({
+    title: "seo.channels.title",
+    description: "seo.channels.description",
+    path: "/channels",
   });
   return <AppContent key="channels" activeTab="channels" />;
 }
 
 function AgentsPage() {
-  usePageTitle("nav.agents", undefined, { description: "navDesc.agents" });
+  useSEO({
+    title: "seo.agents.title",
+    description: "seo.agents.description",
+    path: "/agents",
+  });
   return <AppContent key="agents" activeTab="agents" />;
 }
 
 function ModelsPage() {
-  usePageTitle("nav.models", undefined, { description: "navDesc.models" });
+  useSEO({
+    title: "seo.models.title",
+    description: "seo.models.description",
+    path: "/models",
+  });
   return <AppContent key="models" activeTab="models" />;
 }
 
 function FilesPage() {
-  usePageTitle("fileLibrary.title", undefined, {
-    description: "fileLibrary.title",
+  useSEO({
+    title: "seo.files.title",
+    description: "seo.files.description",
+    path: "/files",
   });
   return <AppContent key="files" activeTab="files" />;
 }
 
 function PersonaPage() {
-  usePageTitle("personaPresets.title", undefined, {
-    description: "personaPresets.subtitle",
+  useSEO({
+    title: "seo.persona.title",
+    description: "seo.persona.description",
+    path: "/persona",
   });
   return <AppContent key="persona" activeTab="persona" />;
 }
 
 function NotificationsPage() {
-  usePageTitle("nav.notifications", undefined, {
-    description: "nav.notifications",
+  useSEO({
+    title: "seo.notifications.title",
+    description: "seo.notifications.description",
+    path: "/notifications",
   });
   return <AppContent key="notifications" activeTab="notifications" />;
 }
 
 function MemoryPage() {
-  usePageTitle("nav.memory", undefined, {
-    description: "navDesc.memory",
+  useSEO({
+    title: "seo.memory.title",
+    description: "seo.memory.description",
+    path: "/memory",
   });
   return <AppContent key="memory" activeTab="memory" />;
 }
@@ -211,7 +253,11 @@ function AuthPageWrapper({
   initialMode?: "login" | "register";
 }) {
   const navigate = useNavigate();
-  usePageTitle(initialMode === "register" ? "auth.register" : "auth.login");
+  useSEO({
+    title: initialMode === "register" ? "auth.register" : "auth.login",
+    path: initialMode === "register" ? "/auth/register" : "/auth/login",
+    noindex: true,
+  });
   return (
     <AuthPage
       initialMode={initialMode}

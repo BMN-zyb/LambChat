@@ -2025,5 +2025,71 @@
       "enterUsername": "Please enter username",
       "passwordMinLength": "Password must be at least 6 characters"
     }
+  },
+  "seo": {
+    "landing": {
+      "title": "LambChat - AI Agent Platform",
+      "description": "LambChat is a pluggable multi-tenant AI conversation platform powered by Skills and MCP dual-engine. Supports Claude, GPT, Gemini and more with real-time SSE streaming, multi-agent orchestration, and modular skill system."
+    },
+    "chat": {
+      "title": "AI Chat",
+      "description": "Have intelligent conversations with AI agents. Multi-model switching, real-time streaming responses, session management, file uploads, and multi-agent collaboration."
+    },
+    "skills": {
+      "title": "Skills Management",
+      "description": "Create, configure, and manage AI skills. Build powerful custom capabilities with prompt engineering, tool integration, and modular skill composition."
+    },
+    "marketplace": {
+      "title": "Skill Marketplace",
+      "description": "Discover and install community-built AI skills. Browse, rate, and deploy pre-built capabilities to extend your AI agent functionality."
+    },
+    "agents": {
+      "title": "AI Agents",
+      "description": "Configure and manage AI agents. Set up system prompts, select models, define tools, and orchestrate multi-agent workflows for complex tasks."
+    },
+    "models": {
+      "title": "Model Management",
+      "description": "Manage LLM model configurations. Connect and switch between Claude, GPT, Gemini, and other models with unified API abstraction."
+    },
+    "mcp": {
+      "title": "MCP Server Management",
+      "description": "Manage Model Context Protocol server connections. Connect external tools, databases, and services to extend AI agent capabilities."
+    },
+    "persona": {
+      "title": "Persona Presets",
+      "description": "Choose and customize AI personas. Define personality, tone, expertise, and behavior patterns for specialized conversation experiences."
+    },
+    "files": {
+      "title": "File Library",
+      "description": "Upload, organize, and manage files in your AI workspace. Share documents, images, and media with AI agents for analysis and processing."
+    },
+    "memory": {
+      "title": "AI Memory Space",
+      "description": "View and manage AI memory content. Persistent context and knowledge storage for long-term AI agent understanding across conversations."
+    },
+    "users": {
+      "title": "User Management",
+      "description": "Manage user accounts, roles, and access permissions. Administer multi-tenant user lifecycle and security settings."
+    },
+    "roles": {
+      "title": "Roles & Permissions",
+      "description": "Configure roles and granular permissions. Define access control policies for teams, resources, and administrative functions."
+    },
+    "settings": {
+      "title": "System Settings",
+      "description": "Configure application and system settings. Manage global preferences, integrations, security policies, and platform behavior."
+    },
+    "feedback": {
+      "title": "User Feedback",
+      "description": "View and manage user feedback. Track feature requests, bug reports, and user satisfaction to drive product improvements."
+    },
+    "channels": {
+      "title": "Communication Channels",
+      "description": "Manage communication channels. Connect external messaging platforms and notification services for multi-channel AI interactions."
+    },
+    "notifications": {
+      "title": "Notifications",
+      "description": "Manage system announcements and notifications. Stay updated with platform news, alerts, and important messages."
+    }
   }
 }

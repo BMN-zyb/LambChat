@@ -39,9 +39,8 @@
   font-weight: 600;
 }
 
-/* --- Inputs / Select / Textarea --- */
+/* --- Inputs / Textarea --- */
 .ppe-input,
-.ppe-select,
 .ppe-textarea {
   width: 100%;
   font-size: 0.875rem;
@@ -60,21 +59,6 @@
   padding: 0 0.75rem;
 }
 
-.ppe-select {
-  height: 2.375rem;
-  padding: 0 0.75rem;
-  padding-right: 2rem;
-  cursor: pointer;
-  appearance: none;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%239ca3af' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
-  background-repeat: no-repeat;
-  background-position: right 0.5rem center;
-}
-
-.dark .ppe-select {
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%23a8a29e' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
-}
-
 .ppe-textarea {
   padding: 0.75rem;
   font-size: 0.875rem;
@@ -85,14 +69,12 @@
 }
 
 .ppe-input:focus,
-.ppe-select:focus,
 .ppe-textarea:focus {
   border-color: var(--theme-primary);
   box-shadow: 0 0 0 2px var(--theme-primary-light);
 }
 
 .ppe-input:hover:not(:focus),
-.ppe-select:hover:not(:focus),
 .ppe-textarea:hover:not(:focus) {
   border-color: color-mix(
     in srgb,
@@ -102,15 +84,9 @@
 }
 
 .ppe-input::placeholder,
-.ppe-select::placeholder,
 .ppe-textarea::placeholder {
   color: var(--theme-text-secondary);
   opacity: 0.55;
-}
-
-.ppe-select:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
 }
 
 /* --- Character counter --- */

@@ -1,4 +1,5 @@
 import { useTranslation } from "react-i18next";
+import { GlassSelect } from "../common/GlassSelect";
 import { Plus, Trash2 } from "lucide-react";
 import type { JsonSchema, JsonSchemaField } from "../../types/settings";
 
@@ -51,18 +52,15 @@ function FieldInput({
         <label className="mb-1 block text-xs font-medium text-stone-600 dark:text-stone-400">
           {label}
         </label>
-        <select
+        <GlassSelect
           value={String(value)}
           disabled={disabled}
-          onChange={(e) => onChange(e.target.value)}
-          className="w-full rounded-lg border border-[var(--glass-border)] bg-[var(--theme-bg-card)] px-3 py-1.5 text-sm text-stone-900 focus:outline-none disabled:cursor-not-allowed disabled:opacity-60 dark:text-stone-100"
-        >
-          {field.options.map((opt) => (
-            <option key={opt} value={opt}>
-              {opt}
-            </option>
-          ))}
-        </select>
+          onChange={onChange}
+          options={field.options.map((opt) => ({
+            value: opt,
+            label: opt,
+          }))}
+        />
       </div>
     );
   }

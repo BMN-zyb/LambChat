@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 import toast from "react-hot-toast";
 import { LoadingSpinner } from "../../../common/LoadingSpinner";
 import { EditorSidebar } from "../../../common/EditorSidebar";
+import { GlassSelect } from "../../../common/GlassSelect";
 import { ProviderSelect } from "../../AgentPanel/shared";
 import { modelApi } from "../../../../services/api/model";
 import type {
@@ -247,20 +248,17 @@ export const ModelFormModal = ({
               <label className="es-label">
                 {t("agentConfig.fallbackModel", "Fallback Model")}
               </label>
-              <select
+              <GlassSelect
                 value={formFallbackModel}
-                onChange={(e) => setFormFallbackModel(e.target.value)}
-                className="glass-input es-select"
-              >
-                <option value="">{t("agentConfig.noFallback", "None")}</option>
-                {models
+                onChange={setFormFallbackModel}
+                placeholder={t("agentConfig.noFallback", "None")}
+                options={models
                   .filter((m) => m.id !== model?.id && m.enabled)
-                  .map((m) => (
-                    <option key={m.id} value={m.id}>
-                      {m.label} ({m.value})
-                    </option>
-                  ))}
-              </select>
+                  .map((m) => ({
+                    value: m.id!,
+                    label: `${m.label} (${m.value})`,
+                  }))}
+              />
               <p className="es-hint">
                 {t(
                   "agentConfig.fallbackModelHint",

@@ -2,7 +2,7 @@
 
 # 🐑 LambChat
 
-**A production-ready AI Agent system built with FastAPI + deepagents**
+**An open-source, production-ready AI Agent platform for building, running, and sharing real tool-using agents**
 
 [![Python](https://img.shields.io/badge/Python-3.12+-blue.svg)]()
 [![React](https://img.shields.io/badge/React-19-green.svg)]()
@@ -27,13 +27,23 @@
 | <img src="docs/images/best-practice/roles-page.webp" width="280" alt="Roles"><br>**Roles** | <img src="docs/images/best-practice/settings-page.webp" width="280" alt="Settings"><br>**Settings** | <img src="docs/images/best-practice/feedback-page.webp" width="280" alt="Feedback"><br>**Feedback** |
 | <img src="docs/images/best-practice/mobile-view.webp" width="200" alt="Mobile"><br>**Mobile** | <img src="docs/images/best-practice/tablet-view.webp" width="280" alt="Tablet"><br>**Tablet** | <img src="docs/images/best-practice/shared-page.webp" width="280" alt="Shared"><br>**Shared Session** |
 
+## 🌟 Why LambChat
+
+LambChat is built for teams who want more than a chatbot UI. It gives you a complete AI Agent system with model management, MCP connectivity, skills, storage, sharing, approvals, and deployment-ready backend/frontend infrastructure in one project.
+
+- **Built for real execution** — agents can reason, call tools, use sub-agents, stream progress, and work with human approval when needed.
+- **Ready for operations** — includes auth, RBAC, encrypted secrets, tracing, health checks, sandbox integration, and distributed config sync.
+- **Designed for extensibility** — custom agents, MCP tools, skills, model providers, channels, persona presets, and storage backends can all be extended cleanly.
+- **Product-grade UX** — polished chat UI, file previews, project folders, sharing, feedback, responsive layouts, and multilingual support.
+
 ## 🎬 Use Cases
 
 | # | Case | Description | Demo |
 |---|------|-------------|------|
-| 1 | PDF Report Generation | Agent reads skill instructions → installs dependencies → generates 8 charts → writes LaTeX source → compiles into a 14-page PDF business report. Zero human intervention. | [View Session](https://lambchat.com/shared/Yaotot5Fav8j) |
-| 2 | PPT Presentation | Agent independently creates a 14-page business PPT with data tables, charts, analysis cards, and action roadmap based on supply chain data. | [View Session](https://lambchat.com/shared/VOjediSYBHR1) |
-| 3 | Static Blog Site | Builds a complete blog (5 pages + 8 sample articles) with tag filtering, pagination, responsive layout, and interactive effects. 10 subtasks all completed automatically. | [View Session](https://lambchat.com/shared/NuzvONPqCZLU) |
+| 1 | Supply Chain PDF Report | Generates a polished PDF efficiency report with charts, benchmark comparisons, and delivery, inventory, fulfillment, and logistics analysis from a single prompt. | [View Session](https://lambchat.com/shared/w0WA7GtMCyca) |
+| 2 | Godfather Fan Website | Builds a responsive English promo site for *The Godfather* trilogy with a cinematic visual direction, marquee hero section, generated images, and multi-device polish. | [View Session](https://lambchat.com/shared/9XlmaDANCjO9) |
+| 3 | Story Breakdown from Image | Understands visual input, identifies the stories shown in an image, and produces detailed plot-by-plot explanations with multimodal reasoning. | [View Session](https://lambchat.com/shared/MZX-eNnOoilN) |
+| 4 | EV Market Trend Analysis | Turns recent 2025-2026 electric vehicle data into a structured market analysis covering growth, regional performance, and key industry takeaways. | [View Session](https://lambchat.com/shared/5XUeuDEyd2CY) |
 
 ## 🏗️ Architecture
 
@@ -42,90 +52,73 @@
 ## ✨ Features
 
 <details>
-<summary><b>🤖 Agent System</b></summary>
+<summary><b>🤖 Agent Runtime</b></summary>
 
-- **deepagents Architecture** — Compiled graph with fine-grained state management
-- **Multi-Agent Types** — Core / Fast / Search agents
+- **deepagents Architecture** — Compiled graph runtime with fine-grained state management
+- **Multi-Agent Types** — Core, fast, and search agents
 - **Plugin System** — `@register_agent("id")` decorator for custom agents
 - **Streaming Output** — Native SSE support
-- **Sub-agents** — Multi-level nesting
+- **Sub-agents** — Multi-level delegation
 - **Thinking Mode** — Extended thinking for Anthropic models
-- **Human-in-the-Loop** — Approval system with countdown timer, auto-extension, and urgent state styling
+- **Human-in-the-Loop** — Approval system with countdown timer, auto-extension, and urgent-state styling
+- **Persona Presets** — Reusable persona configuration with permissions and runtime binding
 
 </details>
 
 <details>
-<summary><b>🧠 Model Management</b></summary>
+<summary><b>🧠 Model, Memory, and Skills</b></summary>
 
-- **Multi-Provider** — OpenAI, Anthropic, Google Gemini, Kimi (Moonshot)
-- **Full CRUD** — Create, edit, delete, batch import models via UI with per-model config (api_key, api_base, temperature, max_tokens)
-- **Channel Routing** — Same model from multiple channels via `model_id` routing
-- **Role-based Access** — `MODEL_ADMIN` permission, per-role model visibility control
-- **Per-user Preferences** — Default model selection persists across sessions
-- **Live Config Sync** — Distributed Redis pub/sub for real-time model updates
-- **Drag-and-Drop** — Reorder models in the selector
+- **Multi-Provider Models** — OpenAI, Anthropic, Google Gemini, and Kimi
+- **Full CRUD** — Create, edit, delete, reorder, and batch import models via UI
+- **Channel Routing** — Route the same model through different channels with `model_id`
+- **Role-based Access** — `MODEL_ADMIN` permission and per-role model visibility
+- **Cross-session Memory** — Native, hindsight, and memu memory backends
+- **Dual Skills Storage** — File system plus MongoDB backup
+- **GitHub Sync** — Import custom skills from GitHub
+- **Skill Marketplace** — Browse, install, publish, and manage skills in bulk
 
 </details>
 
 <details>
-<summary><b>🔌 MCP Integration</b></summary>
+<summary><b>🔌 Tools, MCP, and Execution</b></summary>
 
-- **System + User Level** — Global and per-user MCP configs
+- **System + User MCP** — Global and per-user MCP configuration
 - **Encrypted Storage** — API keys encrypted at rest
-- **Dynamic Caching** — Tool caching with manual refresh
-- **Multiple Transports** — SSE / HTTP
-- **Permission Control** — Transport-level access control
-- **Import/Export** — Bulk MCP configuration management
+- **Dynamic Tool Caching** — Cache MCP tools with manual refresh
+- **Multiple Transports** — SSE and HTTP
+- **Permission Control** — Transport-level access policies
+- **Sandbox Integration** — Daytona and E2B execution support
+- **Built-in Tools** — File reveal, project reveal, upload URL, env vars, audio transcription, persona preset tools, and more
 
 </details>
 
 <details>
-<summary><b>🛠️ Skills System</b></summary>
+<summary><b>📁 Product Features</b></summary>
 
-- **Dual Storage** — File system + MongoDB backup
-- **Access Control** — User-level permissions
-- **GitHub Sync** — Import skills from GitHub repos
-- **Skill Creator** — Built-in creation toolkit with evaluation tools
-- **Marketplace** — Browse, install, and publish skills
-- **Batch Operations** — Enable/disable/delete skills in bulk
-
-</details>
-
-<details>
-<summary><b>💬 Feedback · 📁 Files · 🔄 Realtime · 🔐 Auth · ⚙️ Tasks · 📊 Observability</b></summary>
-
-- **Feedback** — Thumbs rating, text comments, session-linked, run-level stats
-- **File Library** — Browse revealed files, code preview, organized file management with grid/list views, favorites, and project-based filtering
-- **Documents** — PDF / Word / Excel / PPT / Markdown / Mermaid / Excalidraw preview + image viewer
-- **Cloud Storage** — S3 / OSS / MinIO / COS integration, drag & drop upload, presigned URLs
+- **File Library** — Browse revealed files with code preview, favorites, and project-based filtering
+- **Rich Previews** — PDF, Word, Excel, PPT, Markdown, Mermaid, Excalidraw, images, and video playback
 - **Project Folders** — Organize sessions into projects with drag-and-drop
 - **Session Sharing** — Generate public share links for conversations
-- **Realtime** — Dual-write (Redis + MongoDB), WebSocket, auto-reconnect, session sharing
-- **Security** — JWT, RBAC (35+ permissions across 15 groups), bcrypt, OAuth (Google/GitHub/Apple), email verification, CAPTCHA, sandbox
-- **Tasks** — Concurrency control, cancellation, heartbeat, pub/sub notifications
-- **Observability** — LangSmith tracing, structured logging, health checks
-- **Channels** — Feishu (Lark) native integration with model selector, project binding, and time-based session titles; extensible multi-channel system
+- **Feedback** — Thumbs rating, text comments, session linking, and run-level stats
+- **Notifications** — In-app notification storage and delivery hooks
 
 </details>
 
 <details>
-<summary><b>🎨 Frontend</b></summary>
+<summary><b>🔐 Infra, Realtime, and Frontend</b></summary>
 
-- **React 19 + Vite 6 + TailwindCSS 3.4**
-- **ChatGPT-style** interface with dark/light theme
-- **Glass Design System** — Consistent glass-shell/glass-card styling across all panels
-- **i18n** — English, Chinese, Japanese, Korean, Russian
-- **Responsive** — Mobile, tablet, desktop with unified component rendering
-- **Rich Content** — KaTeX math, syntax highlighting, Mermaid diagrams, table copy/CSV export, image preview lightbox, line-highlighted code viewer
-- **Tool Panels** — Slide-up tool result panels with center/sidebar view modes and block preview portal
-- **Skeleton Loading** — Skeleton components for better perceived performance
-- **Landing Page** — Premium blog-style landing with scroll-reveal animations and section tracking
+- **Realtime** — Redis + MongoDB dual-write, WebSocket, auto-reconnect, and shared-session updates
+- **Security** — JWT, RBAC, bcrypt, OAuth (Google/GitHub/Apple), email verification, CAPTCHA, and sandbox controls
+- **Observability** — LangSmith tracing, structured logging, health checks, and distributed memory diagnostics
+- **Channels** — Native Feishu integration plus an extensible multi-channel architecture
+- **Frontend Stack** — React 19, Vite 6, TailwindCSS 3.4, dark/light theme, rich content rendering, and responsive multi-device layouts
+- **i18n** — English, Chinese, Japanese, Korean, and Russian
 
 </details>
 
 ## ⚙️ Configuration
 
-14+ setting categories configurable via UI or environment variables:
+Multiple setting categories can be configured through the UI or environment variables:
 
 | Category | Description |
 |----------|-------------|
@@ -135,11 +128,11 @@
 | Session | Session management, message history, SSE cache |
 | Database | MongoDB connection, optional PostgreSQL |
 | Storage | Persistent storage, S3/OSS/MinIO/COS |
-| Security | Encryption & security policies |
+| Security | Encryption and security policies |
 | Sandbox | Code sandbox settings (Daytona / E2B) |
 | Skills | Skill system config |
 | Tools | Tool system settings |
-| Tracing | LangSmith & tracing |
+| Tracing | LangSmith and tracing |
 | User | User management, registration, default role |
 | Memory | Memory system (native / hindsight / memu) |
 
@@ -164,7 +157,7 @@ cp .env.example .env   # Edit with your config
 make install && make dev
 ```
 
-→ Open **http://localhost:8000**
+Open **http://localhost:8000**
 
 ### Code Quality
 
@@ -176,41 +169,20 @@ mypy src/           # Type check
 
 ### Project Structure
 
-```
+```text
 src/
-├── agents/          # Agent implementations (core, fast, search)
-├── api/             # FastAPI routes & middleware
-│   ├── routes/      # 27 route modules (auth, chat, mcp, skills, model, etc.)
-│   ├── admin/       # Admin API endpoints
-│   └── agent/       # Agent configuration & model management
-├── infra/           # Infrastructure services
-│   ├── agent/       # Agent config & events
-│   ├── auth/        # JWT, OAuth, RBAC, CAPTCHA
-│   ├── backend/     # LLM backend abstraction
-│   ├── channel/     # Multi-channel (Feishu, etc.)
-│   ├── email/       # Email service (Resend)
-│   ├── envvar/      # User environment variables
-│   ├── feedback/    # Feedback system
-│   ├── folder/      # Project folder management
-│   ├── llm/         # LLM integration (OpenAI, Anthropic, Gemini, Kimi)
-│   ├── memory/      # Cross-session memory (native, hindsight, memu)
-│   ├── model/       # Model management with encryption & pub/sub sync
-│   ├── mcp/         # MCP protocol
-│   ├── role/        # RBAC roles
-│   ├── sandbox/     # Sandbox execution (Daytona / E2B)
-│   ├── session/     # Session management (dual-write)
-│   ├── settings/    # Settings storage + pub/sub sync
-│   ├── share/       # Share links
-│   ├── skill/       # Skills system
-│   ├── storage/     # MongoDB, Redis, PostgreSQL, S3
-│   ├── task/        # Task management
-│   ├── tool/        # Tool registry & MCP client
-│   ├── tracing/     # LangSmith tracing
-│   ├── upload/      # File upload handling
-│   ├── revealed_file/  # File library
-│   └── websocket/   # WebSocket & rate limiter
-├── kernel/          # Core schemas, config, types
-└── skills/          # Built-in skills
+├── agents/         # Agent implementations and runtime graphs
+├── api/            # FastAPI routes, admin endpoints, middleware
+├── infra/          # Core services: auth, llm, mcp, tools, storage, tasks, sharing, memory
+├── kernel/         # Schemas, config, constants, and shared types
+└── skills/         # Built-in skills
+frontend/
+├── src/components/ # UI components, panels, and landing sections
+├── src/hooks/      # Frontend hooks
+├── src/i18n/       # Locale files
+└── src/styles/     # Shared styles and design tokens
+tests/              # Backend and integration tests
+deploy/             # Docker deployment assets
 ```
 
 ## ⭐ Star History
@@ -231,10 +203,22 @@ src/
 
 <div align="center">
 
-Made with ❤️ by [Clivia](https://github.com/Yanyutin753)
+<sub><strong>LambChat</strong> is built for people who want AI agents that can actually do the work.</sub>
 
-[📧 3254822118@qq.com](mailto:3254822118@qq.com) · [GitHub](https://github.com/Yanyutin753)
+<br>
 
-<img src=".github/images/wechat-qr.webp" width="150" alt="WeChat"><br><sub>💬 Add on WeChat (note: LambChat) · Deployment questions welcome</sub>
+<strong>Created by <a href="https://github.com/Yanyutin753">Clivia</a></strong>
+
+<br>
+
+<a href="https://github.com/Yanyutin753">GitHub</a> · <a href="mailto:3254822118@qq.com">Email</a> · <a href="README_CN.md">中文 README</a>
+
+<br><br>
+
+<img src=".github/images/wechat-qr.webp" width="160" alt="WeChat QR Code">
+
+<br>
+
+<sub>WeChat for deployment help, product feedback, and collaboration</sub>
 
 </div>

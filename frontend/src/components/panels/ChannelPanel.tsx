@@ -15,7 +15,6 @@ import {
   X,
   AlertCircle,
   MessageCircle,
-  ChevronDown,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import toast from "react-hot-toast";
@@ -24,6 +23,7 @@ import { Permission } from "../../types";
 import { PanelHeader } from "../common/PanelHeader";
 import { ConfirmDialog } from "../common/ConfirmDialog";
 import { LoadingSpinner } from "../common/LoadingSpinner";
+import { GlassSelect } from "../common/GlassSelect";
 import { ChannelsPanelSkeleton } from "../skeletons";
 import { EditorSidebar } from "../common/EditorSidebar";
 import { ChannelAgentSelect } from "./channel/ChannelAgentSelect";
@@ -315,23 +315,14 @@ export function ChannelPanel({
             <label className="mb-1 block text-sm font-medium text-stone-700 dark:text-stone-200">
               {field.title}
             </label>
-            <div className="relative">
-              <select
-                value={String(value)}
-                onChange={(e) => updateFormField(field.name, e.target.value)}
-                className="w-full appearance-none rounded-lg glass-input pl-3 pr-9 py-2 text-sm text-stone-900 focus:border-stone-500 focus:outline-none dark:text-stone-100"
-              >
-                {field.options?.map((opt) => (
-                  <option key={opt.value} value={opt.value}>
-                    {opt.label}
-                  </option>
-                ))}
-              </select>
-              <ChevronDown
-                size={16}
-                className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-stone-400 dark:text-stone-500"
-              />
-            </div>
+            <GlassSelect
+              value={String(value)}
+              onChange={(v) => updateFormField(field.name, v)}
+              options={(field.options ?? []).map((opt) => ({
+                value: String(opt.value),
+                label: opt.label,
+              }))}
+            />
           </div>
         );
 

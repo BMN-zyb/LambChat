@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { GlassSelect } from "../common/GlassSelect";
 import {
   Plus,
   Pencil,
@@ -455,44 +456,45 @@ export function PersonaEditorModal({
                 <label className="ppe-label">
                   {t("personaPresets.scope", "范围")}
                 </label>
-                <select
+                <GlassSelect
                   value={editorScope}
-                  onChange={(event) =>
-                    setEditorScope(event.target.value as "user" | "global")
-                  }
+                  onChange={(v) => setEditorScope(v as "user" | "global")}
                   disabled={!!editingPreset}
-                  className="ppe-select"
-                >
-                  <option value="user">
-                    {t("personaPresets.mine", "我的")}
-                  </option>
-                  <option value="global">
-                    {t("personaPresets.official", "官方")}
-                  </option>
-                </select>
+                  options={[
+                    {
+                      value: "user",
+                      label: t("personaPresets.mine", "我的"),
+                    },
+                    {
+                      value: "global",
+                      label: t("personaPresets.official", "官方"),
+                    },
+                  ]}
+                />
               </div>
               {editorScope === "global" && (
                 <div className="ppe-field">
                   <label className="ppe-label">
                     {t("personaPresets.status", "状态")}
                   </label>
-                  <select
+                  <GlassSelect
                     value={editorStatus}
-                    onChange={(event) =>
-                      setEditorStatus(event.target.value as PersonaPresetStatus)
-                    }
-                    className="ppe-select"
-                  >
-                    <option value="draft">
-                      {t("personaPresets.draft", "草稿")}
-                    </option>
-                    <option value="published">
-                      {t("personaPresets.published", "已发布")}
-                    </option>
-                    <option value="archived">
-                      {t("personaPresets.archived", "已归档")}
-                    </option>
-                  </select>
+                    onChange={(v) => setEditorStatus(v as PersonaPresetStatus)}
+                    options={[
+                      {
+                        value: "draft",
+                        label: t("personaPresets.draft", "草稿"),
+                      },
+                      {
+                        value: "published",
+                        label: t("personaPresets.published", "已发布"),
+                      },
+                      {
+                        value: "archived",
+                        label: t("personaPresets.archived", "已归档"),
+                      },
+                    ]}
+                  />
                 </div>
               )}
             </div>

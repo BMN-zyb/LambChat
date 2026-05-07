@@ -61,31 +61,34 @@
 }
 
 .glass-input {
-  background: color-mix(in srgb, white 68%, transparent);
-  border: 1px solid var(--glass-border);
+  background: var(--theme-bg);
+  border: 1px solid var(--theme-border);
   border-radius: 0.625rem;
+  color: var(--theme-text);
   transition:
     border-color 0.2s ease,
     box-shadow 0.2s ease,
     background-color 0.2s ease;
 }
 
+.glass-input::placeholder {
+  color: var(--theme-text-secondary);
+}
+
 .glass-input:focus {
-  border-color: var(--glass-border-hover);
-  background: color-mix(in srgb, white 82%, transparent);
-  box-shadow: 0 0 0 3px
-    color-mix(in srgb, var(--theme-primary) 10%, transparent);
+  border-color: var(--theme-primary);
+  box-shadow: 0 0 0 2px
+    color-mix(in srgb, var(--theme-primary) 20%, transparent);
   outline: none;
 }
 
 .dark .glass-input {
-  background: color-mix(in srgb, var(--theme-bg-card) 60%, transparent);
+  background: var(--theme-primary-light);
 }
 
 .dark .glass-input:focus {
-  background: color-mix(in srgb, var(--theme-bg-card) 72%, transparent);
-  box-shadow: 0 0 0 3px
-    color-mix(in srgb, var(--theme-primary) 14%, transparent);
+  box-shadow: 0 0 0 2px
+    color-mix(in srgb, var(--theme-primary) 20%, transparent);
 }
 
 .glass-pill {

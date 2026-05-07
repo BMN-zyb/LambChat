@@ -116,9 +116,9 @@ export function ChannelsPage() {
 
   const closeSidebar = () => {
     if (selectedChannel) {
-      navigate(`/channels/${selectedChannel}`);
+      navigate(`/channels/${selectedChannel}`, { replace: true });
     } else {
-      navigate("/channels");
+      navigate("/channels", { replace: true });
     }
   };
 

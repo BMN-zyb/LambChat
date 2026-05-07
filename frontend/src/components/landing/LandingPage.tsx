@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import { ImageViewer } from "../common/ImageViewer";
 import { useAuth } from "../../hooks/useAuth";
+import { useSEO } from "../../hooks/usePageTitle";
 import { useScrollReveal } from "./hooks/useScrollReveal";
 import { useScrollProgress } from "./hooks/useScrollProgress";
 import { useActiveSection } from "./hooks/useActiveSection";
@@ -19,6 +20,12 @@ import { Footer } from "./components/Footer";
 import { ScrollButtons } from "./components/ScrollButtons";
 
 export function LandingPage() {
+  useSEO({
+    title: "seo.landing.title",
+    description: "seo.landing.description",
+    path: "/",
+    omitSuffix: true,
+  });
   const navigate = useNavigate();
   const containerRef = useScrollReveal();
   const { isAuthenticated, isLoading } = useAuth();

@@ -5,7 +5,6 @@ import {
   Send,
   ChevronLeft,
   ChevronRight,
-  ChevronDown,
   ListOrdered,
   Clock,
 } from "lucide-react";
@@ -15,6 +14,7 @@ import remarkGfm from "remark-gfm";
 import remarkBreaks from "remark-breaks";
 import type { PendingApproval, FormField } from "../../types";
 import { Checkbox } from "../common/Checkbox";
+import { GlassSelect } from "../common/GlassSelect";
 import { authFetch } from "../../services/api/fetch";
 
 interface ApprovalPanelProps {
@@ -120,32 +120,31 @@ function FormFieldRenderer({
       );
     case "select":
       return (
-        <div className="relative">
-          <select
-            value={(value as string) ?? ""}
-            onChange={(e) => {
-              interact();
-              onChange(e.target.value);
-            }}
-            onFocus={interact}
-            disabled={disabled}
-            className={`${cls} appearance-none pr-8`}
-          >
-            <option value="" disabled>
-              {field.placeholder || "Select an option"}
-            </option>
-            {field.options?.map((option) => (
-              <option key={option} value={option}>
-                {option}
-              </option>
-            ))}
-          </select>
-          <ChevronDown
-            size={14}
-            className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2"
-            style={{ color: "var(--theme-text-secondary)" }}
-          />
-        </div>
+        <GlassSelect
+          value={(value as string) ?? ""}
+          onChange={(v) => {
+            interact();
+            onChange(v);
+          }}
+          disabled={disabled}
+          className="w-full"
+          placeholder={field.placeholder || "Select an option"}
+          options={[
+            ...(field.placeholder
+              ? [
+                  {
+                    value: "",
+                    label: field.placeholder,
+                    disabled: true,
+                  },
+                ]
+              : []),
+            ...(field.options?.map((option) => ({
+              value: option,
+              label: option,
+            })) ?? []),
+          ]}
+        />
       );
     case "multi_select": {
       const selectedValues = (value as string[]) ?? [];

@@ -8,6 +8,7 @@ import type {
   MCPRoleQuota,
   MCPTransport,
 } from "../../types";
+import { GlassSelect } from "../common/GlassSelect";
 import { EnvKeysSelector } from "./EnvKeysSelector";
 import { RoleSelector } from "./RoleSelector";
 
@@ -306,20 +307,15 @@ export function MCPServerForm({
       {/* Transport Type */}
       <div className="es-field">
         <label className="es-label">{t("mcp.form.transportType")}</label>
-        <div className="relative">
-          <select
-            value={transport}
-            onChange={(e) => setTransport(e.target.value as MCPTransport)}
-            disabled={isEditing}
-            className="glass-input es-select"
-          >
-            {availableTransports.map((tr) => (
-              <option key={tr.value} value={tr.value}>
-                {tr.label}
-              </option>
-            ))}
-          </select>
-        </div>
+        <GlassSelect
+          value={transport}
+          onChange={(v) => setTransport(v as MCPTransport)}
+          options={availableTransports.map((tr) => ({
+            value: tr.value,
+            label: tr.label,
+          }))}
+          disabled={isEditing}
+        />
         {isEditing && (
           <p className="es-hint">{t("mcp.form.transportUneditable")}</p>
         )}

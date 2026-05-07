@@ -5,24 +5,112 @@ import { APP_NAME } from "../constants";
 const DEFAULT_DESCRIPTION =
   "A pluggable, multi-tenant AI conversation system. Skills + MCP dual-engine driven, modular by design.";
 
-function setMetaDescription(content: string) {
-  const selectors = [
-    'meta[name="description"]',
-    'meta[property="og:description"]',
-    'meta[name="twitter:description"]',
-  ];
-  selectors.forEach((selector) => {
-    const el = document.querySelector(selector);
-    if (el) el.setAttribute("content", content);
+const DEFAULT_OG_TYPE = "website";
+
+function setMetaContent(selector: string, content: string) {
+  const el = document.querySelector(selector);
+  if (el) el.setAttribute("content", content);
+}
+
+function setOrCreateMeta(
+  attr: string,
+  attrValue: string,
+  content: string,
+  tagName: string = "meta",
+) {
+  let el = document.querySelector(
+    `${tagName}[${attr}="${attrValue}"]`,
+  ) as HTMLElement | null;
+  if (!el) {
+    el = document.createElement(tagName) as HTMLElement;
+    el.setAttribute(attr, attrValue);
+    document.head.appendChild(el);
+  }
+  el.setAttribute("content", content);
+}
+
+function setOrCreateLink(rel: string, href: string) {
+  let el = document.querySelector(
+    `link[rel="${rel}"]`,
+  ) as HTMLLinkElement | null;
+  if (!el) {
+    el = document.createElement("link");
+    el.setAttribute("rel", rel);
+    document.head.appendChild(el);
+  }
+  el.setAttribute("href", href);
+}
+
+function setRobots(noindex: boolean, nofollow: boolean) {
+  const content = `${noindex ? "noindex" : "index"}, ${
+    nofollow ? "nofollow" : "follow"
+  }`;
+  setMetaContent('meta[name="robots"]', content);
+  setMetaContent('meta[name="googlebot"]', content);
+}
+
+export interface SEOConfig {
+  title: string;
+  description?: string;
+  path?: string;
+  ogType?: string;
+  noindex?: boolean;
+  omitSuffix?: boolean;
+}
+
+export function useSEO(config: SEOConfig) {
+  const { t } = useTranslation();
+
+  useEffect(() => {
+    const {
+      title,
+      description,
+      path,
+      ogType = DEFAULT_OG_TYPE,
+      noindex = false,
+      omitSuffix = false,
+    } = config;
+
+    const translatedTitle = title ? t(title) : APP_NAME;
+    const fullTitle = omitSuffix
+      ? translatedTitle
+      : `${translatedTitle} - ${APP_NAME}`;
+
+    document.title = fullTitle;
+
+    const desc = description ? t(description) : DEFAULT_DESCRIPTION;
+
+    setMetaContent('meta[name="description"]', desc);
+    setOrCreateMeta("property", "og:title", fullTitle);
+    setOrCreateMeta("property", "og:description", desc);
+    setOrCreateMeta("property", "og:type", ogType);
+    setOrCreateMeta("name", "twitter:title", fullTitle);
+    setMetaContent('meta[name="twitter:description"]', desc);
+
+    if (path) {
+      const url = `${window.location.origin}${path}`;
+      setOrCreateMeta("property", "og:url", url);
+      setOrCreateLink("canonical", url);
+    }
+
+    if (noindex) {
+      setRobots(true, true);
+    }
+
+    return () => {
+      document.title = APP_NAME;
+      setMetaContent('meta[name="description"]', DEFAULT_DESCRIPTION);
+      setOrCreateMeta("property", "og:title", APP_NAME);
+      setOrCreateMeta("property", "og:description", DEFAULT_DESCRIPTION);
+      setOrCreateMeta("property", "og:type", DEFAULT_OG_TYPE);
+      setOrCreateMeta("name", "twitter:title", APP_NAME);
+      setMetaContent('meta[name="twitter:description"]', DEFAULT_DESCRIPTION);
+      setMetaContent('meta[name="robots"]', "index, follow");
+      setMetaContent('meta[name="googlebot"]', "index, follow");
+    };
   });
 }
 
-/**
- * 设置页面标题和描述的 Hook，支持 i18n
- * @param title 页面标题，可以是翻译 key 或直接字符串
- * @param suffix 标题后缀，默认 "LambChat"
- * @param options i18n 选项
- */
 export function usePageTitle(
   title: string,
   suffix: string = APP_NAME,
@@ -43,12 +131,16 @@ export function usePageTitle(
 
     const desc = description && (isI18nKey ? t(description) : description);
     if (desc) {
-      setMetaDescription(desc);
+      setMetaContent('meta[name="description"]', desc);
+      setMetaContent('meta[property="og:description"]', desc);
+      setMetaContent('meta[name="twitter:description"]', desc);
     }
 
     return () => {
       document.title = isI18nKey ? t("appName") || suffix : suffix;
-      setMetaDescription(DEFAULT_DESCRIPTION);
+      setMetaContent('meta[name="description"]', DEFAULT_DESCRIPTION);
+      setMetaContent('meta[property="og:description"]', DEFAULT_DESCRIPTION);
+      setMetaContent('meta[name="twitter:description"]', DEFAULT_DESCRIPTION);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [title, suffix, isI18nKey, description]);

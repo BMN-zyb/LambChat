@@ -6,13 +6,13 @@ import {
   Search,
   AlertCircle,
   Check,
-  ChevronDown,
   Download,
   Upload,
   Info,
 } from "lucide-react";
 import { AboutDialog } from "../common/AboutDialog";
 import { ConfirmDialog } from "../common/ConfirmDialog";
+import { GlassSelect } from "../common/GlassSelect";
 import { LoadingSpinner } from "../common/LoadingSpinner";
 import { PanelLoadingState } from "../common/PanelLoadingState";
 import toast from "react-hot-toast";
@@ -533,26 +533,16 @@ export function SettingsPanel() {
           <div className="flex-shrink-0 border-b border-[var(--glass-border)] p-3 sm:p-4">
             {/* Mobile Category Selector */}
             <div className="mb-2 sm:hidden">
-              <div className="relative">
-                <select
-                  value={activeCategory}
-                  onChange={(e) =>
-                    setActiveCategory(e.target.value as SettingCategory)
-                  }
-                  className="w-full appearance-none rounded-lg border border-[var(--glass-border)] bg-[var(--glass-bg-subtle)] py-2 pl-3 pr-8 text-sm font-medium text-stone-900 focus:outline-none dark:text-stone-100"
-                >
-                  {CATEGORY_ORDER.map((category) => (
-                    <option key={category} value={category}>
-                      {CATEGORY_LABELS[category]} (
-                      {settings?.settings[category]?.length ?? 0})
-                    </option>
-                  ))}
-                </select>
-                <ChevronDown
-                  size={18}
-                  className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-stone-400 dark:text-stone-500"
-                />
-              </div>
+              <GlassSelect
+                value={activeCategory}
+                onChange={(v) => setActiveCategory(v as SettingCategory)}
+                options={CATEGORY_ORDER.map((category) => ({
+                  value: category,
+                  label: `${CATEGORY_LABELS[category]} (${
+                    settings?.settings[category]?.length ?? 0
+                  })`,
+                }))}
+              />
             </div>
 
             {/* Search and Export/Import */}
@@ -698,51 +688,40 @@ export function SettingsPanel() {
                           {/* Edit Input */}
                           <div className="mt-3">
                             {isSelect && (
-                              <div className="relative">
-                                <select
-                                  value={getDisplayValue(setting)}
-                                  onChange={(e) =>
-                                    handleValueChange(
-                                      setting.key,
-                                      e.target.value,
-                                      setting.type === "select"
-                                        ? "string"
-                                        : setting.type,
-                                    )
-                                  }
-                                  disabled={!canManage}
-                                  className="w-full appearance-none rounded-lg border border-[var(--glass-border)] bg-[var(--theme-bg-card)] py-2 pl-3 pr-9 text-sm text-stone-900 focus:outline-none disabled:cursor-not-allowed disabled:opacity-60 dark:text-stone-100"
-                                >
-                                  {setting.key === "DEFAULT_AGENT" ? (
-                                    agents.map((agent) => (
-                                      <option key={agent.id} value={agent.id}>
-                                        {t(agent.name || agent.id)}
-                                      </option>
-                                    ))
-                                  ) : setting.key === "DEFAULT_USER_ROLE" ? (
-                                    roles.map((role) => (
-                                      <option key={role.id} value={role.name}>
-                                        {role.name}
-                                      </option>
-                                    ))
-                                  ) : setting.type === "boolean" ? (
-                                    <>
-                                      <option value="true">true</option>
-                                      <option value="false">false</option>
-                                    </>
-                                  ) : (
-                                    setting.options?.map((opt) => (
-                                      <option key={opt} value={opt}>
-                                        {opt}
-                                      </option>
-                                    ))
-                                  )}
-                                </select>
-                                <ChevronDown
-                                  size={16}
-                                  className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-stone-400 dark:text-stone-500"
-                                />
-                              </div>
+                              <GlassSelect
+                                value={getDisplayValue(setting)}
+                                onChange={(v) =>
+                                  handleValueChange(
+                                    setting.key,
+                                    v,
+                                    setting.type === "select"
+                                      ? "string"
+                                      : setting.type,
+                                  )
+                                }
+                                disabled={!canManage}
+                                options={
+                                  setting.key === "DEFAULT_AGENT"
+                                    ? agents.map((agent) => ({
+                                        value: agent.id,
+                                        label: t(agent.name || agent.id),
+                                      }))
+                                    : setting.key === "DEFAULT_USER_ROLE"
+                                      ? roles.map((role) => ({
+                                          value: role.name,
+                                          label: role.name,
+                                        }))
+                                      : setting.type === "boolean"
+                                        ? [
+                                            { value: "true", label: "true" },
+                                            { value: "false", label: "false" },
+                                          ]
+                                        : setting.options?.map((opt) => ({
+                                            value: opt,
+                                            label: opt,
+                                          })) ?? []
+                                }
+                              />
                             )}
                             {setting.type === "text" && (
                               <textarea

@@ -485,12 +485,16 @@ async def test_channel_instance_connection(
     if not config.get("enabled", True):
         raise HTTPException(status_code=400, detail="Channel instance is disabled")
 
-    # Check if connected
+    # Check if connected; if not, attempt to start the channel
     manager_class = registry.get_manager_class(channel_type)
     if manager_class:
         try:
             manager = manager_class.get_instance()
             connected = manager.is_connected(user.sub, instance_id)
+
+            if not connected:
+                await manager.reload_user(user.sub, instance_id)
+                connected = manager.is_connected(user.sub, instance_id)
 
             if connected:
                 return {

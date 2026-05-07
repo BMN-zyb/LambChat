@@ -2026,5 +2026,71 @@
       "enterUsername": "请输入用户名",
       "passwordMinLength": "密码至少需要6个字符"
     }
+  },
+  "seo": {
+    "landing": {
+      "title": "LambChat - AI 智能体平台",
+      "description": "LambChat 是一个可插拔的多租户 AI 对话平台，由 Skills + MCP 双引擎驱动。支持 Claude、GPT、Gemini 等多种模型，实时 SSE 流式输出，多智能体协作与模块化技能系统。"
+    },
+    "chat": {
+      "title": "AI 对话",
+      "description": "与 AI 智能体进行智能对话。支持多模型切换、实时流式响应、会话管理、文件上传和多智能体协作。"
+    },
+    "skills": {
+      "title": "技能管理",
+      "description": "创建、配置和管理 AI 技能。通过提示词工程、工具集成和模块化技能组合，构建强大的自定义能力。"
+    },
+    "marketplace": {
+      "title": "技能市场",
+      "description": "发现并安装社区构建的 AI 技能。浏览、评分和部署预构建能力，扩展 AI 智能体功能。"
+    },
+    "agents": {
+      "title": "AI 智能体",
+      "description": "配置和管理 AI 智能体。设置系统提示词、选择模型、定义工具，编排多智能体工作流以处理复杂任务。"
+    },
+    "models": {
+      "title": "模型管理",
+      "description": "管理大语言模型配置。连接和切换 Claude、GPT、Gemini 等模型，统一 API 抽象层。"
+    },
+    "mcp": {
+      "title": "MCP 服务器管理",
+      "description": "管理模型上下文协议服务器连接。连接外部工具、数据库和服务，扩展 AI 智能体能力。"
+    },
+    "persona": {
+      "title": "人设预设",
+      "description": "选择和自定义 AI 人设。定义个性、语气、专业领域和行为模式，打造专属对话体验。"
+    },
+    "files": {
+      "title": "文件库",
+      "description": "上传、组织和管理 AI 工作空间中的文件。与 AI 智能体共享文档、图像和媒体，进行分析和处理。"
+    },
+    "memory": {
+      "title": "AI 记忆空间",
+      "description": "查看和管理 AI 记忆内容。持久化上下文和知识存储，实现跨对话的 AI 智能体长期理解。"
+    },
+    "users": {
+      "title": "用户管理",
+      "description": "管理用户账户、角色和访问权限。管理多租户用户生命周期和安全设置。"
+    },
+    "roles": {
+      "title": "角色与权限",
+      "description": "配置角色和细粒度权限。定义团队、资源和管​​理功能的访问控制策略。"
+    },
+    "settings": {
+      "title": "系统设置",
+      "description": "配置应用和系统设置。管理全局偏好、集成、安全策略和平台行为。"
+    },
+    "feedback": {
+      "title": "用户反馈",
+      "description": "查看和管理用户反馈。跟踪功能请求、错误报告和用户满意度，推动产品改进。"
+    },
+    "channels": {
+      "title": "通信渠道",
+      "description": "管理通信渠道。连接外部消息平台和通知服务，实现多渠道 AI 交互。"
+    },
+    "notifications": {
+      "title": "通知中心",
+      "description": "管理系统公告和通知。获取平台新闻、警报和重要消息的实时更新。"
+    }
   }
 }

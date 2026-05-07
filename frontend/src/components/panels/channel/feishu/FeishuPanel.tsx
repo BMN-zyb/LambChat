@@ -649,7 +649,7 @@ export function FeishuPanel({
                   : "border-[var(--theme-border)] bg-[var(--theme-bg-card)] hover:bg-[var(--glass-bg-subtle)]"
               }`}
             >
-              <div className="flex h-7 w-7 items-center justify-center rounded-md bg-[var(--glass-bg-subtle)] text-sm font-medium">
+              <div className="flex h-7 w-7 items-center justify-center rounded-md bg-[var(--glass-bg-subtle)] text-sm font-medium text-[var(--theme-text-secondary)]">
                 @
               </div>
               <div className="min-w-0">

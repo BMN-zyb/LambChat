@@ -2,7 +2,7 @@
 
 # 🐑 LambChat
 
-**基于 FastAPI + deepagents 构建的生产级 AI Agent 系统**
+**一个开源、生产可用的 AI Agent 平台，用来构建、运行并分享真正会调用工具的智能体**
 
 [![Python](https://img.shields.io/badge/Python-3.12+-blue.svg)]()
 [![React](https://img.shields.io/badge/React-19-green.svg)]()
@@ -27,13 +27,23 @@
 | <img src="docs/images/best-practice/roles-page.webp" width="280" alt="角色"><br>**角色管理** | <img src="docs/images/best-practice/settings-page.webp" width="280" alt="设置"><br>**系统设置** | <img src="docs/images/best-practice/feedback-page.webp" width="280" alt="反馈"><br>**反馈** |
 | <img src="docs/images/best-practice/mobile-view.webp" width="200" alt="移动端"><br>**移动端** | <img src="docs/images/best-practice/tablet-view.webp" width="280" alt="平板"><br>**平板端** | <img src="docs/images/best-practice/shared-page.webp" width="280" alt="分享页"><br>**会话分享** |
 
+## 🌟 为什么选择 LambChat
+
+LambChat 不只是一个聊天界面，而是一整套可落地的 AI Agent 系统。它把模型管理、MCP 接入、技能系统、文件存储、分享机制、人工审批，以及生产可用的前后端基础设施整合进了一个项目里。
+
+- **面向真实执行** — Agent 可以思考、调用工具、分派子 Agent、流式输出，并在需要时接入人工审批。
+- **面向生产运维** — 自带鉴权、RBAC、密钥加密、链路追踪、健康检查、沙箱集成和分布式配置同步。
+- **面向扩展定制** — 自定义 Agent、MCP 工具、技能、模型供应商、渠道、人格预设、存储后端都可以自然扩展。
+- **面向产品体验** — 聊天界面、文件预览、项目文件夹、会话分享、反馈、多端响应式和多语言能力都已经具备。
+
 ## 🎬 实战案例
 
 | # | 案例 | 说明 | 演示 |
 |---|------|------|------|
-| 1 | PDF 商业报告生成 | Agent 自动读取 Skill 说明 → 安装依赖 → 生成 8 张专业图表 → 编写 LaTeX 源码 → 编译为 14 页 PDF 商业报告，全程零人工干预。 | [查看会话](https://lambchat.com/shared/Yaotot5Fav8j) |
-| 2 | PPT 商业演示文稿 | 基于供应链数据，Agent 独立完成 14 页商务 PPT，包含数据表格、图表、分析卡片和行动路线图。 | [查看会话](https://lambchat.com/shared/VOjediSYBHR1) |
-| 3 | 静态博客网站搭建 | 从零搭建完整个人博客（5 个页面 + 8 篇示例文章），包含标签筛选、分页、响应式布局和交互效果，10 个子任务全部自动完成。 | [查看会话](https://lambchat.com/shared/NuzvONPqCZLU) |
+| 1 | 供应链效率分析 PDF 报告 | 从一句需求出发，自动生成图表、基准对比和完整交付物，输出可直接使用的供应链效率分析 PDF 报告。 | [查看会话](https://lambchat.com/shared/w0WA7GtMCyca) |
+| 2 | 教父三部曲主题英文网站 | 自动搭建面向影迷的英文专题网页，包含电影感视觉风格、跑马灯 Hero、生成图片和多端适配。 | [查看会话](https://lambchat.com/shared/9XlmaDANCjO9) |
+| 3 | 图片内容故事全解 | 基于图片进行多模态理解，识别其中包含的故事，并输出逐个展开的详细剧情讲解。 | [查看会话](https://lambchat.com/shared/MZX-eNnOoilN) |
+| 4 | 新能源汽车市场趋势分析 | 基于 2025-2026 最新数据整理结构化市场洞察，覆盖增长趋势、区域表现和行业关键信号。 | [查看会话](https://lambchat.com/shared/5XUeuDEyd2CY) |
 
 ## 🏗️ 系统架构
 
@@ -42,90 +52,73 @@
 ## ✨ 核心特性
 
 <details>
-<summary><b>🤖 Agent 系统</b></summary>
+<summary><b>🤖 Agent 运行时</b></summary>
 
-- **deepagents 架构** — 编译图架构，细粒度状态管理
-- **多 Agent 类型** — 核心 / 快速 / 搜索 Agent
-- **插件系统** — `@register_agent("id")` 装饰器注册自定义 Agent
+- **deepagents 架构** — 编译图运行时，支持细粒度状态管理
+- **多 Agent 类型** — 核心、快速、搜索 Agent
+- **插件系统** — 通过 `@register_agent("id")` 注册自定义 Agent
 - **流式输出** — 原生 SSE 支持
-- **子 Agent** — 多层级嵌套
+- **子 Agent** — 多层级委派
 - **思考模式** — 支持 Anthropic 扩展思考
 - **人工审批** — 带倒计时、自动延期和紧急状态样式的审批系统
+- **人格预设** — 支持可复用的人格配置、权限控制和运行时绑定
 
 </details>
 
 <details>
-<summary><b>🧠 模型管理</b></summary>
+<summary><b>🧠 模型、记忆与技能</b></summary>
 
-- **多供应商** — OpenAI、Anthropic、Google Gemini、Kimi（月之暗面）
-- **完整 CRUD** — 通过 UI 创建、编辑、删除、批量导入模型，支持每模型独立配置（api_key、api_base、temperature、max_tokens）
-- **渠道路由** — 同一模型通过 `model_id` 路由支持多个渠道
-- **角色权限** — `MODEL_ADMIN` 权限，按角色控制模型可见性
-- **用户偏好** — 默认模型选择跨会话持久化
-- **实时同步** — Redis 分布式发布/订阅实时更新模型配置
-- **拖拽排序** — 模型选择器中拖拽重排模型顺序
-
-</details>
-
-<details>
-<summary><b>🔌 MCP 集成</b></summary>
-
-- **系统级 + 用户级** — 全局和个人 MCP 配置
-- **加密存储** — API Key 加密存储
-- **动态缓存** — 工具缓存，支持手动刷新
-- **多种传输** — SSE / HTTP
-- **权限控制** — 传输协议级别访问控制
-- **导入导出** — 批量 MCP 配置管理
+- **多模型供应商** — OpenAI、Anthropic、Google Gemini、Kimi
+- **完整 CRUD** — 通过 UI 创建、编辑、删除、排序和批量导入模型
+- **渠道路由** — 同一模型可通过 `model_id` 在不同渠道复用
+- **角色权限** — `MODEL_ADMIN` 权限和按角色控制模型可见性
+- **跨会话记忆** — 原生、hindsight、memu 三种记忆后端
+- **技能双存储** — 文件系统 + MongoDB 备份
+- **GitHub 同步** — 从 GitHub 导入自定义技能
+- **技能市场** — 浏览、安装、发布以及批量管理技能
 
 </details>
 
 <details>
-<summary><b>🛠️ 技能系统</b></summary>
+<summary><b>🔌 工具、MCP 与执行能力</b></summary>
 
-- **双存储** — 文件系统 + MongoDB 备份
-- **访问控制** — 用户级别权限
-- **GitHub 同步** — 从 GitHub 同步自定义技能
-- **技能创建** — 内置创建工具包，含评估和基准测试
-- **技能市场** — 浏览、安装和发布技能
-- **批量操作** — 批量启用/禁用/删除技能
-
-</details>
-
-<details>
-<summary><b>💬 反馈 · 📁 文件 · 🔄 实时 · 🔐 认证 · ⚙️ 任务 · 📊 可观测性</b></summary>
-
-- **反馈** — 点赞评分、文字评论、会话关联、运行级别统计
-- **文件库** — 浏览已揭示文件、代码预览，支持网格/列表视图、收藏、项目级筛选
-- **文档** — PDF / Word / Excel / PPT / Markdown / Mermaid / Excalidraw 预览 + 图片查看器
-- **云存储** — S3 / OSS / MinIO / COS 集成，拖拽上传，预签名 URL
-- **项目文件夹** — 拖拽方式将会话组织到项目中
-- **会话分享** — 生成公开分享链接
-- **实时** — 双写机制（Redis + MongoDB）、WebSocket、自动重连、会话分享
-- **安全** — JWT、RBAC（15 组 35+ 细粒度权限）、bcrypt、OAuth（Google/GitHub/Apple）、邮箱验证、验证码、沙箱
-- **任务** — 并发控制、任务取消、心跳监控、发布/订阅通知
-- **可观测性** — LangSmith 链路追踪、结构化日志、健康检查
-- **渠道** — 飞书原生集成，支持模型选择器、项目绑定、基于时间的会话标题，可扩展多渠道系统
+- **系统级 + 用户级 MCP** — 支持全局和个人 MCP 配置
+- **加密存储** — API Key 静态加密存储
+- **动态工具缓存** — MCP 工具缓存与手动刷新
+- **多种传输协议** — SSE 和 HTTP
+- **权限控制** — 传输层级的访问控制
+- **沙箱集成** — 支持 Daytona 和 E2B
+- **内置工具** — 文件揭示、项目揭示、上传 URL、环境变量、音频转写、人格预设工具等
 
 </details>
 
 <details>
-<summary><b>🎨 前端</b></summary>
+<summary><b>📁 产品功能</b></summary>
 
-- **React 19 + Vite 6 + TailwindCSS 3.4**
-- **ChatGPT 风格** 界面，深色/浅色主题切换
-- **毛玻璃设计系统** — 全局统一的 glass-shell/glass-card 风格
+- **文件库** — 浏览已揭示文件，支持代码预览、收藏和项目级筛选
+- **丰富预览** — PDF、Word、Excel、PPT、Markdown、Mermaid、Excalidraw、图片和视频播放
+- **项目文件夹** — 通过拖拽管理会话归属
+- **会话分享** — 一键生成公开分享链接
+- **反馈系统** — 点赞评分、文字评论、会话关联和运行级统计
+- **通知能力** — 内置站内通知存储和分发能力
+
+</details>
+
+<details>
+<summary><b>🔐 基础设施、实时能力与前端</b></summary>
+
+- **实时同步** — Redis + MongoDB 双写、WebSocket、自动重连和分享页实时更新
+- **安全** — JWT、RBAC、bcrypt、OAuth（Google/GitHub/Apple）、邮箱验证、验证码和沙箱控制
+- **可观测性** — LangSmith 链路追踪、结构化日志、健康检查和分布式内存诊断
+- **渠道系统** — 原生飞书集成，并支持可扩展的多渠道架构
+- **前端栈** — React 19、Vite 6、TailwindCSS 3.4，支持深浅主题、富内容渲染和多端响应式布局
 - **国际化** — 英文、中文、日文、韩文、俄文
-- **响应式** — 移动端、平板、桌面端统一组件渲染
-- **富内容** — KaTeX 数学公式、代码高亮、Mermaid 图表、表格复制/CSV 导出、图片预览灯箱、行高亮代码查看器
-- **工具面板** — 滑出式工具结果面板，支持居中/侧边视图模式和块预览门户
-- **骨架屏加载** — 骨架屏组件提升感知性能
-- **Landing 页面** — 高级博客风格首页，滚动动画和区域追踪
 
 </details>
 
 ## ⚙️ 配置说明
 
-支持 14+ 个设置分类，可通过 UI 或环境变量配置：
+支持多个设置分类，可通过 UI 或环境变量配置：
 
 | 分类 | 说明 |
 |------|------|
@@ -164,7 +157,7 @@ cp .env.example .env   # 编辑填写配置
 make install && make dev
 ```
 
-→ 打开 **http://localhost:8000**
+打开 **http://localhost:8000**
 
 ### 代码质量
 
@@ -176,41 +169,20 @@ mypy src/           # 类型检查
 
 ### 项目结构
 
-```
+```text
 src/
-├── agents/          # Agent 实现（核心、快速、搜索）
-├── api/             # FastAPI 路由与中间件
-│   ├── routes/      # 27 路由模块（auth、chat、mcp、skills、model 等）
-│   ├── admin/       # 管理 API 端点
-│   └── agent/       # Agent 配置与模型管理
-├── infra/           # 基础设施服务
-│   ├── agent/       # Agent 配置与事件
-│   ├── auth/        # JWT、OAuth、RBAC、验证码
-│   ├── backend/     # LLM 后端抽象
-│   ├── channel/     # 多渠道（飞书等）
-│   ├── email/       # 邮件服务（Resend）
-│   ├── envvar/      # 用户环境变量
-│   ├── feedback/    # 反馈系统
-│   ├── folder/      # 项目文件夹管理
-│   ├── llm/         # LLM 集成（OpenAI、Anthropic、Gemini、Kimi）
-│   ├── memory/      # 跨会话记忆（native、hindsight、memu）
-│   ├── model/       # 模型管理（加密存储、发布/订阅同步）
-│   ├── mcp/         # MCP 协议
-│   ├── role/        # RBAC 角色
-│   ├── sandbox/     # 沙箱执行（Daytona / E2B）
-│   ├── session/     # 会话管理（双写）
-│   ├── settings/    # 设置存储 + 发布/订阅同步
-│   ├── share/       # 分享链接
-│   ├── skill/       # 技能系统
-│   ├── storage/     # MongoDB、Redis、PostgreSQL、S3
-│   ├── task/        # 任务管理
-│   ├── tool/        # 工具注册与 MCP 客户端
-│   ├── tracing/     # LangSmith 链路追踪
-│   ├── upload/      # 文件上传处理
-│   ├── revealed_file/  # 文件库
-│   └── websocket/   # WebSocket 与限流
-├── kernel/          # 核心模型、配置、类型
-└── skills/          # 内置技能
+├── agents/         # Agent 实现与运行时图
+├── api/            # FastAPI 路由、管理接口、中间件
+├── infra/          # 认证、llm、mcp、工具、存储、任务、分享、记忆等核心服务
+├── kernel/         # Schema、配置、常量与共享类型
+└── skills/         # 内置技能
+frontend/
+├── src/components/ # UI 组件、面板、落地页模块
+├── src/hooks/      # 前端 hooks
+├── src/i18n/       # 多语言文案
+└── src/styles/     # 共享样式与设计变量
+tests/              # 后端与集成测试
+deploy/             # Docker 部署资源
 ```
 
 ## ⭐ Star History
@@ -231,10 +203,22 @@ src/
 
 <div align="center">
 
-Made with ❤️ by [Clivia](https://github.com/Yanyutin753)
+<sub><strong>LambChat</strong> 想做的，不只是能聊天的 AI，而是真正能把事情做完的 Agent。</sub>
 
-[📧 3254822118@qq.com](mailto:3254822118@qq.com) · [GitHub](https://github.com/Yanyutin753)
+<br>
 
-<img src=".github/images/wechat-qr.webp" width="150" alt="WeChat"><br><sub>💬 扫码添加微信（备注 LambChat）· 部署问题欢迎咨询</sub>
+<strong>Created by <a href="https://github.com/Yanyutin753">Clivia</a></strong>
+
+<br>
+
+<a href="https://github.com/Yanyutin753">GitHub</a> · <a href="mailto:3254822118@qq.com">邮箱</a> · <a href="README.md">English README</a>
+
+<br><br>
+
+<img src=".github/images/wechat-qr.webp" width="160" alt="WeChat QR Code">
+
+<br>
+
+<sub>欢迎交流部署、产品想法和合作，添加时备注 <strong>LambChat</strong></sub>
 
 </div>
