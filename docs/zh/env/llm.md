@@ -1,0 +1,50 @@
+# LLM 配置
+
+控制 LambChat 与语言模型交互方式的设置。
+
+## 模型提供商密钥
+
+这些变量由底层 LLM SDK 库直接使用（不经过 Settings 类）：
+
+| 变量名 | 说明 |
+|--------|------|
+| `LLM_API_KEY` | 默认 LLM API 密钥（由 LiteLLM 使用） |
+| `LLM_API_BASE` | 默认 LLM API 基础 URL（由 LiteLLM 使用） |
+| `LLM_MODEL` | 默认 LLM 模型名称，如 `anthropic/claude-sonnet-4-6` |
+| `ANTHROPIC_API_KEY` | Anthropic API 密钥（由 `langchain-anthropic` 使用） |
+| `ANTHROPIC_BASE_URL` | Anthropic 兼容的 API 基础 URL |
+
+::: tip
+LambChat 支持通过 UI 进行多模型管理。以上环境变量设置的是**默认**提供商。用户可以在运行时通过设置面板添加额外的提供商和模型。
+:::
+
+## 重试与缓存设置
+
+| 变量名 | 默认值 | 说明 |
+|--------|--------|------|
+| `LLM_MAX_RETRIES` | `3` | API 失败时的最大重试次数。 |
+| `LLM_RETRY_DELAY` | `1.0` | 重试之间的延迟（秒）。 |
+| `LLM_MODEL_CACHE_SIZE` | `50` | 模型实例缓存大小。防止重复实例化导致的内存泄漏。 |
+| `LLM_MAX_INPUT_TOKENS` | _(无)_ | 可选：DeepAgent 自动摘要的上下文窗口大小。 |
+| `LLM_TEMPERATURE` | _(无)_ | 可选：LLM 调用的默认温度。 |
+| `LLM_MAX_TOKENS` | _(无)_ | 可选：LLM 调用的最大输出 token 数。 |
+
+## 提示缓存设置
+
+| 变量名 | 默认值 | 说明 |
+|--------|--------|------|
+| `PROMPT_CACHE_MAX_SYSTEM_BLOCKS` | `12` | 最大缓存系统提示块数。 |
+| `PROMPT_CACHE_MAX_TOOLS` | `12` | 最大缓存工具定义数。 |
+| `DEEPAGENT_DEFAULT_MAX_INPUT_TOKENS` | `64000` | DeepAgent 默认最大输入 token 数。 |
+
+## 示例
+
+```bash
+# .env
+LLM_API_KEY=sk-your-api-key
+LLM_API_BASE=https://api.openai.com/v1
+LLM_MODEL=gpt-4o
+LLM_MAX_RETRIES=3
+LLM_RETRY_DELAY=1.0
+LLM_MODEL_CACHE_SIZE=50
+```
