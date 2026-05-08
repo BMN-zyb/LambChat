@@ -22,6 +22,7 @@ import { useTheme } from "../../../contexts/ThemeContext";
 import { useSettingsContext } from "../../../contexts/SettingsContext";
 import { authApi } from "../../../services/api";
 import { notificationApi } from "../../../services/api/notification";
+import { useSessionTitle } from "../../../hooks/useSessionTitle";
 import { NotificationDialog } from "../../notification/NotificationDialog";
 import { Permission } from "../../../types";
 import type { TabType } from "./types";
@@ -46,7 +47,6 @@ interface HeaderProps {
   currentModelId?: string;
   onSelectModel?: (modelId: string, modelValue: string) => void;
   sessionId?: string | null;
-  sessionName?: string | null;
   onToggleOutline?: () => void;
   showOutlineButton?: boolean;
 }
@@ -62,7 +62,6 @@ export function Header({
   currentModelId,
   onSelectModel,
   sessionId,
-  sessionName,
   onToggleOutline,
   showOutlineButton,
 }: HeaderProps) {
@@ -122,6 +121,9 @@ export function Header({
     Permission.SESSION_SHARE,
   );
   const showShareButton = !!sessionId && hasSharePermission;
+  const sessionTitle = useSessionTitle(sessionId, {
+    enabled: showShareButton,
+  });
 
   return (
     <>
@@ -407,7 +409,7 @@ export function Header({
           isOpen={shareDialogOpen}
           onClose={() => setShareDialogOpen(false)}
           sessionId={sessionId}
-          sessionName={sessionName || t("sidebar.newChat")}
+          sessionName={sessionTitle || t("sidebar.newChat")}
         />
       )}
 

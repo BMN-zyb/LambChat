@@ -767,7 +767,6 @@ export function SharedPage() {
                   <ChatMessage
                     message={message}
                     sessionId={data.session.id}
-                    sessionName={data.session.name}
                     runId={data.run_ids?.[0]}
                     isLastMessage={index === messages.length - 1}
                     personaAvatar={data.session.persona_avatar ?? null}
@@ -775,6 +774,7 @@ export function SharedPage() {
                     activePreview={activePreview}
                     latestAutoPreview={latestAutoPreview}
                     onOpenPreview={handleOpenPreview}
+                    showFeedbackAndShareActions={false}
                   />
                 </div>
               ))}

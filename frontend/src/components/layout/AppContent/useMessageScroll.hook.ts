@@ -62,6 +62,7 @@ export function useMessageScroll(
   externalNavigationTargetRunPending = false,
   externalScrollToBottom = false,
   isLoadingHistory = false,
+  sessionBottomScrollToken?: string | null,
 ): UseMessageScrollReturn {
   const MOBILE_BOTTOM_BREATHING_ROOM_PX = 96;
   const DESKTOP_BOTTOM_BREATHING_ROOM_PX = 16;
@@ -109,6 +110,7 @@ export function useMessageScroll(
   const historyLoadActiveRef = useRef(isLoadingHistory);
   const historyScrollArmedRef = useRef(false);
   const isLoadingHistoryRef = useRef(isLoadingHistory);
+  const handledSessionBottomScrollTokenRef = useRef<string | null>(null);
 
   const latestMessage = messages[messages.length - 1];
   const hasStreamingAssistantMessage =
@@ -559,6 +561,57 @@ export function useMessageScroll(
       };
     }
   }, [isLoadingHistory, messages.length, requestScrollToBottom]);
+
+  useEffect(() => {
+    if (sessionBottomScrollToken && externalNavigationToken) {
+      handledSessionBottomScrollTokenRef.current = sessionBottomScrollToken;
+      return;
+    }
+
+    if (
+      !sessionBottomScrollToken ||
+      handledSessionBottomScrollTokenRef.current === sessionBottomScrollToken ||
+      messages.length === 0 ||
+      isLoadingHistory ||
+      externalNavigationToken
+    ) {
+      return;
+    }
+
+    let raf1 = 0;
+    let raf2 = 0;
+    let settled = false;
+
+    const tryScroll = () => {
+      if (settled) return;
+      if (!virtuosoRef.current || !virtuosoScrollerRef.current) {
+        raf1 = requestAnimationFrame(() => {
+          raf2 = requestAnimationFrame(tryScroll);
+        });
+        return;
+      }
+
+      settled = true;
+      handledSessionBottomScrollTokenRef.current = sessionBottomScrollToken;
+      requestScrollToBottom("history-finalize");
+    };
+
+    raf1 = requestAnimationFrame(() => {
+      raf2 = requestAnimationFrame(tryScroll);
+    });
+
+    return () => {
+      settled = true;
+      cancelAnimationFrame(raf1);
+      cancelAnimationFrame(raf2);
+    };
+  }, [
+    externalNavigationToken,
+    isLoadingHistory,
+    messages.length,
+    requestScrollToBottom,
+    sessionBottomScrollToken,
+  ]);
 
   useEffect(() => {
     const previousMessages = previousMessagesRef.current;

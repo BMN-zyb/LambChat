@@ -1,10 +1,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, resolve } from "node:path";
 import {
   getInitialUrlSyncCompletionAction,
   getSessionRouteSyncAction,
   shouldLoadSessionFromUrlChange,
 } from "../useSessionSync.ts";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 test("does not restore a chat route after the user already navigated away", () => {
   assert.equal(
@@ -90,4 +95,13 @@ test("clears external navigation state after the initial url sync finishes on ch
       path: "/chat/session-123",
     },
   );
+});
+
+test("session selection does not issue page-level scroll resets", () => {
+  const source = readFileSync(
+    resolve(__dirname, "../useSessionSync.ts"),
+    "utf8",
+  );
+
+  assert.doesNotMatch(source, /window\.scrollTo/);
 });

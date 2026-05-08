@@ -81,7 +81,6 @@ import { shouldOpenExternalNavigationPreview } from "./externalNavigationState";
 interface ChatViewProps {
   messages: Message[];
   sessionId: string | null;
-  sessionName: string | null;
   currentRunId: string | null;
   isLoading: boolean;
   isLoadingHistory: boolean;
@@ -165,7 +164,6 @@ interface ChatViewProps {
 export function ChatView({
   messages,
   sessionId,
-  sessionName,
   currentRunId,
   isLoading,
   isLoadingHistory,
@@ -253,6 +251,10 @@ export function ChatView({
     () => (showOutline ? extractMessageOutline(messages) : []),
     [messages, showOutline],
   );
+  const previousSessionIdRef = useRef<string | null | undefined>(sessionId);
+  const [messageListSessionKey, setMessageListSessionKey] = useState(
+    sessionId ?? "__new_session__",
+  );
 
   const {
     messagesContainerRef,
@@ -273,20 +275,22 @@ export function ChatView({
     externalNavigationTargetRunPending,
     externalScrollToBottom,
     isLoadingHistory,
+    messageListSessionKey,
   );
-  const previousSessionIdRef = useRef<string | null | undefined>(sessionId);
-  const messageListSessionKeyRef = useRef(sessionId ?? "__new_session__");
   const [visibleRange, setVisibleRange] = useState<ListRange | null>(null);
 
   useEffect(() => {
     const previousSessionId = previousSessionIdRef.current;
-    messageListSessionKeyRef.current = getNextMessageListSessionKey({
-      previousSessionId,
-      sessionId,
-      messageCount: messages.length,
-      previousKey: messageListSessionKeyRef.current,
-    });
     previousSessionIdRef.current = sessionId;
+    setMessageListSessionKey((previousKey) => {
+      const nextKey = getNextMessageListSessionKey({
+        previousSessionId,
+        sessionId,
+        messageCount: messages.length,
+        previousKey,
+      });
+      return nextKey === previousKey ? previousKey : nextKey;
+    });
   }, [messages.length, sessionId]);
 
   const activeOutlineId = useMemo(() => {
@@ -619,7 +623,6 @@ export function ChatView({
       <ChatMessage
         message={message}
         sessionId={sessionId ?? undefined}
-        sessionName={sessionName ?? undefined}
         runId={currentRunId ?? undefined}
         isLastMessage={index === messages.length - 1}
         personaAvatar={currentPersonaAvatar}
@@ -632,7 +635,6 @@ export function ChatView({
     ),
     [
       sessionId,
-      sessionName,
       currentRunId,
       messages.length,
       currentPersonaAvatar,
@@ -756,7 +758,7 @@ export function ChatView({
           )
         ) : (
           <Virtuoso
-            key={messageListSessionKeyRef.current}
+            key={messageListSessionKey}
             ref={virtuosoRef}
             className="dark:divide-stone-800 overflow-x-hidden"
             data={messages}

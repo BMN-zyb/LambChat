@@ -349,10 +349,7 @@ export function useSessionSync({
           return;
         }
 
-        // Update URL
         navigate(`/chat/${selectedSessionId}`);
-        // Scroll to top after loading history
-        window.scrollTo({ top: 0, behavior: "smooth" });
       } catch (err) {
         console.error("[handleSelectSession] Error:", err);
       }

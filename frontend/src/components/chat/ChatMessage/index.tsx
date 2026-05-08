@@ -64,7 +64,6 @@ function ThinkingIndicator() {
 interface ChatMessageProps {
   message: Message;
   sessionId?: string;
-  sessionName?: string;
   runId?: string;
   isLastMessage?: boolean;
   onStop?: () => void;
@@ -77,6 +76,7 @@ interface ChatMessageProps {
     source?: RevealPreviewOpenSource,
   ) => boolean;
   onForkMessage?: (messageId: string) => void | Promise<void>;
+  showFeedbackAndShareActions?: boolean;
 }
 
 // Token usage statistics button component - ChatGPT style
@@ -245,7 +245,6 @@ function TokenDetailsButton({
 export const ChatMessage = memo(function ChatMessage({
   message,
   sessionId,
-  sessionName,
   runId,
   isLastMessage,
   personaAvatar,
@@ -254,6 +253,7 @@ export const ChatMessage = memo(function ChatMessage({
   latestAutoPreview,
   onOpenPreview,
   onForkMessage,
+  showFeedbackAndShareActions = true,
 }: ChatMessageProps) {
   const { t } = useTranslation();
   const { availableModels } = useSettingsContext();
@@ -463,23 +463,26 @@ export const ChatMessage = memo(function ChatMessage({
                 isLastMessage={isLastMessage}
               />
             )}
-            {/* Feedback buttons */}
-            {isAuthenticated && sessionId && (message.runId || runId) && (
-              <FeedbackButtons
-                sessionId={sessionId}
-                runId={message.runId || runId!}
-                currentFeedback={message.feedback}
-                isLastMessage={isLastMessage}
-              />
-            )}
-            {/* Share button */}
-            {sessionId && (
-              <ShareButton
-                sessionId={sessionId}
-                sessionName={sessionName}
-                runId={message.runId || runId}
-                isLastMessage={isLastMessage}
-              />
+            {showFeedbackAndShareActions && (
+              <>
+                {/* Feedback buttons */}
+                {isAuthenticated && sessionId && (message.runId || runId) && (
+                  <FeedbackButtons
+                    sessionId={sessionId}
+                    runId={message.runId || runId!}
+                    currentFeedback={message.feedback}
+                    isLastMessage={isLastMessage}
+                  />
+                )}
+                {/* Share button */}
+                {sessionId && (
+                  <ShareButton
+                    sessionId={sessionId}
+                    runId={message.runId || runId}
+                    isLastMessage={isLastMessage}
+                  />
+                )}
+              </>
             )}
           </div>
         )}

@@ -168,18 +168,6 @@ export function ChatAppContent({
       );
       setTimeout(() => fetchSkills(), 500);
     },
-    onStreamDone: () => {
-      if (sessionId) {
-        import("../../../services/api").then(({ sessionApi }) => {
-          sessionApi
-            .get(sessionId)
-            .then((session) => {
-              if (session?.name) setSessionName(session.name);
-            })
-            .catch(() => {});
-        });
-      }
-    },
   });
 
   const prevAgentRef = useRef(currentAgent);
@@ -499,7 +487,6 @@ export function ChatAppContent({
     },
   });
 
-  const [sessionName, setSessionName] = useState<string | null>(null);
   const [externalNavigationTargetRunId, setExternalNavigationTargetRunId] =
     useState<string | null>(null);
   const [
@@ -519,25 +506,6 @@ export function ChatAppContent({
     externalNavigationTargetFile || externalScrollToBottom
       ? location.key
       : null;
-
-  useEffect(() => {
-    if (!sessionId) {
-      setSessionName(null);
-      return;
-    }
-
-    const fetchSessionName = async () => {
-      try {
-        const { sessionApi } = await import("../../../services/api");
-        const session = await sessionApi.get(sessionId);
-        if (session?.name) setSessionName(session.name);
-      } catch (err) {
-        console.warn("[AppContent] Failed to fetch session:", err);
-      }
-    };
-
-    fetchSessionName();
-  }, [sessionId]);
 
   useEffect(() => {
     const targetTraceId = externalNavigationTargetFile?.traceId ?? undefined;
@@ -583,12 +551,6 @@ export function ChatAppContent({
       cancelled = true;
     };
   }, [sessionId, externalNavigationTargetFile?.traceId]);
-
-  useEffect(() => {
-    if (newlyCreatedSession?.name && sessionId === newlyCreatedSession.id) {
-      setSessionName(newlyCreatedSession.name);
-    }
-  }, [newlyCreatedSession?.name, newlyCreatedSession?.id, sessionId]);
 
   const handleConfigRestored = useCallback(
     (config: {
@@ -694,7 +656,6 @@ export function ChatAppContent({
       currentModelId={currentModelId}
       onSelectModel={handleSelectModel}
       sessionId={sessionId}
-      sessionName={sessionName}
       showOutlineButton={shouldShowMessageOutline(messages)}
       onToggleOutline={handleToggleOutline}
       sidebar={
@@ -743,7 +704,6 @@ export function ChatAppContent({
         <ChatView
           messages={messages}
           sessionId={sessionId}
-          sessionName={sessionName}
           currentRunId={currentRunId}
           isLoading={isLoading}
           isLoadingHistory={isLoadingHistory}

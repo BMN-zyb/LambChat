@@ -51,7 +51,6 @@ export interface AppShellProps {
   onSelectModel?: (modelId: string, modelValue: string) => void;
   // Share
   sessionId?: string | null;
-  sessionName?: string | null;
   // Outline
   showOutlineButton?: boolean;
   onToggleOutline?: () => void;
@@ -73,7 +72,6 @@ export function AppShell({
   currentModelId,
   onSelectModel,
   sessionId,
-  sessionName,
   showOutlineButton,
   onToggleOutline,
 }: AppShellProps) {
@@ -235,7 +233,6 @@ export function AppShell({
             currentModelId={currentModelId}
             onSelectModel={onSelectModel}
             sessionId={sessionId}
-            sessionName={sessionName}
             showOutlineButton={showOutlineButton}
             onToggleOutline={onToggleOutline}
           />
