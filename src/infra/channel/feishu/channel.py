@@ -53,16 +53,8 @@ class FeishuChannel(FeishuSenderMixin, BaseChannel):
     _SDK_RECONNECT_INTERVAL = 10  # SDK retry interval (default 120s, too slow)
     _SDK_RECONNECT_NONCE = 5  # SDK first-reconnect jitter (default 30s, too much)
 
-    # Processing status emojis (cycled while agent is working)
-    PROCESSING_EMOJIS = [
-        "StatusInFlight",
-        "OneSecond",
-        "Typing",
-        "OnIt",
-        "Coffee",
-        "OnIt",
-        "EatingFood",
-    ]
+    # Processing status emoji shown while the agent is working.
+    PROCESSING_EMOJI = "StatusInFlight"
 
     def __init__(self, config: FeishuConfig, message_handler: Optional[Callable] = None):
         super().__init__(config, message_handler)

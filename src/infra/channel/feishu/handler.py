@@ -93,8 +93,8 @@ class FeishuResponseCollector:
         self.files_to_reveal: list[dict] = []
 
         # 处理中 emoji 控制
-        self._processing_active = False
-        self._processing_task: asyncio.Task | None = None
+        self._processing_message_id: str | None = None
+        self._processing_reaction_id: str | None = None
 
     def append_text(self, chunk: str) -> None:
         """追加文本内容"""
@@ -110,31 +110,28 @@ class FeishuResponseCollector:
         self.files_to_reveal.append(file_info)
 
     async def start_processing_indicator(self, message_id: str) -> None:
-        """启动处理中 emoji 循环指示器。"""
-        self._processing_active = True
-        self._processing_task = asyncio.create_task(self._processing_emoji_loop(message_id))
+        """发送一次处理中 emoji 指示器。"""
+        if self._processing_reaction_id:
+            return
+        reaction_id = await self.manager.add_reaction(
+            self.user_id,
+            message_id,
+            FeishuChannel.PROCESSING_EMOJI,
+        )
+        if reaction_id:
+            self._processing_message_id = message_id
+            self._processing_reaction_id = reaction_id
 
     async def stop_processing_indicator(self) -> None:
-        """停止处理中 emoji 循环指示器。"""
-        self._processing_active = False
-        if self._processing_task and not self._processing_task.done():
-            self._processing_task.cancel()
-            try:
-                await self._processing_task
-            except asyncio.CancelledError:
-                pass
-
-    async def _processing_emoji_loop(self, message_id: str) -> None:
-        """循环切换 emoji 表示正在处理。"""
+        """移除处理中 emoji 指示器。"""
+        if not self._processing_message_id or not self._processing_reaction_id:
+            return
+        message_id = self._processing_message_id
+        reaction_id = self._processing_reaction_id
+        self._processing_message_id = None
+        self._processing_reaction_id = None
         try:
-            while self._processing_active:
-                for emoji in FeishuChannel.PROCESSING_EMOJIS:
-                    await asyncio.sleep(3)
-                    if not self._processing_active:
-                        break
-                    await self.manager.add_reaction(self.user_id, message_id, emoji)
-        except asyncio.CancelledError:
-            pass
+            await self.manager.delete_reaction(self.user_id, message_id, reaction_id)
         except Exception as e:
             logger.debug(f"[Feishu] Processing emoji error: {e}")
 
@@ -295,6 +292,8 @@ async def execute_feishu_agent(
     agent_options: dict | None = None,
     attachments: list[dict] | None = None,
     disabled_skills: list[str] | None = None,
+    enabled_skills: list[str] | None = None,
+    persona_system_prompt: str | None = None,
     disabled_mcp_tools: list[str] | None = None,
 ) -> AsyncGenerator[dict[str, Any], None]:
     """执行 Agent 并生成事件流"""
@@ -314,6 +313,8 @@ async def execute_feishu_agent(
             agent_options=agent_options,
             attachments=attachments,
             disabled_skills=disabled_skills,
+            enabled_skills=enabled_skills,
+            persona_system_prompt=persona_system_prompt,
             disabled_mcp_tools=disabled_mcp_tools,
         ):
             yield event
@@ -430,6 +431,8 @@ def create_feishu_message_handler(
                 agent_options=None,
                 attachments=None,
                 disabled_skills=None,
+                enabled_skills=None,
+                persona_system_prompt=None,
                 disabled_mcp_tools=None,
             ):
                 async for event in execute_feishu_agent(
@@ -442,6 +445,8 @@ def create_feishu_message_handler(
                     agent_options=agent_options,
                     attachments=attachments,
                     disabled_skills=disabled_skills,
+                    enabled_skills=enabled_skills,
+                    persona_system_prompt=persona_system_prompt,
                     disabled_mcp_tools=disabled_mcp_tools,
                 ):
                     yield event

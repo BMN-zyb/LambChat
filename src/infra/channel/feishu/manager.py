@@ -267,13 +267,19 @@ class FeishuChannelManager(UserChannelManager):
 
         return await client.send_message(chat_id, content)
 
-    async def add_reaction(self, user_id: str, message_id: str, emoji_type: str) -> bool:
+    async def add_reaction(self, user_id: str, message_id: str, emoji_type: str) -> str | None:
         """Add a reaction emoji to a message via a user's Feishu bot."""
         client = self._find_channel(user_id)
         if not client:
+            return None
+        return await client._add_reaction(message_id, emoji_type)
+
+    async def delete_reaction(self, user_id: str, message_id: str, reaction_id: str) -> bool:
+        """Delete a reaction emoji from a message via a user's Feishu bot."""
+        client = self._find_channel(user_id)
+        if not client:
             return False
-        await client._add_reaction(message_id, emoji_type)
-        return True
+        return await client._delete_reaction(message_id, reaction_id)
 
     def is_connected(self, user_id: str, instance_id: Optional[str] = None) -> bool:
         """Check if a user's Feishu bot is connected."""

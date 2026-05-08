@@ -37,7 +37,7 @@ class FeishuSenderMixin:
         ".pptx": "ppt",
     }
 
-    def _add_reaction_sync(self, message_id: str, emoji_type: str) -> None:
+    def _add_reaction_sync(self, message_id: str, emoji_type: str) -> str | None:
         """Sync helper for adding reaction."""
         from lark_oapi.api.im.v1 import (
             CreateMessageReactionRequest,
@@ -61,16 +61,55 @@ class FeishuSenderMixin:
 
             if not response.success():
                 logger.warning(f"Failed to add reaction: code={response.code}, msg={response.msg}")
+                return None
+            data = response.data
+            return data.reaction_id if data else None
         except Exception as e:
             logger.warning(f"Error adding reaction: {e}")
+            return None
 
-    async def _add_reaction(self, message_id: str, emoji_type: str = "THUMBSUP") -> None:
+    async def _add_reaction(self, message_id: str, emoji_type: str = "THUMBSUP") -> str | None:
         """Add a reaction emoji to a message."""
         if not self._client:
-            return
+            return None
 
         loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, self._add_reaction_sync, message_id, emoji_type)
+        return await loop.run_in_executor(None, self._add_reaction_sync, message_id, emoji_type)
+
+    def _delete_reaction_sync(self, message_id: str, reaction_id: str) -> bool:
+        """Sync helper for deleting reaction."""
+        from lark_oapi.api.im.v1 import DeleteMessageReactionRequest
+
+        try:
+            request = (
+                DeleteMessageReactionRequest.builder()
+                .message_id(message_id)
+                .reaction_id(reaction_id)
+                .build()
+            )
+            response = self._client.im.v1.message_reaction.delete(request)
+            if not response.success():
+                logger.warning(
+                    f"Failed to delete reaction: code={response.code}, msg={response.msg}"
+                )
+                return False
+            return True
+        except Exception as e:
+            logger.warning(f"Error deleting reaction: {e}")
+            return False
+
+    async def _delete_reaction(self, message_id: str, reaction_id: str) -> bool:
+        """Delete a reaction emoji from a message."""
+        if not self._client:
+            return False
+
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            None,
+            self._delete_reaction_sync,
+            message_id,
+            reaction_id,
+        )
 
     def _send_message_sync(
         self, receive_id_type: str, receive_id: str, msg_type: str, content: str

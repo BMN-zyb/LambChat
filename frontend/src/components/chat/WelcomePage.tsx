@@ -91,13 +91,13 @@ export const WelcomePage = memo(function WelcomePage({
       </div>
 
       {/* ChatInput centered — the focal point */}
-      <div className="welcome-input w-full sm:max-w-[52rem] md:max-w-[56rem] lg:max-w-[58rem] xl:max-w-[60rem] 2xl:max-w-[62rem]">
+      <div className="welcome-input w-full sm:max-w-[44rem] md:max-w-[46rem] lg:max-w-[48rem] xl:max-w-[50rem] 2xl:max-w-[52rem]">
         <ChatInput {...chatInputProps} className="mx-auto w-full px-2" />
       </div>
 
       {/* Suggestions with refresh */}
       {suggestions && suggestions.length > 0 && (
-        <div className="welcome-suggestions relative w-[78%] sm:max-w-[44rem] md:max-w-[48rem] lg:max-w-[50rem] xl:max-w-[52rem] 2xl:max-w-[54rem] px-2 sm:px-4 sm:mt-2 md:mt-3 xl:mt-4 2xl:mt-4">
+        <div className="welcome-suggestions relative w-[78%] sm:max-w-[38rem] md:max-w-[40rem] lg:max-w-[42rem] xl:max-w-[44rem] 2xl:max-w-[46rem] px-2 sm:px-4 sm:mt-2 md:mt-3 xl:mt-4 2xl:mt-4">
           <div className="welcome-suggestions-header flex items-center justify-between mb-2 sm:mb-3 md:mb-3 xl:mb-4 2xl:mb-4">
             <div
               className="flex items-center gap-1 text-xs sm:text-sm md:text-sm font-medium font-serif"
