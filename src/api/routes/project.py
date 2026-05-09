@@ -137,6 +137,18 @@ async def delete_project(
 
         get_logger(__name__).warning(f"Failed to clear revealed file project_id: {e}")
 
+    # Clear project_id on channel configs so future channel-created sessions
+    # cannot resurrect a deleted project reference.
+    try:
+        from src.infra.channel.channel_storage import ChannelStorage
+
+        channel_storage = ChannelStorage()
+        await channel_storage.clear_project_id(project_id, user.sub)
+    except Exception as e:
+        from src.infra.logging import get_logger
+
+        get_logger(__name__).warning(f"Failed to clear channel config project_id: {e}")
+
     # Delete the project
     success = await storage.delete(project_id, user.sub)
     if not success:

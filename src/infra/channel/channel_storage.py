@@ -172,6 +172,36 @@ class ChannelStorage:
             return True
         return False
 
+    async def clear_project_id(self, project_id: str, user_id: str) -> int:
+        """Clear a project reference from channel configurations for a user."""
+        collection = self._get_collection()
+        result = await collection.update_many(
+            {"user_id": user_id, "project_id": project_id},
+            {
+                "$set": {
+                    "project_id": None,
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                }
+            },
+        )
+        return result.modified_count
+
+    async def clear_config_project_id(
+        self, user_id: str, channel_type: ChannelType, instance_id: str
+    ) -> int:
+        """Clear the project reference for one channel configuration."""
+        collection = self._get_collection()
+        result = await collection.update_one(
+            {"user_id": user_id, "channel_type": channel_type.value, "instance_id": instance_id},
+            {
+                "$set": {
+                    "project_id": None,
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                }
+            },
+        )
+        return result.modified_count
+
     async def get_response(
         self,
         user_id: str,

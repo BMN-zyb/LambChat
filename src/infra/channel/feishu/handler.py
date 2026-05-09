@@ -379,6 +379,7 @@ def create_feishu_message_handler(
             model_id: str | None = None
             project_id: str | None = None
             channel_name: str | None = None
+            ch_storage = None
             instance_id = metadata.get("instance_id")
             if instance_id:
                 from src.infra.channel.channel_storage import ChannelStorage
@@ -395,6 +396,26 @@ def create_feishu_message_handler(
                     model_id = ch_config.get("model_id")
                     project_id = ch_config.get("project_id")
                     channel_name = ch_config.get("name")
+
+            if project_id:
+                try:
+                    from src.infra.folder.storage import get_project_storage
+
+                    proj_storage = get_project_storage()
+                    project = await proj_storage.get_by_id(project_id, user_id)
+                    if not project:
+                        logger.warning(
+                            f"[Feishu] Ignoring missing channel project_id {project_id} "
+                            f"for user {user_id}"
+                        )
+                        if ch_storage and instance_id:
+                            await ch_storage.clear_config_project_id(
+                                user_id, ChannelType.FEISHU, instance_id
+                            )
+                        project_id = None
+                except Exception as e:
+                    logger.warning(f"[Feishu] Failed to validate channel project_id: {e}")
+                    project_id = None
 
             # Auto-create project by channel name if not manually configured
             if not project_id and channel_name:
