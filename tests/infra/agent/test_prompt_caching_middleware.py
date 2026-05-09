@@ -53,6 +53,60 @@ def test_retag_tools_tags_multiple_tail_tools() -> None:
     assert retagged[2].extras == {"cache_control": {"type": "ephemeral"}}
 
 
+async def test_prompt_caching_middleware_respects_four_breakpoint_budget() -> None:
+    middleware = PromptCachingMiddleware()
+
+    class _AnthropicLike:
+        pass
+
+    _AnthropicLike.__module__ = "langchain_anthropic.chat_models"
+
+    class _Request:
+        def __init__(self) -> None:
+            self.model = _AnthropicLike()
+            self.system_message = SystemMessage(
+                content=[
+                    {"type": "text", "text": "base"},
+                    {"type": "text", "text": "persona"},
+                    {"type": "text", "text": "skills"},
+                    {"type": "text", "text": "memory"},
+                    {"type": "text", "text": "deferred"},
+                ]
+            )
+            self.tools = [_FakeTool(name=f"tool_{i}", description=f"tool {i}") for i in range(5)]
+
+        def override(self, **kwargs):
+            clone = _Request()
+            clone.model = kwargs.get("model", self.model)
+            clone.system_message = kwargs.get("system_message", self.system_message)
+            clone.tools = kwargs.get("tools", self.tools)
+            return clone
+
+    async def _handler(request):
+        return request
+
+    result = await middleware.awrap_model_call(_Request(), _handler)
+
+    system_breakpoints = sum(
+        1
+        for block in result.system_message.content
+        if isinstance(block, dict) and "cache_control" in block
+    )
+    tool_breakpoints = sum(
+        1
+        for tool in result.tools
+        if getattr(tool, "extras", None) and "cache_control" in tool.extras
+    )
+
+    assert system_breakpoints + tool_breakpoints == 4
+    assert "cache_control" not in result.system_message.content[0]
+    assert "cache_control" not in result.system_message.content[1]
+    assert result.system_message.content[2]["cache_control"] == {"type": "ephemeral"}
+    assert result.system_message.content[3]["cache_control"] == {"type": "ephemeral"}
+    assert result.system_message.content[4]["cache_control"] == {"type": "ephemeral"}
+    assert result.tools[-1].extras == {"cache_control": {"type": "ephemeral"}}
+
+
 async def test_prompt_caching_middleware_skips_non_anthropic_models() -> None:
     middleware = PromptCachingMiddleware()
 

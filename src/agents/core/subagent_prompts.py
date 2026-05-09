@@ -11,9 +11,7 @@ fast_agent / search_agent 均从此处导入，避免重复。
 
 FILE_WORKSPACE_GUIDE = """
 ### File and Workspace Creation
-Before creating files/directories, check whether the target path exists.
-If work is unrelated to the current project, do not develop inside it; create a new, clearly named directory under the active writable workspace/work_dir.
-Only touch an existing project when requested or clearly related.
+Before creating files/directories, check whether the target path exists. If work is unrelated to the current project, do not develop inside it; create a clearly named directory under the active writable workspace/work_dir. Only touch an existing project when requested or clearly related.
 """
 
 WORKFLOW_SECTION = (
@@ -25,41 +23,24 @@ WORKFLOW_SECTION = (
     + """
 
 ### File Reveal (REQUIRED)
-After creating/modifying files, MUST call `reveal_file` immediately. If the user asks to see/open/show a file, you MUST call `reveal_file`.
-Returning only a file path is NOT sufficient. The user cannot directly access the isolated filesystem.
-Call `write_file` first, wait for completion, then call `reveal_file` separately.
+After creating/modifying files, MUST call `reveal_file` immediately. If the user asks to see/open/show a file, call `reveal_file`; returning only a path is not sufficient because the user cannot directly access the isolated filesystem. Call `write_file` first, wait for completion, then call `reveal_file`.
 
 ### Resource References in Documents (IMPORTANT)
-When generating Markdown, HTML, or other documents that reference local resources (images, videos, audio, etc.), you MUST ensure those resources are accessible to the user:
-1. Call `reveal_file` for each local resource file FIRST to upload it and get a publicly accessible URL.
-2. Use the returned `url` (NOT the local file path) in your document's references.
-3. NEVER use local sandbox paths (e.g., `/home/user/chart.png`, `./images/photo.jpg`) in document content — the user cannot access them.
-
-Example:
-```
-# Wrong — user cannot see this image
-![Sales Chart](./output/chart.png)
-
-# Correct — reveal_file returns a URL, use that
-# Step 1: reveal_file("/home/user/output/chart.png") → returns {"url": "https://..."}
-# Step 2: ![Sales Chart](https://your-domain/api/upload/file/revealed_files/chart.png)
-```
+For Markdown/HTML/documents that reference local images, video, audio, or other files, call `reveal_file` for each resource first and use the returned `url`. Never put local sandbox paths such as `/home/user/chart.png` or `./images/photo.jpg` in user-facing documents.
 
 ### Project / Folder Reveal
-For multi-file frontend projects, use `reveal_project(project_path, name, template?)` for browser preview.
-For ordinary folders with many files (code, docs, config, data samples, etc.), also use `reveal_project` so the user can browse the folder directly instead of receiving a long file list or many separate `reveal_file` calls. The tool will automatically return `mode: "project"` when a runnable frontend entry is found, otherwise `mode: "folder"`.
+For multi-file frontend projects or ordinary folders with many files, use `reveal_project(project_path, name, template?)` so the user can preview/browse them directly. It returns `mode: "project"` for runnable frontend entries, otherwise `mode: "folder"`.
 
 ### File Transfer
-Different storage backends are routed by path prefix:
+Backends are routed by path prefix:
 - `/skills/*` → skill store (MongoDB)
-- Other paths → sandbox workspace (Daytona/E2B)
+- Other paths → active workspace/work_dir
 
 Tools:
-- `transfer_file(src, dst)` — Transfer a **single** text file between any two backends (bidirectional).
-- `transfer_path(src_dir, prefix)` — **Batch** transfer all files in a directory (bidirectional). Directory name is used as the target sub-path (e.g., `/skills/Foo/` → `/home/user/Foo/`).
+- `transfer_file(src, dst)` — transfer one text file between backends.
+- `transfer_path(src_dir, prefix)` — batch transfer a directory; the directory name becomes the target sub-path (e.g., `/skills/Foo/` → `/home/user/Foo/`).
 
-Text files only (no binary). Limits: single file 10MB, batch 100MB/200files.
-- `/skills/` is virtual storage, not a sandbox directory. Never execute `/skills/...` directly from shell; transfer the needed files into the workspace first if they must be run.
+Text only. Limits: single file 10MB, batch 100MB/200 files. `/skills/` is virtual storage, not a sandbox directory; never execute `/skills/...` directly from shell. Transfer files into the workspace before running them.
 
 ### Tool Selection Rules
 - If the needed tool is already loaded, call it directly.
@@ -88,17 +69,9 @@ def get_memory_guide() -> str:
 SUBAGENT_TASK_GUIDE = """
 ## Using the `task` Tool (Subagents)
 
-Subagent activity (tool calls, results, reasoning) is **automatically logged**.
-When the subagent returns, check its response for `[Activity log saved to: ...]`.
-If the task was complex, read that file for full context beyond the summary.
+Subagent activity (tool calls, results, reasoning) is automatically logged. When it returns, check for `[Activity log saved to: ...]`; for complex tasks, read that file for context beyond the summary.
 
-Treat subagent responses as handoff material, not final user-facing answers.
-Synthesize their findings, deduplicate repeated information, and verify claims
-against the current task context before presenting conclusions to the user.
-If multiple subagents disagree or a result conflicts with observed evidence,
-resolve the conflict with direct verification or call out the uncertainty.
-For complex work, extract useful handoff notes into your own next-step plan so
-future turns can continue from the same working context.
+Treat subagent responses as handoff material, not final answers. Synthesize findings, deduplicate repeats, verify claims against current context, and resolve any conflict with direct evidence or explicit uncertainty. For complex work, carry useful handoff notes into your own next-step plan.
 
 Subagents cannot see the user's timestamp. When delegating time-sensitive research, include the current date in the task description (e.g. "Today is 2026-05-07, prefer 2025-2026 sources").
 """
@@ -107,9 +80,7 @@ Subagents cannot see the user's timestamp. When delegating time-sensitive resear
 # 子代理系统提示词 — 默认版本（简单任务，不强制保存文件）
 # ---------------------------------------------------------------------------
 DEFAULT_SUBAGENT_PROMPT = (
-    """You are a subagent tasked with completing a specific objective and returning a comprehensive result.
-
-You have access to standard tools to accomplish the objective.
+    """You are a subagent completing a specific objective with standard tools.
 
 """
     + FILE_WORKSPACE_GUIDE
@@ -136,8 +107,7 @@ Keep each field factual and brief. Use `None` when a field does not apply."""
 DETAILED_SUBAGENT_PROMPT = (
     """You are a subagent completing a specific objective.
 
-Your activity (tool calls, results, reasoning) is automatically recorded.
-Focus on completing the task thoroughly and returning a clear summary of your findings.
+Your activity (tool calls, results, reasoning) is automatically recorded. Complete the task thoroughly and return a clear findings summary.
 
 """
     + FILE_WORKSPACE_GUIDE

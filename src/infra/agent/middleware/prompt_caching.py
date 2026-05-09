@@ -18,6 +18,8 @@ from langchain_core.tools import BaseTool
 from src.infra.agent.middleware._helpers import _system_message_to_blocks
 from src.kernel.config import settings
 
+_MAX_ANTHROPIC_CACHE_BREAKPOINTS = 4
+
 
 class PromptCachingMiddleware(AgentMiddleware):
     """Re-tags cache breakpoints AFTER all user middleware has injected dynamic content.
@@ -36,14 +38,13 @@ class PromptCachingMiddleware(AgentMiddleware):
     This middleware runs **last** in the user middleware chain (innermost layer).
     It walks the final system message and tools, then:
 
-    1. Moves ``cache_control`` to the **actual** last content block so the full
-       system message is one contiguous cache segment.
-    2. Re-tags the **last tool** with ``cache_control`` (important when
-       ``ToolSearchMiddleware`` has appended new tools).
+    1. Removes stale ``cache_control`` tags left by earlier middleware.
+    2. Allocates at most Anthropic's four cache breakpoints across tools and
+       system blocks, reserving one for tools when possible and using the rest
+       for the system-message tail.
 
-    Result: between consecutive turns within the same session, the entire stable
-    prefix (base prompt + workflow + skills + memory + MCP) is served from KV
-    cache — only the changed tail (e.g. deferred-tool stubs) is re-processed.
+    Result: cache tags stay valid while still covering the stable prompt tail
+    (base prompt + workflow + skills + memory + MCP/deferred guidance).
     """
 
     _CACHE_CONTROL = {"type": "ephemeral"}
@@ -83,7 +84,7 @@ class PromptCachingMiddleware(AgentMiddleware):
     def _retag_system_message(
         system_message: Any, cache_control: dict, *, max_cached_blocks: int = 4
     ) -> Any:
-        """Strip stale cache_control from inner blocks and tag the final block."""
+        """Strip stale cache_control from blocks and tag the final N blocks."""
         if system_message is None:
             return system_message
 
@@ -95,6 +96,9 @@ class PromptCachingMiddleware(AgentMiddleware):
         for i, block in enumerate(blocks):
             if isinstance(block, dict) and "cache_control" in block:
                 blocks[i] = {k: v for k, v in block.items() if k != "cache_control"}
+
+        if max_cached_blocks <= 0:
+            return SystemMessage(content=blocks)
 
         # Tag the last N blocks so semi-stable sections remain cacheable
         start_idx = max(len(blocks) - max_cached_blocks, 0)
@@ -111,7 +115,7 @@ class PromptCachingMiddleware(AgentMiddleware):
     def _retag_tools(
         tools: list[Any] | None, cache_control: dict, *, max_cached_tools: int = 4
     ) -> list[Any] | None:
-        """Re-tag the last tool with cache_control (handles newly appended tools)."""
+        """Strip stale cache_control from tools and tag the final N tools."""
         if not tools:
             return tools
 
@@ -127,6 +131,9 @@ class PromptCachingMiddleware(AgentMiddleware):
                     cleaned.append(tool.model_copy(update={"extras": new_extras}))
                     continue
             cleaned.append(tool)
+
+        if max_cached_tools <= 0:
+            return cleaned
 
         # Tag the last N tools
         for idx in tool_indices[-max_cached_tools:]:
@@ -148,11 +155,25 @@ class PromptCachingMiddleware(AgentMiddleware):
             return await handler(request)
 
         overrides: dict[str, Any] = {}
+        system_block_count = len(_system_message_to_blocks(request.system_message))
+        tool_count = sum(1 for tool in request.tools or [] if isinstance(tool, BaseTool))
+
+        reserved_tool_breakpoints = 1 if tool_count > 0 and self._max_cached_tools > 0 else 0
+        system_budget = min(
+            self._max_cached_system_blocks,
+            system_block_count,
+            _MAX_ANTHROPIC_CACHE_BREAKPOINTS - reserved_tool_breakpoints,
+        )
+        tool_budget = min(
+            self._max_cached_tools,
+            tool_count,
+            _MAX_ANTHROPIC_CACHE_BREAKPOINTS - system_budget,
+        )
 
         new_system = self._retag_system_message(
             request.system_message,
             self._CACHE_CONTROL,
-            max_cached_blocks=self._max_cached_system_blocks,
+            max_cached_blocks=system_budget,
         )
         if new_system is not request.system_message:
             overrides["system_message"] = new_system
@@ -160,7 +181,7 @@ class PromptCachingMiddleware(AgentMiddleware):
         new_tools = self._retag_tools(
             request.tools,
             self._CACHE_CONTROL,
-            max_cached_tools=self._max_cached_tools,
+            max_cached_tools=tool_budget,
         )
         if new_tools is not request.tools:
             overrides["tools"] = new_tools

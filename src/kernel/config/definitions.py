@@ -200,14 +200,14 @@ SETTING_DEFINITIONS: dict[str, dict] = {
         "category": SettingCategory.LLM,
         "subcategory": "cache",
         "description": "settingDesc.PROMPT_CACHE_MAX_SYSTEM_BLOCKS",
-        "default": 12,
+        "default": 4,
     },
     "PROMPT_CACHE_MAX_TOOLS": {
         "type": SettingType.NUMBER,
         "category": SettingCategory.LLM,
         "subcategory": "cache",
         "description": "settingDesc.PROMPT_CACHE_MAX_TOOLS",
-        "default": 12,
+        "default": 1,
     },
     # ============================================
     # Session Settings

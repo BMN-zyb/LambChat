@@ -141,7 +141,11 @@ export function getNextMessageScrollFollowStateForUserIntent({
   isMobileViewport: boolean;
   streamingAssistantActive: boolean;
 }): MessageScrollFollowState {
-  if (!state.autoScrollActive) {
+  const hasActiveStreamFollow =
+    state.autoScrollActive ||
+    (state.streamLockActive && streamingAssistantActive);
+
+  if (!hasActiveStreamFollow) {
     return state;
   }
 
@@ -165,7 +169,11 @@ export function getNextMessageScrollFollowStateForUserGesture({
   isMobileViewport: boolean;
   streamingAssistantActive: boolean;
 }): MessageScrollFollowState {
-  if (!state.autoScrollActive) {
+  const hasActiveStreamFollow =
+    state.autoScrollActive ||
+    (state.streamLockActive && streamingAssistantActive);
+
+  if (!hasActiveStreamFollow) {
     return state;
   }
 
@@ -199,10 +207,14 @@ export function getNextMessageScrollFollowStateForUserScroll({
   deltaScrollPx: number;
   scrollTop: number;
 }): MessageScrollFollowState {
+  const hasActiveStreamFollow =
+    state.autoScrollActive ||
+    (state.streamLockActive && streamingAssistantActive);
+
   if (
     !shouldStopAutoScrollOnUserScroll({
       isMobileViewport,
-      autoScrollActive: state.autoScrollActive,
+      autoScrollActive: hasActiveStreamFollow,
       programmaticScroll,
       movedUp,
       isAwayFromBottom,

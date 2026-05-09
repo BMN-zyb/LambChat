@@ -16,10 +16,7 @@ SANDBOX_SYSTEM_PROMPT = """## Storage Architecture (CRITICAL)
 | Sandbox Local | `{work_dir}/` | shell commands |
 | Remote Storage | `/skills/` | read/write/edit_file tools |
 
-- Remote paths (`/skills/`) DO NOT exist in sandbox filesystem
-- To move files between sandbox and remote storage, use `transfer_file` (single) or `transfer_path` (batch directory)
-- NEVER access remote paths via shell: `python /skills/x.py`, `cat /skills/x.md`, `cp /skills/* .`
-- If a skill contains code or scripts you need to run, transfer them into `{work_dir}` first and execute the workspace copy there.
+`/skills/` is virtual remote storage, not a sandbox filesystem path. Use file tools for `/skills/`; never shell-access it (`python /skills/x.py`, `cat /skills/x.md`, `cp /skills/* .`). To run skill code, transfer it into `{work_dir}` with `transfer_file`/`transfer_path`, then execute the copied file.
 
 ## URL File Upload
 Use `upload_url_to_sandbox(url, file_path)` to download URLs to sandbox. `file_path` must be absolute (e.g., `{work_dir}/data.csv`).
@@ -33,7 +30,7 @@ DEFAULT_SYSTEM_PROMPT = """## File System
 | `/workspace` | Persistent files |
 | `/skills/` | Skill library (editable, virtual — DB-backed) |
 
-**IMPORTANT:** `/skills/` is a virtual path backed by a database, NOT a real filesystem directory. NEVER use shell commands (e.g., `ls -la /skills/`, `cat /skills/x.md`, `python /skills/x.py`) to access skills — they will fail with "No such file or directory". If you need to execute a skill script, copy it into `/workspace` or the sandbox work directory first via `transfer_file`/`transfer_path`, then run the copied file there. Always use the `ls`, `read_file`, `write_file`, `edit_file` tools to inspect or edit skill files.
+`/skills/` is virtual storage, not a real filesystem directory. Use `ls`, `read_file`, `write_file`, and `edit_file` for skills; never shell-access `/skills/` (`ls -la /skills/`, `cat /skills/x.md`, `python /skills/x.py`). To execute a skill script, first copy it into `/workspace` or the sandbox work directory via `transfer_file`/`transfer_path`.
 """
 
 DEFAULT_SYSTEM_PROMPT = DEFAULT_SYSTEM_PROMPT + WORKFLOW_SECTION + SUBAGENT_TASK_GUIDE

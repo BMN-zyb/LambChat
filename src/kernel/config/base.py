@@ -72,8 +72,8 @@ class Settings(BaseSettings):
     LLM_MAX_RETRIES: int = 3
     LLM_RETRY_DELAY: float = 1.0
     LLM_MODEL_CACHE_SIZE: int = 50  # 模型实例缓存大小，防止内存泄漏
-    PROMPT_CACHE_MAX_SYSTEM_BLOCKS: int = 12
-    PROMPT_CACHE_MAX_TOOLS: int = 12
+    PROMPT_CACHE_MAX_SYSTEM_BLOCKS: int = 4
+    PROMPT_CACHE_MAX_TOOLS: int = 1
 
     # MCP Settings
     ENABLE_MCP: bool = True
