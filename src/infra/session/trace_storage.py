@@ -229,31 +229,66 @@ class TraceStorage:
             return False
 
     async def _ensure_token_usage_event(self, trace_id: str) -> None:
-        """Append a zero token usage event when a trace has no usage event yet."""
+        """Insert a zero token usage event before done when a trace has no usage event yet."""
         now = utc_now()
+        usage_event = {
+            "event_type": "token:usage",
+            "data": {
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "total_tokens": 0,
+                "duration": 0.0,
+                "timestamp": utc_now_iso(),
+            },
+            "timestamp": now,
+        }
         try:
             await self.collection.update_one(
                 {
                     "trace_id": trace_id,
                     "events.event_type": {"$ne": "token:usage"},
                 },
-                {
-                    "$push": {
-                        "events": {
-                            "event_type": "token:usage",
-                            "data": {
-                                "input_tokens": 0,
-                                "output_tokens": 0,
-                                "total_tokens": 0,
-                                "duration": 0.0,
-                                "timestamp": utc_now_iso(),
+                [
+                    {
+                        "$set": {
+                            "events": {
+                                "$let": {
+                                    "vars": {
+                                        "done_index": {
+                                            "$indexOfArray": ["$events.event_type", "done"]
+                                        }
+                                    },
+                                    "in": {
+                                        "$cond": [
+                                            {"$gte": ["$$done_index", 0]},
+                                            {
+                                                "$concatArrays": [
+                                                    {"$slice": ["$events", 0, "$$done_index"]},
+                                                    [usage_event],
+                                                    {
+                                                        "$slice": [
+                                                            "$events",
+                                                            "$$done_index",
+                                                            {
+                                                                "$subtract": [
+                                                                    {"$size": "$events"},
+                                                                    "$$done_index",
+                                                                ]
+                                                            },
+                                                        ]
+                                                    },
+                                                ]
+                                            },
+                                            {"$concatArrays": ["$events", [usage_event]]},
+                                        ]
+                                    },
+                                }
                             },
-                            "timestamp": now,
+                            "event_count": {"$add": [{"$ifNull": ["$event_count", 0]}, 1]},
+                            "updated_at": now,
                         }
-                    },
-                    "$inc": {"event_count": 1},
-                    "$set": {"updated_at": now},
-                },
+                    }
+                ],
             )
         except Exception as e:
             logger.warning("Failed to ensure token usage event for trace %s: %s", trace_id, e)

@@ -17,6 +17,13 @@ class _FakeTraceCollection:
         return SimpleNamespace(modified_count=1)
 
 
+def _usage_event_from_pipeline(update):
+    return (
+        update[0]["$set"]["events"]["$let"]["vars"].get("usage_event")
+        or update[0]["$set"]["events"]["$let"]["in"]["$cond"][1]["$concatArrays"][1][0]
+    )
+
+
 @pytest.mark.asyncio
 async def test_complete_trace_adds_zero_token_usage_when_missing() -> None:
     storage = TraceStorage()
@@ -29,11 +36,13 @@ async def test_complete_trace_adds_zero_token_usage_when_missing() -> None:
         "trace_id": "trace-1",
         "events.event_type": {"$ne": "token:usage"},
     }
-    usage_event = usage_update["$push"]["events"]
+    usage_event = _usage_event_from_pipeline(usage_update)
     assert usage_event["event_type"] == "token:usage"
     assert usage_event["data"]["input_tokens"] == 0
     assert usage_event["data"]["output_tokens"] == 0
     assert usage_event["data"]["total_tokens"] == 0
+    done_branch = usage_update[0]["$set"]["events"]["$let"]["in"]["$cond"][1]
+    assert done_branch["$concatArrays"][1] == [usage_event]
 
 
 @pytest.mark.asyncio
@@ -45,5 +54,5 @@ async def test_complete_trace_does_not_duplicate_existing_token_usage() -> None:
 
     assert len(storage.collection.calls) == 2
     usage_update = storage.collection.calls[0][1]
-    assert usage_update["$push"]["events"]["event_type"] == "token:usage"
+    assert _usage_event_from_pipeline(usage_update)["event_type"] == "token:usage"
     assert storage.collection.calls[1][0] == {"trace_id": "trace-1"}

@@ -288,6 +288,8 @@ class Presenter:
 
             dual_writer = await self._get_dual_writer()
             if dual_writer and self.config.session_id:
+                if event_type == "done":
+                    await self._ensure_token_usage_event()
                 await dual_writer.write_event(
                     session_id=self.config.session_id,
                     event_type=event_type,

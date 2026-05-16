@@ -76,3 +76,21 @@ async def test_complete_does_not_duplicate_existing_token_usage(monkeypatch) -> 
     assert len(usage_events) == 1
     assert usage_events[0]["data"]["input_tokens"] == 2
     assert usage_events[0]["data"]["output_tokens"] == 3
+
+
+async def test_done_event_writes_zero_token_usage_first_in_same_trace(monkeypatch) -> None:
+    writer = _FakeDualWriter()
+    monkeypatch.setattr("src.infra.session.dual_writer.get_dual_writer", lambda: writer)
+    presenter = create_presenter(
+        session_id="session-1",
+        agent_id="search",
+        agent_name="Search",
+        run_id="run-1",
+        trace_id="trace-1",
+    )
+
+    await presenter.save_event(presenter.done())
+
+    assert [event["event_type"] for event in writer.events] == ["token:usage", "done"]
+    assert [event["trace_id"] for event in writer.events] == ["trace-1", "trace-1"]
+    assert [event["run_id"] for event in writer.events] == ["run-1", "run-1"]
