@@ -20,6 +20,7 @@ from src.kernel.schemas.persona_preset import (
     PersonaPresetStatus,
     PersonaPresetUpdate,
     PersonaPresetVisibility,
+    PersonaStarterPrompt,
 )
 from src.kernel.schemas.user import TokenPayload
 
@@ -86,6 +87,12 @@ async def create_persona_preset(
     description: Annotated[str, "Short one-line description of what this persona does"] = "",
     avatar: Annotated[str | None, "Optional avatar URL"] = None,
     tags: Annotated[list[str], "Optional tags for categorization, e.g. ['coding', 'review']"] = [],
+    starter_prompts: Annotated[
+        list[PersonaStarterPrompt],
+        "Prompt suggestions shown after selecting this persona. "
+        "Each entry is an object with 'text' (a plain string or a multi-language dict like {'zh': '中文', 'en': 'English'}) "
+        "and an optional 'icon' (a single emoji, e.g. '🐍', '🧭').",
+    ] = [],
     skill_names: Annotated[list[str], "Optional skill/tool names to enable for this persona"] = [],
     visibility: Annotated[
         str,
@@ -123,6 +130,7 @@ async def create_persona_preset(
                 avatar=avatar,
                 tags=tags,
                 system_prompt=system_prompt,
+                starter_prompts=starter_prompts,
                 skill_names=skill_names,
                 visibility=vis,
                 status=st,
@@ -155,6 +163,12 @@ async def update_persona_preset(
         str | None,
         "Updated system prompt. Should clearly define: role identity, behavioral rules, "
         "output format, and constraints. Be specific and detailed for best results.",
+    ] = None,
+    starter_prompts: Annotated[
+        list[PersonaStarterPrompt] | None,
+        "Updated list of starter prompt suggestions. "
+        "Each entry is an object with 'text' (a plain string or a multi-language dict like {'zh': '中文', 'en': 'English'}) "
+        "and an optional 'icon' (a single emoji, e.g. '🐍', '🧭').",
     ] = None,
     skill_names: Annotated[list[str] | None, "Updated skill/tool names"] = None,
     visibility: Annotated[str | None, "Updated visibility: 'private' or 'public'"] = None,
@@ -214,6 +228,8 @@ async def update_persona_preset(
         fields["tags"] = tags
     if system_prompt is not None:
         fields["system_prompt"] = system_prompt
+    if starter_prompts is not None:
+        fields["starter_prompts"] = starter_prompts
     if skill_names is not None:
         fields["skill_names"] = skill_names
     if visibility is not None:
