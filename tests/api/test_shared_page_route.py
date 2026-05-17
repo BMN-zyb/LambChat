@@ -215,3 +215,31 @@ async def test_image_static_files_include_cache_control(
     assert response.headers["cache-control"] == (
         "public, max-age=604800, stale-while-revalidate=86400"
     )
+
+
+@pytest.mark.asyncio
+async def test_service_worker_is_served_without_auth(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    static_dir = tmp_path / "dist"
+    static_dir.mkdir()
+    (static_dir / "index.html").write_text("<!doctype html><div id='root'></div>", encoding="utf-8")
+    (static_dir / "sw.js").write_text("self.__lambchat = true;\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        api_main,
+        "resolve_frontend_target",
+        lambda _project_root, _frontend_dev_url: ("static", static_dir),
+    )
+
+    app = api_main.create_app()
+    transport = ASGITransport(app=app)
+
+    async with AsyncClient(transport=transport, base_url="https://lambchat.com") as client:
+        response = await client.get("/sw.js")
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-cache"
+    assert response.headers["content-type"].startswith("text/javascript")
+    assert response.text == "self.__lambchat = true;\n"

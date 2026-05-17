@@ -293,26 +293,28 @@ export function ImageViewer({
 
         {(onPrevious || onNext) && (
           <>
-            <button
-              type="button"
-              onClick={onPrevious}
-              disabled={!canGoPrevious}
-              className="absolute left-2 sm:left-5 top-1/2 z-10 flex h-11 w-11 -translate-y-1/2 items-center justify-center rounded-full bg-black/45 text-white/75 transition-colors hover:bg-black/65 hover:text-white disabled:cursor-not-allowed disabled:opacity-25 disabled:hover:bg-black/45 disabled:hover:text-white/75"
-              aria-label={t("imageViewer.previous", "Previous image")}
-              title={t("imageViewer.previous", "Previous image")}
-            >
-              <ChevronLeft size={28} />
-            </button>
-            <button
-              type="button"
-              onClick={onNext}
-              disabled={!canGoNext}
-              className="absolute right-2 sm:right-5 top-1/2 z-10 flex h-11 w-11 -translate-y-1/2 items-center justify-center rounded-full bg-black/45 text-white/75 transition-colors hover:bg-black/65 hover:text-white disabled:cursor-not-allowed disabled:opacity-25 disabled:hover:bg-black/45 disabled:hover:text-white/75"
-              aria-label={t("imageViewer.next", "Next image")}
-              title={t("imageViewer.next", "Next image")}
-            >
-              <ChevronRight size={28} />
-            </button>
+            {canGoPrevious && (
+              <button
+                type="button"
+                onClick={onPrevious}
+                className="absolute left-2 sm:left-5 top-1/2 z-10 flex h-11 w-11 -translate-y-1/2 items-center justify-center rounded-full bg-black/45 text-white/75 transition-colors hover:bg-black/65 hover:text-white"
+                aria-label={t("imageViewer.previous", "Previous image")}
+                title={t("imageViewer.previous", "Previous image")}
+              >
+                <ChevronLeft size={28} />
+              </button>
+            )}
+            {canGoNext && (
+              <button
+                type="button"
+                onClick={onNext}
+                className="absolute right-2 sm:right-5 top-1/2 z-10 flex h-11 w-11 -translate-y-1/2 items-center justify-center rounded-full bg-black/45 text-white/75 transition-colors hover:bg-black/65 hover:text-white"
+                aria-label={t("imageViewer.next", "Next image")}
+                title={t("imageViewer.next", "Next image")}
+              >
+                <ChevronRight size={28} />
+              </button>
+            )}
           </>
         )}
 

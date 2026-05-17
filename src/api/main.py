@@ -66,6 +66,7 @@ STATIC_CACHE_CONTROL_BY_PREFIX = {
     "images/": "public, max-age=604800, stale-while-revalidate=86400",
 }
 MANIFEST_CACHE_CONTROL = "public, max-age=86400"
+SERVICE_WORKER_CACHE_CONTROL = "no-cache"
 
 
 def _cache_control_for_static_path(path: str) -> str | None:
@@ -75,6 +76,8 @@ def _cache_control_for_static_path(path: str) -> str | None:
             return cache_control
     if normalized_path == "manifest.json":
         return MANIFEST_CACHE_CONTROL
+    if normalized_path == "sw.js":
+        return SERVICE_WORKER_CACHE_CONTROL
     return None
 
 
