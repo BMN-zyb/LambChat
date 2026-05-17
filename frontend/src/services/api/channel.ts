@@ -15,6 +15,16 @@ import type {
   ChannelListResponse,
 } from "../../types/channel";
 
+export interface FeishuRegistrationStatus {
+  session_id: string;
+  status: string;
+  qr_url?: string | null;
+  expire_in?: number | null;
+  app_id?: string | null;
+  app_secret?: string | null;
+  error?: string | null;
+}
+
 export const channelApi = {
   /**
    * Get all available channel types with metadata
@@ -126,6 +136,34 @@ export const channelApi = {
       `${API_BASE}/api/channels/${channelType}/${instanceId}/test`,
       {
         method: "POST",
+      },
+    );
+  },
+
+  async startFeishuRegistration(): Promise<FeishuRegistrationStatus> {
+    return authFetch<FeishuRegistrationStatus>(
+      `${API_BASE}/api/channels/feishu/registrations`,
+      {
+        method: "POST",
+      },
+    );
+  },
+
+  async getFeishuRegistration(
+    sessionId: string,
+  ): Promise<FeishuRegistrationStatus> {
+    return authFetch<FeishuRegistrationStatus>(
+      `${API_BASE}/api/channels/feishu/registrations/${sessionId}`,
+    );
+  },
+
+  async cancelFeishuRegistration(
+    sessionId: string,
+  ): Promise<{ cancelled: boolean }> {
+    return authFetch<{ cancelled: boolean }>(
+      `${API_BASE}/api/channels/feishu/registrations/${sessionId}`,
+      {
+        method: "DELETE",
       },
     );
   },

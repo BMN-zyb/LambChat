@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import threading
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -37,6 +37,28 @@ def _build_channel(user_id: str = "user-1") -> FeishuChannel:
             enabled=True,
         )
     )
+
+
+def _build_message_event(
+    *,
+    message_type: str,
+    content: str,
+    chat_type: str = "p2p",
+):
+    message = SimpleNamespace(
+        message_id="om_1",
+        content=content,
+        chat_id="oc_chat",
+        chat_type=chat_type,
+        message_type=message_type,
+        root_id=None,
+        mentions=[],
+    )
+    sender = SimpleNamespace(
+        sender_type="user",
+        sender_id=SimpleNamespace(open_id="ou_sender"),
+    )
+    return SimpleNamespace(event=SimpleNamespace(message=message, sender=sender))
 
 
 def _build_fake_lark_module() -> ModuleType:
@@ -151,3 +173,56 @@ async def test_start_imports_lark_sdk_off_event_loop(
     assert await channel.start() is True
     assert import_threads
     assert import_threads[0] != main_thread_id
+
+
+@pytest.mark.asyncio
+async def test_audio_message_uses_configured_transcription_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    channel = FeishuChannel(
+        FeishuConfig(
+            user_id="user-1",
+            instance_id="instance-1",
+            app_id="app-id",
+            app_secret="app-secret",
+            encrypt_key="",
+            verification_token="",
+            react_emoji="THUMBSUP",
+            group_policy=FeishuGroupPolicy.MENTION,
+            enabled=True,
+            audio_transcribe_prompt="Please transcribe this voice message.",
+        )
+    )
+    captured: dict[str, object] = {}
+
+    async def _mark_processed(_message_id: str) -> bool:
+        return True
+
+    async def _add_reaction(_message_id: str, _emoji: str) -> str:
+        return "reaction-1"
+
+    async def _download_resource(*_args, **_kwargs):
+        return {
+            "key": "audio-key",
+            "name": "voice.opus",
+            "type": "audio",
+            "url": "https://example.test/voice.opus",
+        }
+
+    async def _handle_message(**kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(channel, "_mark_message_processed", _mark_processed)
+    monkeypatch.setattr(channel, "_add_reaction", _add_reaction)
+    monkeypatch.setattr(channel, "_download_and_store_resource", _download_resource)
+    monkeypatch.setattr(channel, "_handle_message", _handle_message)
+
+    await channel._on_message(
+        _build_message_event(
+            message_type="audio",
+            content='{"file_key":"file-1","file_name":"voice"}',
+        )
+    )
+
+    assert captured["content"] == "Please transcribe this voice message."
+    assert captured["metadata"]["attachments"][0]["type"] == "audio"

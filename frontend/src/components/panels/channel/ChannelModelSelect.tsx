@@ -36,8 +36,8 @@ export function ChannelModelSelect({
   }, []);
 
   return (
-    <div className="space-y-1.5">
-      <label className="block text-sm font-medium text-stone-700 dark:text-stone-300">
+    <div className="es-field">
+      <label className="es-label">
         <div className="flex items-center gap-1.5">
           <Cpu size={14} />
           {t("channel.model", "Model")}
@@ -57,7 +57,7 @@ export function ChannelModelSelect({
           label: `${model.label} (${model.value})`,
         }))}
       />
-      <p className="text-xs text-stone-500 dark:text-stone-500">
+      <p className="es-hint">
         {t(
           "channel.modelHint",
           "Select which model this channel uses. Uses the model's configured provider and API key.",

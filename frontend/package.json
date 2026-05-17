@@ -50,6 +50,7 @@
     "mermaid": "^11.12.3",
     "pdfjs-dist": "^5.4.296",
     "process": "^0.11.10",
+    "qrcode": "^1.5.4",
     "react": "19.2.5",
     "react-dom": "19.2.5",
     "react-file-icon": "^1.6.0",
@@ -75,6 +76,7 @@
   "devDependencies": {
     "@eslint/js": "^9.17.0",
     "@types/node": "^25.3.0",
+    "@types/qrcode": "^1.5.6",
     "@types/react": "^19.0.2",
     "@types/react-dom": "^19.0.2",
     "@types/unist": "^3.0.3",

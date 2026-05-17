@@ -25,13 +25,56 @@ from src.infra.channel.feishu.utils import (
 from src.infra.logging import get_logger
 from src.infra.storage.redis import get_redis_client
 from src.kernel.schemas.channel import ChannelCapability, ChannelType
-from src.kernel.schemas.feishu import FeishuConfig, FeishuGroupPolicy
+from src.kernel.schemas.feishu import (
+    DEFAULT_AUDIO_TRANSCRIBE_PROMPT,
+    FeishuConfig,
+    FeishuGroupPolicy,
+)
 
 logger = get_logger(__name__)
 
 FEISHU_AVAILABLE = importlib.util.find_spec("lark_oapi") is not None
 _PROCESSED_MESSAGE_TTL_SECONDS = 15 * 60
 _PROCESSED_MESSAGE_CACHE_MAX = 1000
+_FEISHU_WS_LOOP_LOCK = threading.Lock()
+_FEISHU_WS_LOOP: asyncio.AbstractEventLoop | None = None
+_FEISHU_WS_THREAD: threading.Thread | None = None
+_LARK_OAPI_WS_PRIVATE_API_VERSION = "1.6.5"
+
+
+def _ensure_feishu_ws_loop() -> asyncio.AbstractEventLoop:
+    """Return the shared lark-oapi WebSocket loop.
+
+    lark-oapi keeps a process-global ``lark_oapi.ws.client.loop`` and uses it
+    inside client methods. Running each tenant on a separate event loop makes
+    SDK tasks await futures created by another loop, so all Feishu WS clients
+    share one dedicated loop thread.
+    """
+    global _FEISHU_WS_LOOP, _FEISHU_WS_THREAD
+    with _FEISHU_WS_LOOP_LOCK:
+        if _FEISHU_WS_LOOP and not _FEISHU_WS_LOOP.is_closed():
+            return _FEISHU_WS_LOOP
+
+        ready = threading.Event()
+        ws_loop = asyncio.new_event_loop()
+
+        def _run_feishu_ws_loop() -> None:
+            import lark_oapi.ws.client as _lark_ws_client
+
+            asyncio.set_event_loop(ws_loop)
+            _lark_ws_client.loop = ws_loop
+            ready.set()
+            ws_loop.run_forever()
+
+        _FEISHU_WS_LOOP = ws_loop
+        _FEISHU_WS_THREAD = threading.Thread(
+            target=_run_feishu_ws_loop,
+            daemon=True,
+            name="feishu-ws-loop",
+        )
+        _FEISHU_WS_THREAD.start()
+        ready.wait(timeout=5)
+        return ws_loop
 
 
 class FeishuChannel(FeishuSenderMixin, BaseChannel):
@@ -59,8 +102,10 @@ class FeishuChannel(FeishuSenderMixin, BaseChannel):
     def __init__(self, config: FeishuConfig, message_handler: Optional[Callable] = None):
         super().__init__(config, message_handler)
         self._client: Any = None
+        self._feishu_http_client: Any = None
         self._ws_client: Any = None
         self._ws_thread: threading.Thread | None = None
+        self._ws_future: Any = None
         self._health_check_thread: threading.Thread | None = None
         self._ws_loop_ref: asyncio.AbstractEventLoop | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -132,6 +177,24 @@ class FeishuChannel(FeishuSenderMixin, BaseChannel):
                     "description": "Emoji to react when receiving messages",
                     "default": "THUMBSUP",
                 },
+                "stream_reply": {
+                    "type": "boolean",
+                    "title": "Stream Replies",
+                    "description": "Render replies with Feishu CardKit streaming updates",
+                    "default": True,
+                },
+                "auto_transcribe_audio": {
+                    "type": "boolean",
+                    "title": "Auto Transcribe Audio",
+                    "description": "Attach audio and ask the agent to transcribe it",
+                    "default": True,
+                },
+                "audio_transcribe_prompt": {
+                    "type": "string",
+                    "title": "Audio Transcription Prompt",
+                    "description": "Prompt sent to the agent when an audio message arrives",
+                    "default": DEFAULT_AUDIO_TRANSCRIBE_PROMPT,
+                },
             },
         }
 
@@ -179,12 +242,22 @@ class FeishuChannel(FeishuSenderMixin, BaseChannel):
                 "sensitive": False,
                 "default": "THUMBSUP",
                 "options": [
-                    {"value": "THUMBSUP", "label": "👍 Thumbs Up"},
-                    {"value": "OK", "label": "👌 OK"},
-                    {"value": "EYES", "label": "👀 Eyes"},
-                    {"value": "DONE", "label": "✅ Done"},
-                    {"value": "HEART", "label": "❤️ Heart"},
-                    {"value": "FIRE", "label": "🔥 Fire"},
+                    {"value": "THUMBSUP", "label": "👍 已收到"},
+                    {"value": "OK", "label": "👌 好的"},
+                    {"value": "DONE", "label": "✅ 已完成"},
+                    {"value": "Yes", "label": "☑️ 确认"},
+                    {"value": "CheckMark", "label": "✔️ 打勾"},
+                    {"value": "Get", "label": "📥 收到"},
+                    {"value": "OnIt", "label": "🎯 在做了"},
+                    {"value": "OneSecond", "label": "⏳ 稍等"},
+                    {"value": "LGTM", "label": "👀 看过了"},
+                    {"value": "MeMeMe", "label": "🙋 我来"},
+                    {"value": "THANKS", "label": "🙏 谢谢"},
+                    {"value": "SALUTE", "label": "🫡 收到"},
+                    {"value": "CLAP", "label": "👏 好的"},
+                    {"value": "Fire", "label": "🔥 处理中"},
+                    {"value": "MUSCLE", "label": "💪 加油"},
+                    {"value": "PRAISE", "label": "🏅 好样的"},
                 ],
             },
             {
@@ -198,6 +271,30 @@ class FeishuChannel(FeishuSenderMixin, BaseChannel):
                     {"value": "mention", "label": "Reply only when @mentioned"},
                     {"value": "open", "label": "Reply to all messages"},
                 ],
+            },
+            {
+                "name": "stream_reply",
+                "title": "Stream Replies",
+                "type": "toggle",
+                "required": False,
+                "sensitive": False,
+                "default": True,
+            },
+            {
+                "name": "auto_transcribe_audio",
+                "title": "Auto Transcribe Audio",
+                "type": "toggle",
+                "required": False,
+                "sensitive": False,
+                "default": True,
+            },
+            {
+                "name": "audio_transcribe_prompt",
+                "title": "Audio Transcription Prompt",
+                "type": "textarea",
+                "required": False,
+                "sensitive": False,
+                "default": DEFAULT_AUDIO_TRANSCRIBE_PROMPT,
             },
         ]
 
@@ -291,70 +388,23 @@ class FeishuChannel(FeishuSenderMixin, BaseChannel):
             builder = lark.EventDispatcherHandler.builder(
                 self.config.encrypt_key or "",
                 self.config.verification_token or "",
-            ).register_p2_im_message_receive_v1(self._on_message_sync)
+            )
+            builder = builder.register_p2_im_message_receive_v1(self._on_message_sync)
+            if hasattr(builder, "register_p2_im_message_reaction_created_v1"):
+                builder = builder.register_p2_im_message_reaction_created_v1(lambda data: None)
+            if hasattr(builder, "register_p2_im_message_reaction_deleted_v1"):
+                builder = builder.register_p2_im_message_reaction_deleted_v1(lambda data: None)
 
             event_handler = builder.build()
+            return client, event_handler
 
-            ws_client = lark.ws.Client(
-                self.config.app_id,
-                self.config.app_secret,
-                event_handler=event_handler,
-                log_level=lark.LogLevel.INFO,
-            )
-            return client, ws_client
+        self._client, event_handler = await self._loop.run_in_executor(None, _build_clients)
 
-        self._client, self._ws_client = await self._loop.run_in_executor(None, _build_clients)
-
-        # Override SDK reconnect defaults for faster recovery
-        self._ws_client._reconnect_interval = self._SDK_RECONNECT_INTERVAL
-        self._ws_client._reconnect_nonce = self._SDK_RECONNECT_NONCE
-
-        # Start WebSocket client in a separate thread
-        def run_ws():
-            import lark_oapi.ws.client as _lark_ws_client
-
-            ws_loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(ws_loop)
-            _lark_ws_client.loop = ws_loop
-            self._ws_loop_ref = ws_loop
-
-            try:
-                while self._running:
-                    try:
-                        self._set_connection_state(ConnectionState.CONNECTING)
-                        logger.info(
-                            f"Feishu WebSocket connecting for user {self.config.user_id} "
-                            f"(attempt {self._reconnect_attempts + 1})"
-                        )
-                        self._ws_client.start()
-                        # start() blocks until disconnect; reset state for next cycle
-                        self._set_connection_state(ConnectionState.CONNECTED)
-                        if self._running:
-                            self._set_connection_state(ConnectionState.RECONNECTING)
-                            delay = self._get_reconnect_delay()
-                            logger.warning(
-                                f"Feishu WebSocket disconnected for user {self.config.user_id}, "
-                                f"reconnecting in {delay:.1f}s"
-                            )
-                            time.sleep(delay)
-                    except Exception as e:
-                        logger.warning(
-                            f"Feishu WebSocket error for user {self.config.user_id}: {e}"
-                        )
-                        if self._running:
-                            self._set_connection_state(ConnectionState.RECONNECTING)
-                            delay = self._get_reconnect_delay()
-                            logger.info(
-                                f"Reconnecting in {delay:.1f}s (attempt {self._reconnect_attempts})"
-                            )
-                            time.sleep(delay)
-                # Loop exited, set final state
-                self._set_connection_state(ConnectionState.DISCONNECTED)
-            finally:
-                ws_loop.close()
-
-        self._ws_thread = threading.Thread(target=run_ws, daemon=True)
-        self._ws_thread.start()
+        self._ws_loop_ref = _ensure_feishu_ws_loop()
+        self._ws_future = asyncio.run_coroutine_threadsafe(
+            self._run_ws_client(event_handler),
+            self._ws_loop_ref,
+        )
 
         # Start health check thread
         self._health_check_thread = threading.Thread(target=self._health_check_loop, daemon=True)
@@ -364,6 +414,79 @@ class FeishuChannel(FeishuSenderMixin, BaseChannel):
             f"Feishu bot started for user {self.config.user_id} with WebSocket long connection"
         )
         return True
+
+    async def _run_ws_client(self, event_handler: Any) -> None:
+        """Run one SDK WebSocket client on the shared lark-oapi loop."""
+        import lark_oapi as lark
+        import lark_oapi.ws.client as _lark_ws_client
+
+        ws_loop = asyncio.get_running_loop()
+        # lark-oapi reads this process-global loop; every tenant is scheduled
+        # onto the shared loop from _ensure_feishu_ws_loop(), so this assignment
+        # is idempotent across tenants.
+        _lark_ws_client.loop = ws_loop
+        self._ws_client = lark.ws.Client(
+            self.config.app_id,
+            self.config.app_secret,
+            event_handler=event_handler,
+            log_level=lark.LogLevel.INFO,
+            auto_reconnect=True,
+        )
+        self._ws_client._reconnect_interval = self._SDK_RECONNECT_INTERVAL
+        self._ws_client._reconnect_nonce = self._SDK_RECONNECT_NONCE
+
+        ping_task: asyncio.Task | None = None
+        try:
+            while self._running:
+                try:
+                    self._set_connection_state(ConnectionState.CONNECTING)
+                    logger.info(
+                        f"Feishu WebSocket connecting for user {self.config.user_id} "
+                        f"(attempt {self._reconnect_attempts + 1})"
+                    )
+                    await self._sdk_ws_connect()
+                    self._set_connection_state(ConnectionState.CONNECTED)
+                    self._reset_reconnect_delay()
+                    if ping_task is None or ping_task.done():
+                        ping_task = self._sdk_ws_start_ping(ws_loop)
+                    while self._running:
+                        await asyncio.sleep(1)
+                except Exception as e:
+                    logger.warning(f"Feishu WebSocket error for user {self.config.user_id}: {e}")
+                    if self._running:
+                        self._set_connection_state(ConnectionState.RECONNECTING)
+                        delay = self._get_reconnect_delay()
+                        logger.info(
+                            f"Reconnecting in {delay:.1f}s (attempt {self._reconnect_attempts})"
+                        )
+                        await asyncio.sleep(delay)
+        finally:
+            if ping_task:
+                ping_task.cancel()
+            if self._ws_client is not None:
+                try:
+                    await self._sdk_ws_disconnect()
+                except Exception:
+                    pass
+            self._set_connection_state(ConnectionState.DISCONNECTED)
+
+    async def _sdk_ws_connect(self) -> None:
+        """Connect through lark-oapi's private WS API.
+
+        lark-oapi 1.6.5 does not expose a public async runner that can host all
+        tenant clients on the SDK's process-global loop. Keep the private-method
+        dependency in these adapter methods so future SDK changes have one place
+        to update.
+        """
+        await self._ws_client._connect()
+
+    def _sdk_ws_start_ping(self, loop: asyncio.AbstractEventLoop) -> asyncio.Task:
+        """Start the lark-oapi 1.6.5 private ping loop."""
+        return loop.create_task(self._ws_client._ping_loop())
+
+    async def _sdk_ws_disconnect(self) -> None:
+        """Disconnect through lark-oapi's private WS API."""
+        await self._ws_client._disconnect()
 
     def _health_check_loop(self) -> None:
         """Health check loop to detect and force-reconnect zombie connections."""
@@ -384,10 +507,10 @@ class FeishuChannel(FeishuSenderMixin, BaseChannel):
                     # Force-close the underlying connection so the SDK detects
                     # the disconnect and triggers its reconnection loop.
                     try:
-                        if self._ws_loop_ref is None:
+                        if self._ws_loop_ref is None or self._ws_client is None:
                             continue
                         asyncio.run_coroutine_threadsafe(
-                            self._ws_client._disconnect(), self._ws_loop_ref
+                            self._sdk_ws_disconnect(), self._ws_loop_ref
                         ).result(timeout=5)
                     except Exception:
                         pass
@@ -397,6 +520,19 @@ class FeishuChannel(FeishuSenderMixin, BaseChannel):
     async def stop(self) -> None:
         """Stop the Feishu bot."""
         self._running = False
+        if self._ws_loop_ref is not None and self._ws_client is not None:
+            try:
+                await asyncio.wrap_future(
+                    asyncio.run_coroutine_threadsafe(
+                        self._sdk_ws_disconnect(),
+                        self._ws_loop_ref,
+                    )
+                )
+            except Exception:
+                pass
+        if self._ws_future is not None:
+            self._ws_future.cancel()
+        await self.close_feishu_http_client()
         self._set_connection_state(ConnectionState.DISCONNECTED)
         logger.info(f"Feishu bot stopped for user {self.config.user_id}")
 
@@ -497,7 +633,50 @@ class FeishuChannel(FeishuSenderMixin, BaseChannel):
                     content_parts.append("[image]")
 
             elif msg_type in ("audio", "file", "media"):
-                content_parts.append(MSG_TYPE_MAP.get(msg_type, f"[{msg_type}]"))
+                file_key = content_json.get("file_key")
+                file_name = content_json.get("file_name") or content_json.get("name") or file_key
+                if msg_type == "audio" and file_name and "." not in file_name:
+                    file_name = f"{file_name}.opus"
+                if msg_type == "media" and file_name and "." not in file_name:
+                    file_name = f"{file_name}.mp4"
+
+                if file_key and file_name:
+                    attachment_type = (
+                        "audio"
+                        if msg_type == "audio"
+                        else "video"
+                        if msg_type == "media"
+                        else "document"
+                    )
+                    content_type = (
+                        "audio/ogg"
+                        if msg_type == "audio"
+                        else "video/mp4"
+                        if msg_type == "media"
+                        else None
+                    )
+                    attachment = await self._download_and_store_resource(
+                        file_key,
+                        message_id,
+                        resource_type="file",
+                        file_name=file_name,
+                        attachment_type=attachment_type,
+                        content_type=content_type,
+                    )
+                    if attachment:
+                        attachments.append(attachment)
+
+                if msg_type == "audio" and getattr(self.config, "auto_transcribe_audio", True):
+                    content_parts.append(
+                        getattr(
+                            self.config,
+                            "audio_transcribe_prompt",
+                            DEFAULT_AUDIO_TRANSCRIBE_PROMPT,
+                        )
+                        or DEFAULT_AUDIO_TRANSCRIBE_PROMPT
+                    )
+                else:
+                    content_parts.append(MSG_TYPE_MAP.get(msg_type, f"[{msg_type}]"))
 
             elif msg_type in (
                 "share_chat",
@@ -539,6 +718,7 @@ class FeishuChannel(FeishuSenderMixin, BaseChannel):
                 "chat_type": chat_type,
                 "msg_type": msg_type,
                 "sender_id": sender_id,
+                "reply_chat_id": chat_id,
             }
             if root_id:
                 metadata["root_id"] = root_id

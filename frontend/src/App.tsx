@@ -6,7 +6,7 @@ import { ProtectedRoute } from "./components/auth/ProtectedRoute";
 import { ChatPageSkeleton, FilesPageSkeleton } from "./components/skeletons";
 import { ThemeProvider } from "./contexts/ThemeContext";
 import { ErrorBoundary } from "./components/common/ErrorBoundary";
-import { SelectionActionPopover } from "./components/common/SelectionActionPopover";
+import { SelectionActionPopover } from "./components/common/SelectionActionPopover.tsx";
 import { useSEO } from "./hooks/usePageTitle";
 import { Permission } from "./types";
 import { sessionApi } from "./services/api";

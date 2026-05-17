@@ -35,8 +35,8 @@ export function ChannelAgentSelect({
   }, []);
 
   return (
-    <div className="space-y-1.5">
-      <label className="block text-sm font-medium text-stone-700 dark:text-stone-300">
+    <div className="es-field">
+      <label className="es-label">
         <div className="flex items-center gap-1.5">
           <Bot size={14} />
           {t("channel.agent", "Agent")}
@@ -56,7 +56,7 @@ export function ChannelAgentSelect({
           label: `${t(agent.name)} — ${t(agent.description)}`,
         }))}
       />
-      <p className="text-xs text-stone-500 dark:text-stone-500">
+      <p className="es-hint">
         {t(
           "channel.agentHint",
           "Select which agent handles messages from this channel",
