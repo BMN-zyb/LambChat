@@ -452,7 +452,7 @@ export function SessionListContent({
             {user?.avatar_url && !imgError ? (
               <img
                 src={user.avatar_url}
-                alt={user?.username || "User"}
+                alt={user?.username || t("common.user")}
                 className="w-full h-full object-cover rounded-full"
                 onError={onImgError}
                 draggable={false}
@@ -467,10 +467,10 @@ export function SessionListContent({
           </div>
           <div className="flex-1 text-left min-w-0">
             <div className="text-sm font-medium text-stone-800 dark:text-stone-100 truncate">
-              {user?.username || "User"}
+              {user?.username || t("common.user")}
             </div>
             <div className="text-xs text-stone-400 dark:text-stone-500 whitespace-nowrap font-serif">
-              {(user?.roles?.[0] || "User").replace(/^./, (c) =>
+              {(user?.roles?.[0] || t("common.user")).replace(/^./, (c) =>
                 c.toUpperCase(),
               )}
             </div>

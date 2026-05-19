@@ -167,7 +167,7 @@ export function SidebarRail({
             {user?.avatar_url && !imgError ? (
               <img
                 src={user.avatar_url}
-                alt={user?.username || "User"}
+                alt={user?.username || t("common.user")}
                 className="w-full h-full object-cover rounded-full"
                 onError={onImgError}
                 draggable={false}

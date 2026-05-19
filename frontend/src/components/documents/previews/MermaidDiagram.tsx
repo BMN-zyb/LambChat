@@ -19,9 +19,11 @@ const MermaidDiagram = memo(function MermaidDiagram({
   const [showDownloadMenu, setShowDownloadMenu] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
 
-  // Handle wheel zoom - let browser handle scroll, just update scale
-  const handleWheel = useCallback((e: React.WheelEvent) => {
-    const delta = e.deltaY > 0 ? -0.1 : 0.1;
+  const handleWheel = useCallback((event: React.WheelEvent) => {
+    if (!event.ctrlKey && !event.metaKey) return;
+
+    event.preventDefault();
+    const delta = event.deltaY > 0 ? -0.1 : 0.1;
     setScale((prev) => Math.min(Math.max(prev + delta, 0.5), 3));
   }, []);
 
@@ -120,12 +122,14 @@ const MermaidDiagram = memo(function MermaidDiagram({
         setError(null);
       } catch (err) {
         setError(
-          err instanceof Error ? err.message : "Failed to render diagram",
+          err instanceof Error
+            ? err.message
+            : t("documents.mermaidRenderFailed"),
         );
       }
     };
     renderDiagram();
-  }, [code]);
+  }, [code, t]);
 
   // Close dropdown when clicking outside
   useEffect(() => {

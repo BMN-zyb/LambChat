@@ -39,6 +39,7 @@
     "@xyflow/react": "^12.10.2",
     "buffer": "^6.0.3",
     "clsx": "^2.1.1",
+    "docx-preview": "^0.3.7",
     "dompurify": "^3.3.2",
     "dxf-viewer": "^1.0.47",
     "events": "^3.3.0",

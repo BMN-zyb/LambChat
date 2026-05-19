@@ -23,7 +23,7 @@ export function ListCard({
   const { t } = useTranslation();
   const fileInfo = getFileTypeInfo(file.file_name, file.mime_type || undefined);
   const FileIcon = fileInfo.icon;
-  const cardPreview = buildFileCardPreview(file);
+  const cardPreview = buildFileCardPreview(file, t);
   const meta = buildMeta(file, t);
   const ctx = useContextMenu();
 

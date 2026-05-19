@@ -33,6 +33,13 @@ test("PDF preview keeps zoom controls without page navigation controls", () => {
   assert.doesNotMatch(source, /previousPage|nextPage/);
 });
 
+test("PDF preview captures wheel zoom locally instead of letting the page zoom", () => {
+  assert.match(source, /handleWheel/);
+  assert.match(source, /event\.(?:ctrlKey|metaKey)/);
+  assert.match(source, /event\.preventDefault\(\)/);
+  assert.match(source, /onWheel=\{handleWheel\}/);
+});
+
 test("PDF preview supports ImageViewer-style mobile gestures", () => {
   assert.match(source, /getPinchDistance/);
   assert.match(source, /handleTouchStart/);

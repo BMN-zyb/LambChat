@@ -49,6 +49,7 @@ function FormFieldRenderer({
   disabled: boolean;
   onInteract?: () => void;
 }) {
+  const { t } = useTranslation();
   const cls =
     "w-full rounded-lg pl-3 pr-3 py-2 text-sm transition-all duration-150 focus:outline-none disabled:opacity-50 approval-input";
 
@@ -129,7 +130,7 @@ function FormFieldRenderer({
           }}
           disabled={disabled}
           className="w-full"
-          placeholder={field.placeholder || "Select an option"}
+          placeholder={field.placeholder || t("approvals.selectOption")}
           options={[
             ...(field.placeholder
               ? [

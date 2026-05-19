@@ -167,7 +167,9 @@
     "tempTag": "temp: {{value}}",
     "temperature": "Temperature",
     "title": "Agent Configuration",
-    "valueAndLabelRequired": "Value and Label are required"
+    "valueAndLabelRequired": "Value and Label are required",
+    "reorderFailed": "Failed to reorder models",
+    "noProviders": "No providers found"
   },
   "agentOptions": {
     "enableCodeInterpreter": {
@@ -204,7 +206,8 @@
     "needsConfirmation": "Needs Confirmation",
     "reject": "Reject",
     "send": "Send",
-    "submit": "Submit"
+    "submit": "Submit",
+    "selectOption": "Select an option"
   },
   "auth": {
     "account": "Account",
@@ -485,6 +488,8 @@
     "helpDocs": "Help Docs",
     "keyboardShortcuts": "Keyboard Shortcuts",
     "mentionNoResults": "No matching personas",
+    "mermaid": "Mermaid",
+    "mermaidDiagram": "Mermaid Diagram",
     "message": {
       "allFiles": "All files",
       "args": "Args",
@@ -617,11 +622,13 @@
     "deleteFailed": "Failed to delete",
     "deselectAll": "Deselect all",
     "disable": "Disable",
+    "dismiss": "Dismiss",
     "done": "Done",
     "edit": "Edit",
     "enable": "Enable",
     "expand": "Expand",
     "export": "Export",
+    "help": "Help",
     "import": "Import",
     "importing": "Importing...",
     "language": "Language",
@@ -664,7 +671,10 @@
       "monthsAgo": "{{count}}mo ago"
     },
     "timeMonthsAgo": "{{count}}mo ago",
-    "timeWeeksAgo": "{{count}}w ago"
+    "timeWeeksAgo": "{{count}}w ago",
+    "user": "User",
+    "you": "You",
+    "assistant": "Assistant"
   },
   "contactAdmin": {
     "emailActivationDesc": "Your email has not been verified or the verification link has expired. Please contact the administrator for assistance.",
@@ -772,7 +782,17 @@
     "wordPreviewError": "Word preview error",
     "yesterday": "Yesterday",
     "zoomIn": "Zoom in",
-    "zoomOut": "Zoom out"
+    "zoomOut": "Zoom out",
+    "invalidExcalidrawFormat": "Invalid Excalidraw file format",
+    "excalidrawExportFailed": "Failed to load export function",
+    "excalidrawRenderFailed": "Failed to render Excalidraw diagram",
+    "mermaidRenderFailed": "Failed to render diagram",
+    "markdownDocument": "Markdown document",
+    "markdown": "Markdown",
+    "documentContentPreview": "Document content preview",
+    "readMore": "Read more →",
+    "csvDataFile": "CSV data file",
+    "csv": "CSV"
   },
   "envVars": {
     "addFailed": "Failed to add",
@@ -865,7 +885,6 @@
     "credentials": "App Credentials",
     "currentCredential": "Current credential",
     "custom": "Custom",
-    "preset": "Preset",
     "customEmojiHint": "Enter an emoji character or a Feishu emoji type code",
     "customEmojiPlaceholder": "Enter emoji or text (e.g., 🎯 or DONE)",
     "customEmojiRequired": "Custom emoji is required when selected",
@@ -907,6 +926,7 @@
     "openRegistration": "Open in browser",
     "optional": "(optional)",
     "passwordMask": "••••••••••••",
+    "preset": "Preset",
     "qrExpiresHint": "QR code is valid for 10 minutes and can be scanned once.",
     "reactEmoji": "Reaction Emoji",
     "registering": "Waiting for scan",
@@ -1028,6 +1048,12 @@
     "uploadFailed": "Upload failed",
     "uploadSuccess": "Upload successful",
     "uploading": "Uploading..."
+  },
+  "footer": {
+    "openSource": "Open Source",
+    "resources": "Resources",
+    "mitLicense": "MIT License",
+    "mit": "MIT"
   },
   "imageViewer": {
     "download": "Download",
@@ -1519,7 +1545,23 @@
     "use": "Use",
     "useFailed": "Failed to use persona preset",
     "useSuccess": "Switched to persona \"{{name}}\"",
-    "using": "In Use"
+    "using": "In Use",
+    "emojiSparkles": "Sparkles",
+    "emojiRobot": "Robot",
+    "emojiAcademic": "Academic",
+    "emojiCoding": "Coding",
+    "emojiWriting": "Writing",
+    "emojiSecurity": "Security",
+    "emojiData": "Data",
+    "emojiProductivity": "Productivity",
+    "emojiGeneral": "General",
+    "emojiArt": "Art",
+    "emojiMusic": "Music",
+    "emojiLiterature": "Literature",
+    "emojiIntelligence": "Intelligence",
+    "emojiScience": "Science",
+    "emojiChat": "Chat",
+    "emojiStar": "Star"
   },
   "profile": {
     "appearance": "Appearance",
@@ -1594,7 +1636,9 @@
     "usernameLengthError": "Username must be 3-50 characters",
     "usernamePlaceholder": "Enter username",
     "usernameUpdateFailed": "Failed to update username",
-    "usernameUpdated": "Username updated successfully"
+    "usernameUpdated": "Username updated successfully",
+    "uploadFailed": "Upload failed",
+    "deleteFailed": "Delete failed"
   },
   "project": {
     "code": "Code",
@@ -1616,6 +1660,15 @@
     "resetFiles": "Reset files",
     "toggleExplorer": "Toggle file explorer",
     "untitled": "Untitled Project"
+  },
+  "pwaStatus": {
+    "backOnline": "Back online",
+    "dismiss": "Dismiss",
+    "offlineBody": "Chat, files, and sync will resume when the connection returns.",
+    "offlineTitle": "You are offline",
+    "updateReadyBody": "A fresh LambChat version is ready to apply.",
+    "updateReadyTitle": "Update ready",
+    "newUpdate": "You have a new LambChat update."
   },
   "roles": {
     "concurrentChatsHint": "Max concurrent chat tasks per user (empty = unlimited, default 5). Excess tasks enter queue",
@@ -1736,7 +1789,8 @@
     "users": {
       "description": "Manage user accounts, roles, and access permissions. Administer multi-tenant user lifecycle and security settings.",
       "title": "User Management"
-    }
+    },
+    "defaultDescription": "A pluggable, multi-tenant AI conversation system. Skills + MCP dual-engine driven, modular by design."
   },
   "settingDesc": {
     "ACCESS_TOKEN_EXPIRE_HOURS": "Access token expiration in hours",
@@ -1971,7 +2025,11 @@
     "taskRunning": "Running",
     "title": "Share Session",
     "userMessage": "(User Message: {{message}})",
-    "visibility": "Access Control"
+    "visibility": "Access Control",
+    "invalidLink": "Invalid share link",
+    "loadFailed": "Failed to load shared content",
+    "platformTitle": "{{appName}} - AI Agent Platform",
+    "platformDescription": "A pluggable, multi-tenant AI conversation platform powered by Skills and MCP dual-engine. Supports Claude, GPT, Gemini and more."
   },
   "shortcut": {
     "categoryChat": "Chat",

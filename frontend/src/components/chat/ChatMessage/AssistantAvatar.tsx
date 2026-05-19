@@ -5,6 +5,7 @@ import {
   getEmojiAvatarUrl,
   type PersonaAvatarIconKey,
 } from "../../persona/personaAvatar";
+import { useTranslation } from "react-i18next";
 import { getFluentEmojiCDN } from "@lobehub/fluent-emoji";
 import {
   Code2,
@@ -43,6 +44,7 @@ export function AssistantAvatar({
   personaAvatar?: string | null;
   personaSize?: number;
 }) {
+  const { t } = useTranslation();
   const builtInIcon = getPersonaAvatarIcon(personaAvatar);
   if (builtInIcon) {
     const Icon = ICONS[builtInIcon.key];
@@ -68,7 +70,7 @@ export function AssistantAvatar({
     return (
       <img
         src={getEmojiAvatarUrl(personaAvatar)}
-        alt="Assistant"
+        alt={t("chat.assistant", "助手")}
         width={personaSize + 6}
         height={personaSize + 6}
         className={className}
@@ -80,7 +82,7 @@ export function AssistantAvatar({
     return (
       <img
         src={personaAvatar}
-        alt="Assistant"
+        alt={t("chat.assistant", "助手")}
         width={personaSize + 6}
         height={personaSize + 6}
         className={className}
@@ -91,7 +93,7 @@ export function AssistantAvatar({
   return (
     <img
       src={DEFAULT_AVATAR_SRC}
-      alt="Assistant"
+      alt={t("chat.assistant", "助手")}
       width={28}
       height={28}
       className={className}

@@ -2,8 +2,7 @@ import { useEffect } from "react";
 import { useTranslation } from "react-i18next";
 import { APP_NAME } from "../constants";
 
-const DEFAULT_DESCRIPTION =
-  "A pluggable, multi-tenant AI conversation system. Skills + MCP dual-engine driven, modular by design.";
+const DEFAULT_DESCRIPTION_KEY = "seo.defaultDescription";
 
 const DEFAULT_OG_TYPE = "website";
 
@@ -90,7 +89,7 @@ export function useSEO(config: SEOConfig) {
 
     document.title = fullTitle;
 
-    const desc = description ? t(description) : DEFAULT_DESCRIPTION;
+    const desc = description ? t(description) : t(DEFAULT_DESCRIPTION_KEY);
 
     setMetaContent('meta[name="description"]', desc);
     setOrCreateMeta("property", "og:title", fullTitle);
@@ -111,12 +110,15 @@ export function useSEO(config: SEOConfig) {
 
     return () => {
       document.title = APP_NAME;
-      setMetaContent('meta[name="description"]', DEFAULT_DESCRIPTION);
+      setMetaContent('meta[name="description"]', t(DEFAULT_DESCRIPTION_KEY));
       setOrCreateMeta("property", "og:title", APP_NAME);
-      setOrCreateMeta("property", "og:description", DEFAULT_DESCRIPTION);
+      setOrCreateMeta("property", "og:description", t(DEFAULT_DESCRIPTION_KEY));
       setOrCreateMeta("property", "og:type", DEFAULT_OG_TYPE);
       setOrCreateMeta("name", "twitter:title", APP_NAME);
-      setMetaContent('meta[name="twitter:description"]', DEFAULT_DESCRIPTION);
+      setMetaContent(
+        'meta[name="twitter:description"]',
+        t(DEFAULT_DESCRIPTION_KEY),
+      );
       for (const crawler of CRAWLER_ROBOTS_META_NAMES) {
         setMetaContent(`meta[name="${crawler}"]`, "index, follow");
       }
@@ -151,9 +153,15 @@ export function usePageTitle(
 
     return () => {
       document.title = isI18nKey ? t("appName") || suffix : suffix;
-      setMetaContent('meta[name="description"]', DEFAULT_DESCRIPTION);
-      setMetaContent('meta[property="og:description"]', DEFAULT_DESCRIPTION);
-      setMetaContent('meta[name="twitter:description"]', DEFAULT_DESCRIPTION);
+      setMetaContent('meta[name="description"]', t(DEFAULT_DESCRIPTION_KEY));
+      setMetaContent(
+        'meta[property="og:description"]',
+        t(DEFAULT_DESCRIPTION_KEY),
+      );
+      setMetaContent(
+        'meta[name="twitter:description"]',
+        t(DEFAULT_DESCRIPTION_KEY),
+      );
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [title, suffix, isI18nKey, description]);

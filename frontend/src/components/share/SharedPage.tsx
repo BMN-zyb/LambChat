@@ -205,7 +205,7 @@ export function SharedPage() {
 
   useEffect(() => {
     if (!shareId) {
-      setError("Invalid share link");
+      setError(t("share.invalidLink"));
       setIsLoading(false);
       return;
     }
@@ -230,7 +230,7 @@ export function SharedPage() {
             setError(err.message);
           }
         } else {
-          setError("Failed to load shared content");
+          setError(t("share.loadFailed"));
         }
       } finally {
         setIsLoading(false);
@@ -238,7 +238,7 @@ export function SharedPage() {
     };
 
     loadSharedContent();
-  }, [shareId]);
+  }, [shareId, t]);
 
   // Reconstruct messages from events using the same logic as the main chat
   const messages = useMemo(() => {
@@ -434,10 +434,8 @@ export function SharedPage() {
     setTwitter("twitter:description", description);
 
     return () => {
-      document.title = `${APP_NAME} - AI Agent Platform`;
-      setDescription(
-        "LambChat is a pluggable, multi-tenant AI conversation platform. Skills + MCP dual-engine driven, supporting Claude, GPT, Gemini and more.",
-      );
+      document.title = t("share.platformTitle", { appName: APP_NAME });
+      setDescription(t("share.platformDescription", { appName: APP_NAME }));
     };
   }, [data, messages, t]);
 

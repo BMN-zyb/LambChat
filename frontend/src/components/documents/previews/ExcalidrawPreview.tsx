@@ -89,7 +89,7 @@ const ExcalidrawPreview = memo(function ExcalidrawPreview({
 
     const parsed = parseData(data);
     if (!parsed) {
-      setError("Invalid Excalidraw file format");
+      setError(t("documents.invalidExcalidrawFormat"));
       setIsLoading(false);
       return;
     }
@@ -105,7 +105,7 @@ const ExcalidrawPreview = memo(function ExcalidrawPreview({
         // Use local reference to satisfy TypeScript
         const exportFn = exportToSvgFunc;
         if (!exportFn) {
-          throw new Error("Failed to load export function");
+          throw new Error(t("documents.excalidrawExportFailed"));
         }
 
         const svg = await exportFn({
@@ -119,18 +119,21 @@ const ExcalidrawPreview = memo(function ExcalidrawPreview({
         setError(null);
       } catch (err) {
         console.error("Failed to render Excalidraw:", err);
-        setError("Failed to render Excalidraw diagram");
+        setError(t("documents.excalidrawRenderFailed"));
       } finally {
         setIsLoading(false);
       }
     };
 
     renderSvg();
-  }, [data, parseData]);
+  }, [data, parseData, t]);
 
   // Wheel zoom
-  const handleWheel = useCallback((e: React.WheelEvent) => {
-    const delta = e.deltaY > 0 ? -0.1 : 0.1;
+  const handleWheel = useCallback((event: React.WheelEvent) => {
+    if (!event.ctrlKey && !event.metaKey) return;
+
+    event.preventDefault();
+    const delta = event.deltaY > 0 ? -0.1 : 0.1;
     setScale((prev) => Math.min(Math.max(prev + delta, 0.1), 5));
   }, []);
 
@@ -416,7 +419,9 @@ const ExcalidrawPreview = memo(function ExcalidrawPreview({
             dangerouslySetInnerHTML={{ __html: svgContent }}
           />
         ) : (
-          <p className="text-stone-400 dark:text-stone-500">No content</p>
+          <p className="text-stone-400 dark:text-stone-500">
+            {t("documents.noContent", "无内容")}
+          </p>
         )}
       </div>
     </div>

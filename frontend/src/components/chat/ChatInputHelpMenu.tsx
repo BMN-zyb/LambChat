@@ -31,7 +31,7 @@ export function ChatInputHelpMenu() {
     >
       <button
         type="button"
-        aria-label="Help"
+        aria-label={t("common.help", "帮助")}
         aria-expanded={helpMenuOpen}
         onClick={() => setHelpMenuOpen((v) => !v)}
         className="flex items-center justify-center w-8 h-8 text-sm font-medium rounded-full shadow-md transition-all duration-200 hover:shadow-lg hover:scale-110 active:scale-95"

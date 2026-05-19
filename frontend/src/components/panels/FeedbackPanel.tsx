@@ -155,7 +155,7 @@ function FeedbackDetailModal({
               onClick={onClose}
               className="flex h-8 w-8 items-center justify-center rounded-lg text-stone-400 transition-colors hover:bg-stone-100 hover:text-stone-600 dark:hover:bg-stone-800 dark:hover:text-stone-300"
             >
-              <span className="sr-only">Close</span>
+              <span className="sr-only">{t("common.close", "关闭")}</span>
               <svg
                 className="h-5 w-5"
                 fill="none"

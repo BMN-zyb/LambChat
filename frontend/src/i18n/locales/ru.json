@@ -167,7 +167,9 @@
     "tempTag": "темп: {{value}}",
     "temperature": "Температура",
     "title": "Конфигурация агентов",
-    "valueAndLabelRequired": "Значение и метка обязательны"
+    "valueAndLabelRequired": "Значение и метка обязательны",
+    "reorderFailed": "Не удалось изменить порядок моделей",
+    "noProviders": "Провайдеры не найдены"
   },
   "agentOptions": {
     "enableCodeInterpreter": {
@@ -204,7 +206,8 @@
     "needsConfirmation": "Требуется подтверждение",
     "reject": "Отклонить",
     "send": "Отправить",
-    "submit": "Отправить"
+    "submit": "Отправить",
+    "selectOption": "Выберите параметр"
   },
   "auth": {
     "account": "Аккаунт",
@@ -486,6 +489,8 @@
     "helpDocs": "Справка",
     "keyboardShortcuts": "Горячие клавиши",
     "mentionNoResults": "Нет подходящих персон",
+    "mermaid": "Mermaid",
+    "mermaidDiagram": "Диаграмма Mermaid",
     "message": {
       "allFiles": "Все файлы",
       "args": "Аргументы",
@@ -620,11 +625,13 @@
     "deleteFailed": "Не удалось удалить",
     "deselectAll": "Снять выделение",
     "disable": "Отключить",
+    "dismiss": "Закрыть",
     "done": "Готово",
     "edit": "Редактировать",
     "enable": "Включить",
     "expand": "Развернуть",
     "export": "Экспорт",
+    "help": "Помощь",
     "import": "Импорт",
     "importing": "Импорт...",
     "language": "Язык",
@@ -667,7 +674,10 @@
       "monthsAgo": "{{count}}мес назад"
     },
     "timeMonthsAgo": "{{count}}мес назад",
-    "timeWeeksAgo": "{{count}}нед назад"
+    "timeWeeksAgo": "{{count}}нед назад",
+    "user": "Пользователь",
+    "you": "Вы",
+    "assistant": "Ассистент"
   },
   "contactAdmin": {
     "emailActivationDesc": "Ваш email не подтверждён или ссылка подтверждения истекла. Обратитесь к администратору за помощью.",
@@ -776,7 +786,17 @@
     "wordPreviewError": "Ошибка предпросмотра Word",
     "yesterday": "Вчера",
     "zoomIn": "Увеличить",
-    "zoomOut": "Уменьшить"
+    "zoomOut": "Уменьшить",
+    "invalidExcalidrawFormat": "Неверный формат файла Excalidraw",
+    "excalidrawExportFailed": "Не удалось загрузить функцию экспорта",
+    "excalidrawRenderFailed": "Не удалось отрисовать диаграмму Excalidraw",
+    "mermaidRenderFailed": "Не удалось отрисовать диаграмму",
+    "markdownDocument": "Документ Markdown",
+    "markdown": "Markdown",
+    "documentContentPreview": "Предпросмотр содержимого документа",
+    "readMore": "Читать далее →",
+    "csvDataFile": "Файл данных CSV",
+    "csv": "CSV"
   },
   "envVars": {
     "addFailed": "Ошибка добавления",
@@ -869,7 +889,6 @@
     "credentials": "Учётные данные приложения",
     "currentCredential": "Текущие учётные данные",
     "custom": "Пользовательский",
-    "preset": "Предустановка",
     "customEmojiHint": "Введите эмодзи или код эмодзи Feishu",
     "customEmojiPlaceholder": "Введите эмодзи или текст (напр. 🎯 или DONE)",
     "customEmojiRequired": "Пользовательский эмодзи обязателен при выборе",
@@ -911,6 +930,7 @@
     "openRegistration": "Открыть в браузере",
     "optional": "(необязательно)",
     "passwordMask": "••••••••••••",
+    "preset": "Предустановка",
     "qrExpiresHint": "QR-код действителен 10 минут и может быть отсканирован только один раз.",
     "reactEmoji": "Эмодзи реакции",
     "registering": "Ожидание сканирования",
@@ -1032,6 +1052,12 @@
     "uploadFailed": "Ошибка загрузки",
     "uploadSuccess": "Загрузка успешна",
     "uploading": "Загрузка..."
+  },
+  "footer": {
+    "openSource": "Открытый исходный код",
+    "resources": "Ресурсы",
+    "mitLicense": "Лицензия MIT",
+    "mit": "MIT"
   },
   "imageViewer": {
     "download": "Скачать",
@@ -1519,7 +1545,23 @@
     "use": "Использовать",
     "useFailed": "Не удалось использовать пресет персоны",
     "useSuccess": "Переключено на персону \"{{name}}\"",
-    "using": "Используется"
+    "using": "Используется",
+    "emojiSparkles": "Искры",
+    "emojiRobot": "Робот",
+    "emojiAcademic": "Академический",
+    "emojiCoding": "Программирование",
+    "emojiWriting": "Писательство",
+    "emojiSecurity": "Безопасность",
+    "emojiData": "Данные",
+    "emojiProductivity": "Продуктивность",
+    "emojiGeneral": "Общий",
+    "emojiArt": "Искусство",
+    "emojiMusic": "Музыка",
+    "emojiLiterature": "Литература",
+    "emojiIntelligence": "Интеллект",
+    "emojiScience": "Наука",
+    "emojiChat": "Чат",
+    "emojiStar": "Звезда"
   },
   "profile": {
     "appearance": "Внешний вид",
@@ -1594,7 +1636,9 @@
     "usernameLengthError": "Имя пользователя должно быть от 3 до 50 символов",
     "usernamePlaceholder": "Введите имя пользователя",
     "usernameUpdateFailed": "Не удалось обновить имя пользователя",
-    "usernameUpdated": "Имя пользователя успешно обновлено"
+    "usernameUpdated": "Имя пользователя успешно обновлено",
+    "uploadFailed": "Ошибка загрузки",
+    "deleteFailed": "Ошибка удаления"
   },
   "project": {
     "code": "Код",
@@ -1616,6 +1660,15 @@
     "resetFiles": "Сбросить файлы",
     "toggleExplorer": "Переключить проводник файлов",
     "untitled": "Проект без названия"
+  },
+  "pwaStatus": {
+    "backOnline": "Снова онлайн",
+    "dismiss": "Закрыть",
+    "offlineBody": "Чаты, файлы и синхронизация возобновятся после восстановления подключения.",
+    "offlineTitle": "Вы офлайн",
+    "updateReadyBody": "Новая версия LambChat готова к применению.",
+    "updateReadyTitle": "Обновление готово",
+    "newUpdate": "Доступно обновление LambChat."
   },
   "roles": {
     "concurrentChatsHint": "Макс. параллельных чат-задач на пользователя (пусто = без ограничений, по умолчанию 5). Лишние задачи попадают в очередь",
@@ -1736,7 +1789,8 @@
     "users": {
       "description": "Управляйте учётными записями, ролями и правами доступа. Администрируйте многопользовательский жизненный цикл и настройки безопасности.",
       "title": "Управление пользователями"
-    }
+    },
+    "defaultDescription": "Расширяемая мультитенантная система AI-диалогов. Двойной движок Skills + MCP, модульная архитектура."
   },
   "settingDesc": {
     "ACCESS_TOKEN_EXPIRE_HOURS": "Срок действия access-токена в часах",
@@ -1971,7 +2025,11 @@
     "taskRunning": "Выполняется",
     "title": "Поделиться сессией",
     "userMessage": "(Сообщение пользователя: {{message}})",
-    "visibility": "Контроль доступа"
+    "visibility": "Контроль доступа",
+    "invalidLink": "Недействительная ссылка",
+    "loadFailed": "Не удалось загрузить общий контент",
+    "platformTitle": "{{appName}} - Платформа AI-агентов",
+    "platformDescription": "Расширяемая мультитенантная платформа AI-диалогов с двойным движком Skills + MCP. Поддержка Claude, GPT, Gemini и др."
   },
   "shortcut": {
     "categoryChat": "Чат",

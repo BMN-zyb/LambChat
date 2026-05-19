@@ -75,7 +75,7 @@ export function Footer({ onScrollToSection }: FooterProps) {
             </div>
             <div>
               <h4 className="text-[10px] font-bold tracking-[0.14em] uppercase text-stone-400 dark:text-stone-500 mb-5">
-                Resources
+                {t("footer.resources")}
               </h4>
               <ul className="space-y-3">
                 <li>
@@ -95,7 +95,7 @@ export function Footer({ onScrollToSection }: FooterProps) {
                     rel="noopener noreferrer"
                     className="text-[13px] text-stone-400 dark:text-stone-500 hover:text-stone-900 dark:hover:text-stone-50 transition-colors duration-200"
                   >
-                    MIT License
+                    {t("footer.mitLicense")}
                   </a>
                 </li>
               </ul>
@@ -124,9 +124,9 @@ export function Footer({ onScrollToSection }: FooterProps) {
             &copy; {new Date().getFullYear()} {APP_NAME}
           </span>
           <div className="flex items-center gap-2.5 text-xs text-stone-300 dark:text-stone-600">
-            <span>Open Source</span>
+            <span>{t("footer.openSource", "Open Source")}</span>
             <span className="w-1 h-1 rounded-full bg-stone-200 dark:bg-stone-700" />
-            <span>MIT</span>
+            <span>{t("footer.mit")}</span>
           </div>
         </div>
       </div>

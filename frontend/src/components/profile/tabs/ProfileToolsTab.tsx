@@ -29,7 +29,7 @@ export function ProfileToolsTab() {
     setIsLoading(true);
     try {
       const response = await authenticatedRequest(`${API_BASE}/tools`);
-      if (!response.ok) throw new Error("Failed to fetch tools");
+      if (!response.ok) throw new Error(t("tools.loadFailed"));
       const data = await response.json();
       setTools(data.tools || []);
     } catch {

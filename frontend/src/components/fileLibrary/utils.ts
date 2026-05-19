@@ -150,9 +150,16 @@ function normalizeLines(lines: Array<string | null | undefined>): string[] {
   return lines.map(compactLine).filter(Boolean).slice(0, 4);
 }
 
-function formatCount(count: number | undefined): string {
-  if (!count || count < 1) return "Project files";
-  return count === 1 ? "1 file" : `${count} files`;
+function formatCount(count: number | undefined, t?: TFunction): string {
+  if (!count || count < 1)
+    return t ? t("files.projectFiles", "项目文件") : "Project files";
+  return count === 1
+    ? t
+      ? t("files.oneFile", "1 个文件")
+      : "1 file"
+    : t
+      ? t("files.countFiles", "{{count}} 个文件", { count })
+      : `${count} files`;
 }
 
 function normalizeStoredPreview(
@@ -302,7 +309,10 @@ function pascalCase(s: string): string {
   return cc.charAt(0).toUpperCase() + cc.slice(1);
 }
 
-export function buildFileCardPreview(file: RevealedFileItem): FileCardPreview {
+export function buildFileCardPreview(
+  file: RevealedFileItem,
+  t?: TFunction,
+): FileCardPreview {
   const stored = normalizeStoredPreview(file);
   if (stored) return stored;
 
@@ -330,7 +340,7 @@ export function buildFileCardPreview(file: RevealedFileItem): FileCardPreview {
     const fileCount =
       meta?.file_count ??
       (meta?.files ? Object.keys(meta.files).length : undefined);
-    const subtitle = formatCount(fileCount);
+    const subtitle = formatCount(fileCount, t);
     const entryLabel = meta?.entry
       ? meta.entry.length > 28
         ? "..." + meta.entry.slice(-25)
@@ -355,13 +365,17 @@ export function buildFileCardPreview(file: RevealedFileItem): FileCardPreview {
     return {
       kind: "markdown",
       title,
-      subtitle: description || "Markdown document",
-      badge: "Markdown",
-      language: "Markdown",
+      subtitle:
+        description ||
+        (t?.("documents.markdownDocument") ?? "Markdown document"),
+      badge: t?.("documents.markdown") ?? "Markdown",
+      language: t?.("documents.markdown") ?? "Markdown",
       lines: normalizeLines([
         title,
-        description || "Document content preview",
-        description ? "Read more →" : "",
+        description ||
+          (t?.("documents.documentContentPreview") ??
+            "Document content preview"),
+        description ? t?.("documents.readMore") ?? "Read more →" : "",
       ]),
       colorName,
     };
@@ -383,8 +397,9 @@ export function buildFileCardPreview(file: RevealedFileItem): FileCardPreview {
       return {
         kind: "text",
         title,
-        subtitle: description || "CSV data file",
-        badge: "CSV",
+        subtitle:
+          description || (t?.("documents.csvDataFile") ?? "CSV data file"),
+        badge: t?.("documents.csv") ?? "CSV",
         lines: normalizeLines([
           "id, name, value",
           "1, item_a, 42",

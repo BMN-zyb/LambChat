@@ -38,23 +38,23 @@ import type {
   PersonaPresetUpdate,
 } from "../../types";
 
-const AVATAR_EMOJIS: { emoji: string; label: string }[] = [
-  { emoji: "✨", label: "Sparkles" },
-  { emoji: "🤖", label: "Robot" },
-  { emoji: "🎓", label: "Academic" },
-  { emoji: "💻", label: "Coding" },
-  { emoji: "✍️", label: "Writing" },
-  { emoji: "🛡️", label: "Security" },
-  { emoji: "📊", label: "Data" },
-  { emoji: "⚡", label: "Productivity" },
-  { emoji: "📦", label: "General" },
-  { emoji: "🎨", label: "Art" },
-  { emoji: "🎵", label: "Music" },
-  { emoji: "📚", label: "Literature" },
-  { emoji: "🧠", label: "Intelligence" },
-  { emoji: "🔬", label: "Science" },
-  { emoji: "💬", label: "Chat" },
-  { emoji: "🌟", label: "Star" },
+const AVATAR_EMOJIS: { emoji: string; labelKey: string }[] = [
+  { emoji: "✨", labelKey: "personaPresets.emojiSparkles" },
+  { emoji: "🤖", labelKey: "personaPresets.emojiRobot" },
+  { emoji: "🎓", labelKey: "personaPresets.emojiAcademic" },
+  { emoji: "💻", labelKey: "personaPresets.emojiCoding" },
+  { emoji: "✍️", labelKey: "personaPresets.emojiWriting" },
+  { emoji: "🛡️", labelKey: "personaPresets.emojiSecurity" },
+  { emoji: "📊", labelKey: "personaPresets.emojiData" },
+  { emoji: "⚡", labelKey: "personaPresets.emojiProductivity" },
+  { emoji: "📦", labelKey: "personaPresets.emojiGeneral" },
+  { emoji: "🎨", labelKey: "personaPresets.emojiArt" },
+  { emoji: "🎵", labelKey: "personaPresets.emojiMusic" },
+  { emoji: "📚", labelKey: "personaPresets.emojiLiterature" },
+  { emoji: "🧠", labelKey: "personaPresets.emojiIntelligence" },
+  { emoji: "🔬", labelKey: "personaPresets.emojiScience" },
+  { emoji: "💬", labelKey: "personaPresets.emojiChat" },
+  { emoji: "🌟", labelKey: "personaPresets.emojiStar" },
 ];
 
 interface StarterPromptDraftRow {
@@ -466,11 +466,11 @@ export function PersonaEditorModal({
                         }));
                         setIconPickerOpen(false);
                       }}
-                      title={item.label}
+                      title={t(item.labelKey)}
                     >
                       <img
                         src={getFluentEmojiCDN(item.emoji, { type: "anim" })}
-                        alt={item.label}
+                        alt={t(item.labelKey)}
                         width={20}
                         height={20}
                         style={{ objectFit: "contain" }}

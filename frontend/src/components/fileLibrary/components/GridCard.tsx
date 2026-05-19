@@ -24,7 +24,7 @@ export function GridCard({
   const fileInfo = getFileTypeInfo(file.file_name, file.mime_type || undefined);
   const FileIcon = fileInfo.icon;
   const isProject = file.file_type === "project";
-  const cardPreview = buildFileCardPreview(file);
+  const cardPreview = buildFileCardPreview(file, t);
   const meta = buildMeta(file, t);
   const ctx = useContextMenu();
 

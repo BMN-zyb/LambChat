@@ -112,6 +112,16 @@ const PdfPreview = memo(function PdfPreview({ url }: PdfPreviewProps) {
     );
   }, []);
 
+  const handleWheel = useCallback((event: React.WheelEvent<HTMLDivElement>) => {
+    if (!event.ctrlKey && !event.metaKey) return;
+
+    event.preventDefault();
+    const delta = event.deltaY > 0 ? -SCALE_STEP : SCALE_STEP;
+    setScale((current) =>
+      Number(clamp(current + delta, MIN_SCALE, MAX_SCALE).toFixed(2)),
+    );
+  }, []);
+
   const handleTouchStart = useCallback(
     (event: React.TouchEvent<HTMLDivElement>) => {
       if (event.touches.length === 1) {
@@ -270,6 +280,7 @@ const PdfPreview = memo(function PdfPreview({ url }: PdfPreviewProps) {
       <div
         ref={containerRef}
         className="relative min-h-0 flex-1 overflow-auto px-3 py-4 sm:px-5 sm:py-5"
+        onWheel={handleWheel}
         onDoubleClick={handleDoubleTapZoom}
         onTouchStart={handleTouchStart}
         onTouchMove={handleTouchMove}

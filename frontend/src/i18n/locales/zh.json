@@ -167,7 +167,9 @@
     "tempTag": "温度: {{value}}",
     "temperature": "温度",
     "title": "助手配置",
-    "valueAndLabelRequired": "值和标签为必填项"
+    "valueAndLabelRequired": "值和标签为必填项",
+    "reorderFailed": "模型排序失败",
+    "noProviders": "未找到提供商"
   },
   "agentOptions": {
     "enableCodeInterpreter": {
@@ -204,7 +206,8 @@
     "needsConfirmation": "需要确认",
     "reject": "拒绝",
     "send": "发送",
-    "submit": "提交"
+    "submit": "提交",
+    "selectOption": "选择一个选项"
   },
   "auth": {
     "account": "账号",
@@ -485,6 +488,8 @@
     "helpDocs": "帮助文档",
     "keyboardShortcuts": "键盘快捷键",
     "mentionNoResults": "没有匹配的角色",
+    "mermaid": "Mermaid",
+    "mermaidDiagram": "Mermaid 图表",
     "message": {
       "allFiles": "全部文件",
       "args": "参数",
@@ -617,11 +622,13 @@
     "deleteFailed": "删除失败",
     "deselectAll": "取消全选",
     "disable": "禁用",
+    "dismiss": "关闭",
     "done": "完成",
     "edit": "编辑",
     "enable": "启用",
     "expand": "展开",
     "export": "导出",
+    "help": "帮助",
     "import": "导入",
     "importing": "导入中...",
     "language": "语言",
@@ -664,7 +671,10 @@
       "monthsAgo": "{{count}}个月前"
     },
     "timeMonthsAgo": "{{count}}个月前",
-    "timeWeeksAgo": "{{count}}周前"
+    "timeWeeksAgo": "{{count}}周前",
+    "user": "用户",
+    "you": "你",
+    "assistant": "助手"
   },
   "contactAdmin": {
     "emailActivationDesc": "您的邮箱尚未验证或验证链接已过期，请联系管理员获取帮助。",
@@ -773,7 +783,17 @@
     "wordPreviewError": "Word 预览错误",
     "yesterday": "昨天",
     "zoomIn": "放大",
-    "zoomOut": "缩小"
+    "zoomOut": "缩小",
+    "invalidExcalidrawFormat": "无效的 Excalidraw 文件格式",
+    "excalidrawExportFailed": "加载导出功能失败",
+    "excalidrawRenderFailed": "渲染 Excalidraw 图表失败",
+    "mermaidRenderFailed": "渲染图表失败",
+    "markdownDocument": "Markdown 文档",
+    "markdown": "Markdown",
+    "documentContentPreview": "文档内容预览",
+    "readMore": "阅读更多 →",
+    "csvDataFile": "CSV 数据文件",
+    "csv": "CSV"
   },
   "envVars": {
     "addFailed": "添加失败",
@@ -866,7 +886,6 @@
     "credentials": "应用凭证",
     "currentCredential": "当前凭证",
     "custom": "自定义",
-    "preset": "预设",
     "customEmojiHint": "输入表情符号字符或飞书表情代码",
     "customEmojiPlaceholder": "输入表情或文字（例如 🎯 或 DONE）",
     "customEmojiRequired": "选择自定义表情时为必填项",
@@ -908,6 +927,7 @@
     "openRegistration": "在浏览器中打开",
     "optional": "（可选）",
     "passwordMask": "••••••••••••",
+    "preset": "预设",
     "qrExpiresHint": "二维码 10 分钟内有效，仅供一次扫描。",
     "reactEmoji": "反应表情",
     "registering": "等待扫码",
@@ -1029,6 +1049,12 @@
     "uploadFailed": "上传失败",
     "uploadSuccess": "上传成功",
     "uploading": "上传中..."
+  },
+  "footer": {
+    "openSource": "开源",
+    "resources": "资源",
+    "mitLicense": "MIT 许可证",
+    "mit": "MIT"
   },
   "imageViewer": {
     "download": "下载",
@@ -1520,7 +1546,23 @@
     "use": "使用",
     "useFailed": "使用角色预设失败",
     "useSuccess": "已切换到角色「{{name}}」",
-    "using": "使用中"
+    "using": "使用中",
+    "emojiSparkles": "闪耀",
+    "emojiRobot": "机器人",
+    "emojiAcademic": "学术",
+    "emojiCoding": "编程",
+    "emojiWriting": "写作",
+    "emojiSecurity": "安全",
+    "emojiData": "数据",
+    "emojiProductivity": "效率",
+    "emojiGeneral": "通用",
+    "emojiArt": "艺术",
+    "emojiMusic": "音乐",
+    "emojiLiterature": "文学",
+    "emojiIntelligence": "智能",
+    "emojiScience": "科学",
+    "emojiChat": "聊天",
+    "emojiStar": "星星"
   },
   "profile": {
     "appearance": "外观",
@@ -1595,7 +1637,9 @@
     "usernameLengthError": "用户名长度需为 3-50 个字符",
     "usernamePlaceholder": "请输入用户名",
     "usernameUpdateFailed": "用户名修改失败",
-    "usernameUpdated": "用户名修改成功"
+    "usernameUpdated": "用户名修改成功",
+    "uploadFailed": "上传失败",
+    "deleteFailed": "删除失败"
   },
   "project": {
     "code": "代码",
@@ -1617,6 +1661,15 @@
     "resetFiles": "重置文件",
     "toggleExplorer": "切换文件浏览器",
     "untitled": "未命名项目"
+  },
+  "pwaStatus": {
+    "backOnline": "已恢复在线",
+    "dismiss": "关闭",
+    "offlineBody": "连接恢复后，聊天、文件和同步将继续。",
+    "offlineTitle": "你当前处于离线状态",
+    "updateReadyBody": "新版 LambChat 已准备好应用。",
+    "updateReadyTitle": "更新已就绪",
+    "newUpdate": "LambChat 有新版本可用。"
   },
   "roles": {
     "concurrentChatsHint": "每用户最大同时进行的聊天任务数（留空 = 无限制，默认 5），超出部分进入排队",
@@ -1737,7 +1790,8 @@
     "users": {
       "description": "管理用户账户、角色和访问权限。管理多租户用户生命周期和安全设置。",
       "title": "用户管理"
-    }
+    },
+    "defaultDescription": "可插拔多租户 AI 对话系统，Skills + MCP 双引擎驱动，模块化设计。"
   },
   "settingDesc": {
     "ACCESS_TOKEN_EXPIRE_HOURS": "访问令牌过期时间（小时）",
@@ -1972,7 +2026,11 @@
     "taskRunning": "运行中",
     "title": "分享会话",
     "userMessage": "（用户消息：{{message}}）",
-    "visibility": "访问权限"
+    "visibility": "访问权限",
+    "invalidLink": "无效的分享链接",
+    "loadFailed": "加载分享内容失败",
+    "platformTitle": "{{appName}} - AI 智能体平台",
+    "platformDescription": "可插拔多租户 AI 对话平台，Skills + MCP 双引擎驱动，支持 Claude、GPT、Gemini 等多种模型。"
   },
   "shortcut": {
     "categoryChat": "对话",

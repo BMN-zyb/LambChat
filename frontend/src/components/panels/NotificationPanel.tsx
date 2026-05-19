@@ -566,11 +566,10 @@ export function NotificationPanel() {
           />
         </div>
         <p className="text-lg font-medium text-stone-700 dark:text-stone-300">
-          {t("common.accessDenied") || "Access Denied"}
+          {t("common.accessDenied")}
         </p>
         <p className="text-sm text-stone-500 dark:text-stone-400">
-          {t("common.permissionRequired") ||
-            "You do not have permission to manage notifications."}
+          {t("common.permissionRequired")}
         </p>
       </div>
     );

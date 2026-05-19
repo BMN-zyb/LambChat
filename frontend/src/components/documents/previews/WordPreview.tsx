@@ -1,12 +1,9 @@
-import { memo, useEffect, useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { FileText, AlertCircle } from "lucide-react";
 import { LoadingSpinner } from "../../common/LoadingSpinner";
 import DOMPurify from "dompurify";
-import {
-  docxTextToHtml,
-  extractDocxTextFallback,
-  isDocxSafeForMammoth,
-} from "./wordPreviewUtils";
+import { docxTextToHtml, extractDocxTextFallback } from "./wordPreviewUtils";
+import { renderDocxPreviewHtml } from "./wordPreviewRenderer";
 import {
   extractLegacyDocText,
   isLegacyDocArrayBuffer,
@@ -26,6 +23,21 @@ const wordContentStyles = `
   }
   .word-preview-content.dark {
     color: #e5e7eb;
+  }
+  .word-preview-content .docx-wrapper {
+    background: transparent;
+    padding: 0;
+  }
+  .word-preview-content .docx {
+    background: transparent;
+    color: inherit;
+    max-width: 100%;
+  }
+  .word-preview-content section.docx {
+    width: auto !important;
+    min-height: auto !important;
+    padding: 0 !important;
+    box-shadow: none !important;
   }
   .word-preview-content h1 {
     font-size: 2rem;
@@ -190,6 +202,8 @@ const WordPreview = memo(function WordPreview({
   const [html, setHtml] = useState<string>("");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [renderedWithDocxPreview, setRenderedWithDocxPreview] = useState(false);
+  const contentRef = useRef<HTMLDivElement | null>(null);
 
   // Detect dark mode
   const [isDark, setIsDark] = useState(() =>
@@ -221,8 +235,11 @@ const WordPreview = memo(function WordPreview({
   }, []);
 
   useEffect(() => {
+    let cancelled = false;
+
     const convertWord = async () => {
       const renderText = (text: string) => {
+        if (cancelled) return false;
         if (text.trim()) {
           setHtml(docxTextToHtml(text));
           setError(null);
@@ -237,6 +254,14 @@ const WordPreview = memo(function WordPreview({
       };
 
       try {
+        setLoading(true);
+        setError(null);
+        setHtml("");
+        setRenderedWithDocxPreview(false);
+        if (contentRef.current) {
+          contentRef.current.innerHTML = "";
+        }
+
         if (isLegacyDocArrayBuffer(arrayBuffer)) {
           const legacyText = await extractLegacyDocText(arrayBuffer);
           if (!renderText(legacyText)) {
@@ -245,29 +270,29 @@ const WordPreview = memo(function WordPreview({
           return;
         }
 
-        if (!(await isDocxSafeForMammoth(arrayBuffer))) {
-          if (!(await renderDocxTextFallback())) {
-            setError(t("documents.wordConversionError"));
-          }
+        const container = contentRef.current;
+        if (!container) {
           return;
         }
 
-        const mammoth = await import("mammoth");
-        const result = await mammoth.default.convertToHtml(
-          { arrayBuffer },
-          {
-            styleMap: [
-              "p[style-name='Heading 1'] => h1:fresh",
-              "p[style-name='Heading 2'] => h2:fresh",
-              "p[style-name='Heading 3'] => h3:fresh",
-              "p[style-name='Heading 4'] => h4:fresh",
-              "b => strong",
-              "i => em",
-              "u => u",
-            ],
-          },
-        );
-        setHtml(result.value);
+        const [{ renderAsync }, mammoth] = await Promise.all([
+          import("docx-preview"),
+          import("mammoth"),
+        ]);
+        const renderResult = await renderDocxPreviewHtml({
+          arrayBuffer,
+          container,
+          styleContainer: container,
+          renderAsync,
+          convertToHtml: mammoth.default.convertToHtml,
+        });
+        if (cancelled) return;
+        if (renderResult.kind === "html") {
+          setHtml(renderResult.html);
+          setRenderedWithDocxPreview(false);
+        } else {
+          setRenderedWithDocxPreview(true);
+        }
         setError(null);
       } catch (err) {
         try {
@@ -283,10 +308,15 @@ const WordPreview = memo(function WordPreview({
         console.error("Failed to convert Word document:", err);
         setError(t("documents.wordConversionError"));
       } finally {
-        setLoading(false);
+        if (!cancelled) {
+          setLoading(false);
+        }
       }
     };
     convertWord();
+    return () => {
+      cancelled = true;
+    };
   }, [arrayBuffer, t]);
 
   const processedHtml = useMemo(() => {
@@ -329,22 +359,6 @@ const WordPreview = memo(function WordPreview({
     });
   }, [html]);
 
-  if (loading) {
-    return (
-      <div className="flex flex-col items-center justify-center h-full min-h-[300px] gap-4">
-        <div className="relative">
-          <LoadingSpinner size="lg" />
-          <div className="absolute inset-0 animate-ping opacity-20">
-            <LoadingSpinner size="lg" static />
-          </div>
-        </div>
-        <p className="text-sm text-stone-500 dark:text-stone-400">
-          {t("documents.loading") || "Loading document..."}
-        </p>
-      </div>
-    );
-  }
-
   if (error) {
     return (
       <div className="flex flex-col items-center justify-center h-full min-h-[300px] p-4 sm:p-6">
@@ -375,14 +389,35 @@ const WordPreview = memo(function WordPreview({
   }
 
   return (
-    <div className="h-full overflow-auto bg-stone-200 dark:bg-stone-950">
+    <div className="relative h-full overflow-auto bg-stone-200 dark:bg-stone-950">
+      {loading && (
+        <div className="absolute inset-0 z-10 flex flex-col items-center justify-center min-h-[300px] gap-4 bg-stone-200/90 dark:bg-stone-950/90">
+          <div className="relative">
+            <LoadingSpinner size="lg" />
+            <div className="absolute inset-0 animate-ping opacity-20">
+              <LoadingSpinner size="lg" static />
+            </div>
+          </div>
+          <p className="text-sm text-stone-500 dark:text-stone-400">
+            {t("documents.loading") || "Loading document..."}
+          </p>
+        </div>
+      )}
       <div className="max-w-[816px] mx-auto">
         <div className="bg-white dark:bg-stone-900 shadow-lg rounded-sm border border-stone-300/60 dark:border-stone-700/60">
           <div className="px-4 py-6 min-h-[1056px]">
             <div
-              className={`word-preview-content ${isDark ? "dark" : ""}`}
-              dangerouslySetInnerHTML={{ __html: processedHtml }}
+              ref={contentRef}
+              className={`word-preview-content ${isDark ? "dark" : ""} ${
+                renderedWithDocxPreview ? "" : "hidden"
+              }`}
             />
+            {!renderedWithDocxPreview && processedHtml && (
+              <div
+                className={`word-preview-content ${isDark ? "dark" : ""}`}
+                dangerouslySetInnerHTML={{ __html: processedHtml }}
+              />
+            )}
           </div>
         </div>
       </div>

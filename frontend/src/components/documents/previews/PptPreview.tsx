@@ -26,7 +26,7 @@ const PptPreview = memo(function PptPreview({
       <iframe
         src={officeUrl}
         className="flex-1 w-full min-h-[400px] border-0"
-        title={`PowerPoint Preview - ${fileName}`}
+        title={`PowerPoint - ${fileName}`}
         sandbox="allow-scripts allow-same-origin allow-forms"
       />
     </div>

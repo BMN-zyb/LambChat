@@ -330,7 +330,7 @@ export function MCPPanel() {
       if (!parsed.mcpServers || typeof parsed.mcpServers !== "object") {
         setImportResult({
           success: false,
-          message: "Invalid format: missing mcpServers object",
+          message: t("mcp.invalidFormat", "格式无效：缺少 mcpServers 对象"),
         });
         toast.error(t("mcp.invalidFormat"));
         return;
@@ -361,7 +361,10 @@ export function MCPPanel() {
         }
       }
     } catch {
-      setImportResult({ success: false, message: "Invalid JSON format" });
+      setImportResult({
+        success: false,
+        message: t("mcp.invalidJson", "无效的 JSON 格式"),
+      });
       toast.error(t("mcp.invalidJson"));
     }
   };

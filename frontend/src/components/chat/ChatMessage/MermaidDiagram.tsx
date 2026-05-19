@@ -56,9 +56,11 @@ export function MermaidDiagram({
   // Only render diagram when not streaming
   const shouldRenderDiagram = !isStreaming && chart.trim().length > 0;
 
-  // Handle wheel zoom - let browser handle scroll, just update scale
-  const handleWheel = useCallback((e: React.WheelEvent) => {
-    const delta = e.deltaY > 0 ? -0.1 : 0.1;
+  const handleWheel = useCallback((event: React.WheelEvent) => {
+    if (!event.ctrlKey && !event.metaKey) return;
+
+    event.preventDefault();
+    const delta = event.deltaY > 0 ? -0.1 : 0.1;
     setScale((prev) => Math.min(Math.max(prev + delta, 0.5), 3));
   }, []);
 
@@ -184,7 +186,9 @@ export function MermaidDiagram({
       } catch (err) {
         console.error("Mermaid render error:", err);
         const errorMessage =
-          err instanceof Error ? err.message : "Failed to render diagram";
+          err instanceof Error
+            ? err.message
+            : t("documents.mermaidRenderFailed");
         setError(errorMessage);
         setSvg("");
       }
@@ -594,9 +598,11 @@ function MermaidViewer({
     return () => document.removeEventListener("keydown", handleKeyDown);
   }, [onClose]);
 
-  const handleWheel = useCallback((e: React.WheelEvent) => {
-    e.preventDefault();
-    const delta = e.deltaY > 0 ? -SCALE_STEP : SCALE_STEP;
+  const handleWheel = useCallback((event: React.WheelEvent) => {
+    if (!event.ctrlKey && !event.metaKey) return;
+
+    event.preventDefault();
+    const delta = event.deltaY > 0 ? -SCALE_STEP : SCALE_STEP;
     setScale((prev) => Math.min(MAX_SCALE, Math.max(MIN_SCALE, prev + delta)));
   }, []);
 
@@ -813,7 +819,7 @@ function MermaidViewer({
           >
             <img
               src={svgBlobUrl}
-              alt="mermaid diagram"
+              alt={t("chat.mermaidDiagram", "Mermaid 图表")}
               className="max-w-[90vw] max-h-[85dvh] object-contain select-none"
               style={{
                 transform: `translate(${position.x}px, ${position.y}px) scale(${scale}) rotate(${rotation}deg)`,
@@ -849,7 +855,9 @@ function MermaidViewer({
         {showCode && (
           <div className="w-full sm:w-[480px] border-l border-white/10 bg-stone-900 flex flex-col overflow-hidden">
             <div className="flex items-center justify-between px-4 py-2 border-b border-white/10">
-              <span className="text-xs font-medium text-white/50">mermaid</span>
+              <span className="text-xs font-medium text-white/50">
+                {t("chat.mermaid", "Mermaid")}
+              </span>
             </div>
             <pre className="flex-1 overflow-auto p-4 text-sm text-stone-300 font-mono whitespace-pre-wrap break-words">
               {chart}

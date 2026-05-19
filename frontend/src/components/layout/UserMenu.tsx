@@ -271,7 +271,7 @@ export function UserMenu({ onShowProfile }: UserMenuProps) {
           {user?.avatar_url && !imgError ? (
             <img
               src={user.avatar_url}
-              alt={user?.username || "User"}
+              alt={user?.username || t("common.user")}
               className="size-5 object-cover rounded-full"
               onError={() => setImgError(true)}
             />

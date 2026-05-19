@@ -490,13 +490,13 @@ export function ModelConfigTab({ models, onReload }: ModelConfigTabProps) {
         );
         onReload();
       } catch (err) {
-        toast.error((err as Error).message || "Failed to reorder models");
+        toast.error((err as Error).message || t("agentConfig.reorderFailed"));
       }
     }
     setDragIndex(null);
     setOverIndex(null);
     dragNode.current = null;
-  }, [dragIndex, overIndex, models, onReload]);
+  }, [dragIndex, overIndex, models, onReload, t]);
 
   const handleDragLeave = useCallback(() => setOverIndex(null), []);
 

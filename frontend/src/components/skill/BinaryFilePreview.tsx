@@ -117,7 +117,9 @@ export function BinaryFilePreview({
           title={t("documents.download")}
         >
           <Download size={14} />
-          <span className="hidden sm:inline">Download</span>
+          <span className="hidden sm:inline">
+            {t("documents.download", "下载")}
+          </span>
         </button>
       </div>
 

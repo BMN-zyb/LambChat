@@ -107,7 +107,8 @@ export function ProfileInfoTab() {
       refreshUser();
     } catch (error) {
       console.error("Failed to upload avatar:", error);
-      const message = error instanceof Error ? error.message : "Upload failed";
+      const message =
+        error instanceof Error ? error.message : t("profile.uploadFailed");
       toast.error(message);
     } finally {
       setIsUploading(false);
@@ -123,7 +124,8 @@ export function ProfileInfoTab() {
       toast.success(t("profile.avatarDeleted"));
     } catch (error) {
       console.error("Failed to delete avatar:", error);
-      const message = error instanceof Error ? error.message : "Delete failed";
+      const message =
+        error instanceof Error ? error.message : t("profile.deleteFailed");
       toast.error(message);
     } finally {
       setIsUploading(false);
@@ -162,7 +164,7 @@ export function ProfileInfoTab() {
           {user?.avatar_url && !imgError ? (
             <img
               src={user.avatar_url}
-              alt="Avatar"
+              alt={t("profile.avatar", "头像")}
               className="size-20 rounded-full object-cover border-4 border-white dark:border-stone-700 shadow-lg ring-2 ring-stone-100 dark:ring-stone-600"
               onError={() => setImgError(true)}
             />

@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import { RefreshCw, WifiOff, X } from "lucide-react";
 import { toast } from "react-hot-toast";
+import { useTranslation } from "react-i18next";
 import {
   type LambChatPwaUpdateEventDetail,
   activateWaitingLambChatPwaUpdate,
@@ -19,6 +20,7 @@ function PwaStatusToast({
   body,
   tone,
   action,
+  dismissLabel,
   onDismiss,
 }: {
   title: string;
@@ -28,6 +30,7 @@ function PwaStatusToast({
     label: string;
     onClick: () => void;
   };
+  dismissLabel?: string;
   onDismiss?: () => void;
 }) {
   return (
@@ -53,7 +56,7 @@ function PwaStatusToast({
         <button
           className="pwa-status-toast__dismiss"
           type="button"
-          aria-label="Dismiss"
+          aria-label={dismissLabel}
           onClick={onDismiss}
         >
           <X size={16} aria-hidden="true" />
@@ -63,13 +66,9 @@ function PwaStatusToast({
   );
 }
 
-function showOfflineToast() {
+function showOfflineToast(text: { title: string; body: string }) {
   toast.custom(
-    <PwaStatusToast
-      title="You are offline"
-      body="Chat, files, and sync will resume when the connection returns."
-      tone="offline"
-    />,
+    <PwaStatusToast title={text.title} body={text.body} tone="offline" />,
     {
       id: PWA_OFFLINE_TOAST_ID,
       duration: Infinity,
@@ -79,6 +78,7 @@ function showOfflineToast() {
 }
 
 export function PwaStatusToasts() {
+  const { t } = useTranslation();
   const isOnlineRef = useRef(
     getInitialOnlineStatus(
       typeof navigator === "undefined" ? undefined : navigator,
@@ -94,17 +94,18 @@ export function PwaStatusToasts() {
 
       toast.custom(
         <PwaStatusToast
-          title="Update ready"
-          body="A fresh LambChat version is ready to apply."
+          title={t("pwaStatus.updateReadyTitle")}
+          body={t("pwaStatus.updateReadyBody")}
           tone="update"
           action={{
-            label: "Refresh",
+            label: t("common.refresh"),
             onClick: () => {
               if (activateWaitingLambChatPwaUpdate(registration)) {
                 toast.dismiss(PWA_UPDATE_TOAST_ID);
               }
             },
           }}
+          dismissLabel={t("pwaStatus.dismiss")}
           onDismiss={() => toast.dismiss(PWA_UPDATE_TOAST_ID)}
         />,
         {
@@ -123,17 +124,22 @@ export function PwaStatusToasts() {
         handleUpdateAvailable,
       );
     };
-  }, []);
+  }, [t]);
 
   useEffect(() => {
+    const offlineText = {
+      title: t("pwaStatus.offlineTitle"),
+      body: t("pwaStatus.offlineBody"),
+    };
+
     if (!isOnlineRef.current) {
-      showOfflineToast();
+      showOfflineToast(offlineText);
     }
 
     const handleOffline = () => {
       isOnlineRef.current = false;
       toast.dismiss(PWA_ONLINE_RESTORED_TOAST_ID);
-      showOfflineToast();
+      showOfflineToast(offlineText);
     };
 
     const handleOnline = () => {
@@ -147,7 +153,7 @@ export function PwaStatusToasts() {
           isOnline: true,
         })
       ) {
-        toast.success("Back online", {
+        toast.success(t("pwaStatus.backOnline"), {
           id: PWA_ONLINE_RESTORED_TOAST_ID,
           duration: 2500,
         });
@@ -162,7 +168,7 @@ export function PwaStatusToasts() {
       window.removeEventListener("online", handleOnline);
       toast.dismiss(PWA_OFFLINE_TOAST_ID);
     };
-  }, []);
+  }, [t]);
 
   return null;
 }

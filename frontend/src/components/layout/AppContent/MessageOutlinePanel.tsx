@@ -1,5 +1,6 @@
 import { clsx } from "clsx";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import {
   ReactFlow,
   ReactFlowProvider,
@@ -66,6 +67,7 @@ function UserAvatar({
 }
 
 function OutlineFlowNode({ data }: { data: OutlineNodeData }) {
+  const { t } = useTranslation();
   const isUser = data.kind === "user-message";
 
   return (
@@ -104,7 +106,7 @@ function OutlineFlowNode({ data }: { data: OutlineNodeData }) {
         </div>
         <div className="min-w-0 flex-1">
           <span className="text-[10px] font-medium text-[var(--theme-text-secondary)] leading-none">
-            {isUser ? data.username : "Assistant"}
+            {isUser ? data.username : t("common.assistant")}
           </span>
           <div
             className="text-[12px] text-[var(--theme-text)] line-clamp-2 mt-1 leading-[1.45] [&_strong]:font-semibold [&_strong]:text-[var(--theme-primary)] [&_em]:italic [&_code]:text-[11px] [&_code]:rounded [&_code]:bg-[var(--theme-primary-light)] [&_code]:px-0.5 [&_code]:text-[var(--theme-primary)]"
@@ -202,11 +204,12 @@ function OutlineFlowInner({
   personaAvatar,
 }: MessageOutlinePanelProps) {
   const { user } = useAuth();
+  const { t } = useTranslation();
   const { fitView, setViewport } = useReactFlow();
   const containerRef = useRef<HTMLDivElement>(null);
 
   const avatarUrl = user?.avatar_url;
-  const username = user?.username || "You";
+  const username = user?.username || t("common.you");
   const flowActiveId = useMemo(
     () => getOutlineFlowActiveAnchorId(items, activeId),
     [items, activeId],

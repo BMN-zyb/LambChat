@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect, useMemo } from "react";
+import { useTranslation } from "react-i18next";
 import { ChevronDown, Search } from "lucide-react";
 import { ModelIconImg } from "../../../agent/modelIcon.tsx";
 import { modelApi } from "../../../../services/api/model";
@@ -46,6 +47,7 @@ export const ProviderSelect = React.memo(function ProviderSelect({
   placeholder = "",
   className = "",
 }: ProviderSelectProps) {
+  const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
   const [providers, setProviders] = useState<string[]>([]);
@@ -154,7 +156,7 @@ export const ProviderSelect = React.memo(function ProviderSelect({
                 type="text"
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
-                placeholder="Search..."
+                placeholder={t("common.search", "搜索...")}
                 className="w-full pl-8 pr-3 py-1.5 text-sm rounded-lg bg-stone-50 dark:bg-stone-700/60 border border-stone-200/60 dark:border-stone-600/40 text-stone-900 dark:text-stone-100 placeholder:text-stone-400 dark:placeholder:text-stone-500 focus:outline-none focus:border-stone-400 dark:focus:border-stone-500"
               />
             </div>
@@ -201,13 +203,13 @@ export const ProviderSelect = React.memo(function ProviderSelect({
               ))
             ) : (
               <div className="px-3.5 py-4 text-sm text-stone-400 text-center">
-                Loading...
+                {t("common.loading")}
               </div>
             )}
 
             {loaded && filtered.length === 0 && (
               <div className="px-3.5 py-4 text-sm text-stone-400 dark:text-stone-500 text-center">
-                No providers found
+                {t("agentConfig.noProviders")}
               </div>
             )}
           </div>

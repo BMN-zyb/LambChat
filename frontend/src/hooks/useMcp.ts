@@ -1,4 +1,5 @@
 import { useState, useCallback, useEffect } from "react";
+import i18n from "i18next";
 import { authFetch } from "../services/api/fetch";
 import type {
   MCPServerResponse,
@@ -50,7 +51,9 @@ export function useMCP(options?: { listParams?: MCPListParams }) {
         setTotal(data.total);
       } catch (err) {
         setError(
-          err instanceof Error ? err.message : "Failed to fetch MCP servers",
+          err instanceof Error
+            ? err.message
+            : i18n.t("mcp.fetchServersFailed", "获取MCP服务器失败"),
         );
       } finally {
         setIsLoading(false);
@@ -66,7 +69,9 @@ export function useMCP(options?: { listParams?: MCPListParams }) {
         return await authFetch<MCPServerResponse>(`${API_BASE}/${name}`);
       } catch (err) {
         setError(
-          err instanceof Error ? err.message : "Failed to fetch MCP server",
+          err instanceof Error
+            ? err.message
+            : i18n.t("mcp.fetchServerFailed", "获取MCP服务器失败"),
         );
         return null;
       }
@@ -92,7 +97,9 @@ export function useMCP(options?: { listParams?: MCPListParams }) {
         return data;
       } catch (err) {
         setError(
-          err instanceof Error ? err.message : "Failed to create MCP server",
+          err instanceof Error
+            ? err.message
+            : i18n.t("mcp.createFailed", "创建MCP服务器失败"),
         );
         return null;
       } finally {
@@ -124,7 +131,9 @@ export function useMCP(options?: { listParams?: MCPListParams }) {
         return data;
       } catch (err) {
         setError(
-          err instanceof Error ? err.message : "Failed to update MCP server",
+          err instanceof Error
+            ? err.message
+            : i18n.t("mcp.updateFailed", "更新MCP服务器失败"),
         );
         return null;
       } finally {
@@ -148,7 +157,9 @@ export function useMCP(options?: { listParams?: MCPListParams }) {
         return true;
       } catch (err) {
         setError(
-          err instanceof Error ? err.message : "Failed to delete MCP server",
+          err instanceof Error
+            ? err.message
+            : i18n.t("mcp.deleteFailed", "删除MCP服务器失败"),
         );
         return false;
       } finally {
@@ -174,7 +185,9 @@ export function useMCP(options?: { listParams?: MCPListParams }) {
         return data.server;
       } catch (err) {
         setError(
-          err instanceof Error ? err.message : "Failed to toggle MCP server",
+          err instanceof Error
+            ? err.message
+            : i18n.t("mcp.toggleFailed", "切换MCP服务器失败"),
         );
         return null;
       } finally {
@@ -198,7 +211,9 @@ export function useMCP(options?: { listParams?: MCPListParams }) {
         return data;
       } catch (err) {
         setError(
-          err instanceof Error ? err.message : "Failed to import MCP servers",
+          err instanceof Error
+            ? err.message
+            : i18n.t("mcp.importFailed", "导入MCP服务器失败"),
         );
         return null;
       } finally {
@@ -217,7 +232,9 @@ export function useMCP(options?: { listParams?: MCPListParams }) {
         return await authFetch<MCPExportResponse>(`${API_BASE}/export`);
       } catch (err) {
         setError(
-          err instanceof Error ? err.message : "Failed to export MCP servers",
+          err instanceof Error
+            ? err.message
+            : i18n.t("mcp.exportFailed", "导出MCP服务器失败"),
         );
         return null;
       } finally {
@@ -245,7 +262,9 @@ export function useMCP(options?: { listParams?: MCPListParams }) {
         return data;
       } catch (err) {
         setError(
-          err instanceof Error ? err.message : "Failed to promote MCP server",
+          err instanceof Error
+            ? err.message
+            : i18n.t("mcp.promoteFailed", "升级MCP服务器失败"),
         );
         return null;
       } finally {
@@ -275,7 +294,9 @@ export function useMCP(options?: { listParams?: MCPListParams }) {
         return data;
       } catch (err) {
         setError(
-          err instanceof Error ? err.message : "Failed to demote MCP server",
+          err instanceof Error
+            ? err.message
+            : i18n.t("mcp.demoteFailed", "降级MCP服务器失败"),
         );
         return null;
       } finally {

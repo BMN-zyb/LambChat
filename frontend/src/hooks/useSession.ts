@@ -4,6 +4,7 @@
 
 import { useState, useCallback, useEffect, useRef } from "react";
 import { useInView } from "react-intersection-observer";
+import i18n from "i18next";
 import { sessionApi, type BackendSession } from "../services/api";
 
 const PAGE_SIZE = 20;
@@ -120,7 +121,11 @@ export function useFilteredSessionList(
       }
       setHasMore(newSessions.length > 0 ? newHasMore : false);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load sessions");
+      setError(
+        err instanceof Error
+          ? err.message
+          : i18n.t("session.loadFailed", "加载会话失败"),
+      );
     } finally {
       setIsLoading(false);
       setIsLoadingMore(false);
@@ -258,7 +263,11 @@ export function useSession(): UseSessionReturn {
         }
         return session;
       } catch (err) {
-        setError(err instanceof Error ? err.message : "Failed to load session");
+        setError(
+          err instanceof Error
+            ? err.message
+            : i18n.t("session.loadFailed", "加载会话失败"),
+        );
         return null;
       } finally {
         setIsLoading(false);
@@ -276,7 +285,9 @@ export function useSession(): UseSessionReturn {
         }
       } catch (err) {
         setError(
-          err instanceof Error ? err.message : "Failed to delete session",
+          err instanceof Error
+            ? err.message
+            : i18n.t("session.deleteFailed", "删除会话失败"),
         );
       }
     },
@@ -334,7 +345,11 @@ export function useMessageHistory(
           onHistoryLoaded(session);
         }
       } catch (err) {
-        setError(err instanceof Error ? err.message : "Failed to load history");
+        setError(
+          err instanceof Error
+            ? err.message
+            : i18n.t("session.loadHistoryFailed", "加载历史记录失败"),
+        );
       } finally {
         setIsLoading(false);
       }

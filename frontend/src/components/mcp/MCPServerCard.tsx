@@ -25,12 +25,6 @@ interface MCPServerCardProps {
   onToolToggled?: () => void;
 }
 
-const TRANSPORT_LABELS: Record<string, string> = {
-  sse: "SSE",
-  streamable_http: "HTTP",
-  sandbox: "Sandbox",
-};
-
 const TRANSPORT_COLORS: Record<string, string> = {
   sse: "bg-green-100 text-green-700 dark:bg-green-900/50 dark:text-green-300",
   streamable_http:
@@ -58,6 +52,11 @@ export function MCPServerCard({
   // Track pending toggle to debounce rapid clicks and avoid race conditions
   const pendingToggleRef = useRef<Promise<void> | null>(null);
 
+  const TRANSPORT_LABELS: Record<string, string> = {
+    sse: t("mcp.form.transportSse"),
+    streamable_http: t("mcp.form.transportHttp"),
+    sandbox: t("mcp.form.transportSandbox"),
+  };
   const transportLabel =
     TRANSPORT_LABELS[server.transport] || server.transport.toUpperCase();
   const transportColor =
@@ -87,7 +86,7 @@ export function MCPServerCard({
         }
       } catch (err) {
         setToolsError(
-          err instanceof Error ? err.message : "Failed to discover tools",
+          err instanceof Error ? err.message : t("mcp.card.discoverFailed"),
         );
       } finally {
         setToolsLoading(false);
@@ -95,7 +94,7 @@ export function MCPServerCard({
     } else {
       setIsToolsExpanded(true);
     }
-  }, [isToolsExpanded, tools.length, toolsLoading, server.name]);
+  }, [isToolsExpanded, tools.length, toolsLoading, server.name, t]);
 
   const handleToggleTool = useCallback(
     async (toolName: string, currentEnabled: boolean) => {

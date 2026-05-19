@@ -1,4 +1,5 @@
 import { useState, useCallback, useEffect } from "react";
+import i18n from "i18next";
 import { settingsApi, getAccessToken } from "../services/api";
 import type { SettingsResponse } from "../types";
 
@@ -19,7 +20,11 @@ export function useSettings() {
       const data = await settingsApi.list();
       setSettings(data);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load settings");
+      setError(
+        err instanceof Error
+          ? err.message
+          : i18n.t("settings.loadFailed", "加载设置失败"),
+      );
     } finally {
       setIsLoading(false);
     }
@@ -53,7 +58,9 @@ export function useSettings() {
         return true;
       } catch (err) {
         setError(
-          err instanceof Error ? err.message : "Failed to update setting",
+          err instanceof Error
+            ? err.message
+            : i18n.t("settings.updateFailed", "更新设置失败"),
         );
         return false;
       } finally {
@@ -78,7 +85,9 @@ export function useSettings() {
         return true;
       } catch (err) {
         setError(
-          err instanceof Error ? err.message : "Failed to reset setting",
+          err instanceof Error
+            ? err.message
+            : i18n.t("settings.resetFailed", "重置设置失败"),
         );
         return false;
       } finally {
@@ -100,7 +109,11 @@ export function useSettings() {
       await fetchSettings();
       return true;
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to reset settings");
+      setError(
+        err instanceof Error
+          ? err.message
+          : i18n.t("settings.resetAllFailed", "重置所有设置失败"),
+      );
       return false;
     } finally {
       setIsLoading(false);
@@ -162,7 +175,7 @@ export function useSettings() {
           return {
             success: false,
             updatedCount: 0,
-            errors: ["Invalid settings file format"],
+            errors: [i18n.t("settings.invalidFormat", "设置文件格式无效")],
           };
         }
 
@@ -196,7 +209,9 @@ export function useSettings() {
           success: false,
           updatedCount: 0,
           errors: [
-            err instanceof Error ? err.message : "Failed to parse JSON file",
+            err instanceof Error
+              ? err.message
+              : i18n.t("settings.parseFailed", "解析JSON文件失败"),
           ],
         };
       }

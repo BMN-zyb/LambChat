@@ -88,11 +88,24 @@ export function ImageViewer({
     };
   }, [isOpen]);
 
-  const handleWheel = useCallback((e: React.WheelEvent) => {
-    e.preventDefault();
-    const delta = e.deltaY > 0 ? -SCALE_STEP : SCALE_STEP;
-    setScale((prev) => Math.min(MAX_SCALE, Math.max(MIN_SCALE, prev + delta)));
-  }, []);
+  useEffect(() => {
+    if (!isOpen) return;
+    const container = containerRef.current;
+    if (!container) return;
+
+    const handleNativeWheel = (event: WheelEvent) => {
+      event.preventDefault();
+      const delta = event.deltaY > 0 ? -SCALE_STEP : SCALE_STEP;
+      setScale((prev) =>
+        Math.min(MAX_SCALE, Math.max(MIN_SCALE, prev + delta)),
+      );
+    };
+
+    container.addEventListener("wheel", handleNativeWheel, { passive: false });
+    return () => {
+      container.removeEventListener("wheel", handleNativeWheel);
+    };
+  }, [isOpen]);
 
   const handleMouseDown = useCallback(
     (e: React.MouseEvent) => {
@@ -249,11 +262,7 @@ export function ImageViewer({
       </div>
 
       {/* Main area */}
-      <div
-        ref={containerRef}
-        className="flex-1 overflow-hidden relative"
-        onWheel={handleWheel}
-      >
+      <div ref={containerRef} className="flex-1 overflow-hidden relative">
         <div
           className="absolute inset-0 flex items-center justify-center"
           style={{

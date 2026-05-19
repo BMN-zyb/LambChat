@@ -475,7 +475,7 @@ export function ToolResultPanel({
                       handleUserClose();
                     }}
                     className="flex items-center justify-center w-8 h-8 rounded-xl hover:bg-stone-100 dark:hover:bg-stone-800 transition-all duration-200 active:scale-95"
-                    aria-label="Close"
+                    aria-label={t("common.close", "关闭")}
                     title={t("common.close", "Close")}
                   >
                     <X
@@ -493,7 +493,7 @@ export function ToolResultPanel({
                     handleUserClose();
                   }}
                   className="flex items-center justify-center w-8 h-8 rounded-xl hover:bg-stone-100 dark:hover:bg-stone-800 transition-all duration-200 active:scale-95 shrink-0"
-                  aria-label="Close"
+                  aria-label={t("common.close", "关闭")}
                   title={t("common.close", "Close")}
                 >
                   <X size={15} className="text-stone-400 dark:text-stone-500" />
@@ -514,7 +514,7 @@ export function ToolResultPanel({
                 effectiveOnBack();
               }}
               className="flex items-center justify-center w-10 h-10 rounded-full bg-black/70 hover:bg-black/90 text-white shadow-lg transition-all duration-200 cursor-pointer"
-              aria-label="Back"
+              aria-label={t("common.back", "返回")}
             >
               <BackIcon size={18} />
             </button>
@@ -525,7 +525,7 @@ export function ToolResultPanel({
               handleUserClose();
             }}
             className="flex items-center justify-center w-10 h-10 rounded-full bg-black/70 hover:bg-black/90 text-white shadow-lg transition-all duration-200 cursor-pointer"
-            aria-label="Close"
+            aria-label={t("common.close", "关闭")}
           >
             <X size={18} />
           </button>

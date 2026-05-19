@@ -1,4 +1,5 @@
 import { useState, useCallback, useEffect } from "react";
+import i18n from "i18next";
 import { marketplaceApi } from "../services/api/marketplace";
 import type {
   MarketplaceSkillResponse,
@@ -61,7 +62,7 @@ export function useMarketplace() {
       setError(
         err instanceof Error
           ? err.message
-          : "Failed to fetch marketplace skills",
+          : i18n.t("marketplace.fetchFailed", "获取技能市场失败"),
       );
     } finally {
       setIsLoading(false);
@@ -74,7 +75,10 @@ export function useMarketplace() {
       const data = await marketplaceApi.getTags();
       setTags(data.tags ?? []);
     } catch (err) {
-      console.error("Failed to fetch tags:", err);
+      console.error(
+        i18n.t("marketplace.fetchTagsFailed", "获取标签失败:"),
+        err,
+      );
     }
   }, []);
 
@@ -86,7 +90,9 @@ export function useMarketplace() {
         return true;
       } catch (err) {
         setError(
-          err instanceof Error ? err.message : "Failed to install skill",
+          err instanceof Error
+            ? err.message
+            : i18n.t("marketplace.installFailed", "安装技能失败"),
         );
         return false;
       }
@@ -101,7 +107,11 @@ export function useMarketplace() {
         await marketplaceApi.update(skillName);
         return true;
       } catch (err) {
-        setError(err instanceof Error ? err.message : "Failed to update skill");
+        setError(
+          err instanceof Error
+            ? err.message
+            : i18n.t("marketplace.updateFailed", "更新技能失败"),
+        );
         return false;
       }
     },
@@ -119,7 +129,10 @@ export function useMarketplace() {
       const files = await marketplaceApi.listFiles(skill.skill_name);
       setPreviewFiles(files);
     } catch (err) {
-      console.error("Failed to fetch skill files:", err);
+      console.error(
+        i18n.t("marketplace.fetchFilesFailed", "获取技能文件失败:"),
+        err,
+      );
     } finally {
       setPreviewLoading(false);
     }
@@ -135,7 +148,12 @@ export function useMarketplace() {
           ...prev,
           [filePath]: resp.content,
         }));
-        if (resp.is_binary && resp.url && resp.mime_type && resp.size !== undefined) {
+        if (
+          resp.is_binary &&
+          resp.url &&
+          resp.mime_type &&
+          resp.size !== undefined
+        ) {
           setPreviewBinaryFiles((prev) => ({
             ...prev,
             [filePath]: {
@@ -146,7 +164,10 @@ export function useMarketplace() {
           }));
         }
       } catch (err) {
-        console.error("Failed to fetch file content:", err);
+        console.error(
+          i18n.t("marketplace.fetchFileContentFailed", "获取文件内容失败:"),
+          err,
+        );
       } finally {
         setPreviewFileLoading(null);
       }
@@ -186,7 +207,11 @@ export function useMarketplace() {
         await fetchTags();
         return true;
       } catch (err) {
-        setError(err instanceof Error ? err.message : "Failed to create skill");
+        setError(
+          err instanceof Error
+            ? err.message
+            : i18n.t("marketplace.createFailed", "创建技能失败"),
+        );
         return false;
       } finally {
         setIsLoading(false);
@@ -208,7 +233,11 @@ export function useMarketplace() {
         await fetchSkills();
         return true;
       } catch (err) {
-        setError(err instanceof Error ? err.message : "Failed to update skill");
+        setError(
+          err instanceof Error
+            ? err.message
+            : i18n.t("marketplace.updateFailed", "更新技能失败"),
+        );
         return false;
       } finally {
         setIsLoading(false);
@@ -226,7 +255,11 @@ export function useMarketplace() {
         await fetchSkills();
         return true;
       } catch (err) {
-        setError(err instanceof Error ? err.message : "Failed to update skill");
+        setError(
+          err instanceof Error
+            ? err.message
+            : i18n.t("marketplace.updateFailed", "更新技能失败"),
+        );
         return false;
       }
     },
@@ -242,7 +275,11 @@ export function useMarketplace() {
         await fetchSkills();
         return true;
       } catch (err) {
-        setError(err instanceof Error ? err.message : "Failed to delete skill");
+        setError(
+          err instanceof Error
+            ? err.message
+            : i18n.t("marketplace.deleteFailed", "删除技能失败"),
+        );
         return false;
       }
     },
@@ -280,7 +317,9 @@ export function useMarketplace() {
       };
     } catch (err) {
       setError(
-        err instanceof Error ? err.message : "Failed to load marketplace skill",
+        err instanceof Error
+          ? err.message
+          : i18n.t("marketplace.loadFailed", "加载技能市场失败"),
       );
       return null;
     }

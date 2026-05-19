@@ -1,4 +1,5 @@
 import { useState, useCallback, useEffect, useRef, useMemo } from "react";
+import i18n from "i18next";
 import { authenticatedRequest } from "../services/api/authenticatedRequest";
 import type {
   ToolInfo,
@@ -57,7 +58,7 @@ export function useTools() {
       );
 
       if (!response.ok) {
-        throw new Error("Failed to fetch tools");
+        throw new Error(i18n.t("tools.fetchFailed", "获取工具失败"));
       }
 
       const data: ToolsListResponse = await response.json();
@@ -76,7 +77,11 @@ export function useTools() {
 
       setTools(toolStates);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to fetch tools");
+      setError(
+        err instanceof Error
+          ? err.message
+          : i18n.t("tools.fetchFailed", "获取工具失败"),
+      );
     } finally {
       setIsLoading(false);
     }

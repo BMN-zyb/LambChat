@@ -26,3 +26,19 @@ test("PWA status toast bridge handles update, offline, and restored-online event
   assert.match(componentSource, /addEventListener\("online"/);
   assert.match(componentSource, /toast\.custom/);
 });
+
+test("PWA status toast bridge uses i18n for user-facing text", () => {
+  assert.match(componentSource, /useTranslation/);
+  assert.match(componentSource, /pwaStatus\.offlineTitle/);
+  assert.match(componentSource, /pwaStatus\.offlineBody/);
+  assert.match(componentSource, /pwaStatus\.updateReadyTitle/);
+  assert.match(componentSource, /pwaStatus\.updateReadyBody/);
+  assert.match(componentSource, /pwaStatus\.backOnline/);
+  assert.match(componentSource, /pwaStatus\.dismiss/);
+  assert.doesNotMatch(componentSource, /You are offline/);
+  assert.doesNotMatch(componentSource, /Chat, files, and sync will resume/);
+  assert.doesNotMatch(componentSource, /Update ready/);
+  assert.doesNotMatch(componentSource, /A fresh LambChat version is ready/);
+  assert.doesNotMatch(componentSource, /Back online/);
+  assert.doesNotMatch(componentSource, /aria-label="Dismiss"/);
+});

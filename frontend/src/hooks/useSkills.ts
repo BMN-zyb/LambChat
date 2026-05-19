@@ -8,6 +8,7 @@
  */
 
 import { useState, useCallback, useEffect, useRef } from "react";
+import i18n from "i18next";
 import { skillApi } from "../services/api/skill";
 import type { SkillListParams } from "../services/api/skill";
 import type {
@@ -132,7 +133,11 @@ export function useSkills(options?: {
           );
         }
       } catch (err) {
-        setError(err instanceof Error ? err.message : "Failed to fetch skills");
+        setError(
+          err instanceof Error
+            ? err.message
+            : i18n.t("skills.fetchFailed", "获取技能失败"),
+        );
       } finally {
         setIsLoading(false);
       }
@@ -185,7 +190,11 @@ export function useSkills(options?: {
         resp.filePaths = detail.files || [];
         return resp;
       } catch (err) {
-        setError(err instanceof Error ? err.message : "Failed to fetch skill");
+        setError(
+          err instanceof Error
+            ? err.message
+            : i18n.t("skills.fetchDetailFailed", "获取技能详情失败"),
+        );
         return null;
       }
     },
@@ -265,7 +274,11 @@ export function useSkills(options?: {
           binaryFiles,
         );
       } catch (err) {
-        setError(err instanceof Error ? err.message : "Failed to fetch skill");
+        setError(
+          err instanceof Error
+            ? err.message
+            : i18n.t("skills.fetchDetailFailed", "获取技能详情失败"),
+        );
         return null;
       }
     },
@@ -282,7 +295,11 @@ export function useSkills(options?: {
         await fetchSkills();
         return true;
       } catch (err) {
-        setError(err instanceof Error ? err.message : "Failed to create skill");
+        setError(
+          err instanceof Error
+            ? err.message
+            : i18n.t("skills.createFailed", "创建技能失败"),
+        );
         return false;
       } finally {
         setIsCreating(false);
@@ -310,7 +327,11 @@ export function useSkills(options?: {
         await fetchSkills();
         return true;
       } catch (err) {
-        setError(err instanceof Error ? err.message : "Failed to update skill");
+        setError(
+          err instanceof Error
+            ? err.message
+            : i18n.t("skills.updateFailed", "更新技能失败"),
+        );
         return false;
       } finally {
         setIsUpdating(false);
@@ -329,7 +350,11 @@ export function useSkills(options?: {
         await fetchSkills();
         return true;
       } catch (err) {
-        setError(err instanceof Error ? err.message : "Failed to delete skill");
+        setError(
+          err instanceof Error
+            ? err.message
+            : i18n.t("skills.deleteFailed", "删除技能失败"),
+        );
         return false;
       } finally {
         setIsDeleting(false);
@@ -370,7 +395,11 @@ export function useSkills(options?: {
             s.name === name ? { ...s, enabled: !newEnabled } : s,
           ),
         );
-        setError(err instanceof Error ? err.message : "Failed to toggle skill");
+        setError(
+          err instanceof Error
+            ? err.message
+            : i18n.t("skills.toggleFailed", "切换技能状态失败"),
+        );
         return false;
       } finally {
         // toggle 完成后清除 pending 状态
@@ -397,7 +426,9 @@ export function useSkills(options?: {
         return result.errors.length === 0;
       } catch (err) {
         setError(
-          err instanceof Error ? err.message : "Failed to delete skills",
+          err instanceof Error
+            ? err.message
+            : i18n.t("skills.batchDeleteFailed", "批量删除技能失败"),
         );
         await fetchSkills(); // rollback
         return false;
@@ -433,7 +464,9 @@ export function useSkills(options?: {
           ),
         );
         setError(
-          err instanceof Error ? err.message : "Failed to toggle skills",
+          err instanceof Error
+            ? err.message
+            : i18n.t("skills.batchToggleFailed", "批量切换技能状态失败"),
         );
         return false;
       }
@@ -510,7 +543,11 @@ export function useSkills(options?: {
         await fetchSkills();
         return result;
       } catch (err) {
-        setError(err instanceof Error ? err.message : "Failed to upload skill");
+        setError(
+          err instanceof Error
+            ? err.message
+            : i18n.t("skills.uploadFailed", "上传技能失败"),
+        );
         return null;
       } finally {
         setIsUploading(false);
@@ -538,7 +575,11 @@ export function useSkills(options?: {
       try {
         return await skillApi.previewZip(file);
       } catch (err) {
-        setError(err instanceof Error ? err.message : "Failed to preview ZIP");
+        setError(
+          err instanceof Error
+            ? err.message
+            : i18n.t("skills.previewZipFailed", "预览ZIP文件失败"),
+        );
         return null;
       } finally {
         setIsLoading(false);
@@ -565,7 +606,7 @@ export function useSkills(options?: {
         setError(
           err instanceof Error
             ? err.message
-            : "Failed to preview GitHub skills",
+            : i18n.t("skills.previewGitHubFailed", "预览GitHub技能失败"),
         );
         return null;
       } finally {
@@ -600,7 +641,7 @@ export function useSkills(options?: {
         setError(
           err instanceof Error
             ? err.message
-            : "Failed to install GitHub skills",
+            : i18n.t("skills.installGitHubFailed", "安装GitHub技能失败"),
         );
         return null;
       } finally {
@@ -630,7 +671,9 @@ export function useSkills(options?: {
         return true;
       } catch (err) {
         setError(
-          err instanceof Error ? err.message : "Failed to publish skill",
+          err instanceof Error
+            ? err.message
+            : i18n.t("skills.publishFailed", "发布技能失败"),
         );
         return false;
       } finally {

@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
+import i18n from "i18next";
 import { versionApi } from "../services/api";
 import type { VersionInfo } from "../types";
 
@@ -21,7 +22,11 @@ export function useVersion(): UseVersionReturn {
       const info = await versionApi.get();
       setVersionInfo(info);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to fetch version");
+      setError(
+        err instanceof Error
+          ? err.message
+          : i18n.t("version.fetchFailed", "获取版本失败"),
+      );
     } finally {
       setIsLoading(false);
     }
@@ -35,7 +40,9 @@ export function useVersion(): UseVersionReturn {
       setVersionInfo(info);
     } catch (err) {
       setError(
-        err instanceof Error ? err.message : "Failed to check for updates",
+        err instanceof Error
+          ? err.message
+          : i18n.t("version.checkFailed", "检查更新失败"),
       );
     } finally {
       setIsLoading(false);

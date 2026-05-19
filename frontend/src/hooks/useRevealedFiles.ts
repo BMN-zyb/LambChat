@@ -1,4 +1,5 @@
 import { useState, useCallback, useEffect, useRef, useMemo } from "react";
+import i18n from "i18next";
 import { useInView } from "react-intersection-observer";
 import {
   revealedFileApi,
@@ -66,7 +67,11 @@ export function useRevealedFiles(
             result.total > pageNum * PAGE_SIZE,
         );
       } catch (err) {
-        setError(err instanceof Error ? err.message : "Failed to load files");
+        setError(
+          err instanceof Error
+            ? err.message
+            : i18n.t("files.loadFailed", "加载文件失败"),
+        );
       } finally {
         setIsLoading(false);
         setIsLoadingMore(false);
@@ -190,7 +195,11 @@ export function useRevealedFilesGrouped(
             result.total_sessions > pageNum * SESSION_PAGE_SIZE,
         );
       } catch (err) {
-        setError(err instanceof Error ? err.message : "Failed to load files");
+        setError(
+          err instanceof Error
+            ? err.message
+            : i18n.t("files.loadFailed", "加载文件失败"),
+        );
       } finally {
         setIsLoading(false);
         setIsLoadingMore(false);
