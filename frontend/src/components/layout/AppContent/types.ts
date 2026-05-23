@@ -13,4 +13,5 @@ export type TabType =
   | "models"
   | "files"
   | "notifications"
-  | "memory";
+  | "memory"
+  | "team";

@@ -252,6 +252,15 @@ function FilesPage() {
   return <AppContent key="files" activeTab="files" />;
 }
 
+function TeamPage() {
+  useSEO({
+    title: "Team Builder",
+    description: "Compose and manage role-based agent teams",
+    path: "/team",
+  });
+  return <AppContent key="team" activeTab="team" />;
+}
+
 function PersonaPage() {
   useSEO({
     title: "seo.persona.title",
@@ -506,6 +515,14 @@ function App() {
               element={
                 <ProtectedRoute>
                   <ModelsPage />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/team"
+              element={
+                <ProtectedRoute>
+                  <TeamPage />
                 </ProtectedRoute>
               }
             />

@@ -58,6 +58,11 @@ const PersonaPlazaPanel = lazy(() =>
     default: m.PersonaPlazaPanel,
   })),
 );
+const TeamBuilderPanel = lazy(() =>
+  import("../../team/TeamBuilderWrapper").then((m) => ({
+    default: m.TeamBuilderWrapper,
+  })),
+);
 
 const panelMap: Record<
   string,
@@ -75,6 +80,7 @@ const panelMap: Record<
   models: ModelPanel,
   files: RevealedFilesPage,
   persona: PersonaPlazaPanel,
+  team: TeamBuilderPanel,
   notifications: NotificationPanel,
   memory: MemoryPanel,
 };

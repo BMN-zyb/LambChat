@@ -1,4 +1,4 @@
-import { useState, useMemo } from "react";
+import { useMemo } from "react";
 import { Search, Plus } from "lucide-react";
 import type { PersonaPreset } from "../../types";
 
