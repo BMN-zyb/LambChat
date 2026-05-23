@@ -514,6 +514,7 @@ class UserConcurrencyLimiter:
                         persona_system_prompt=persona_system_prompt,
                         disabled_mcp_tools=disabled_mcp_tools,
                         display_message=task_ctx.get("display_message") if task_ctx else None,
+                        team_id=task_ctx.get("team_id") if task_ctx else None,
                     )
                 )
                 task_manager._tasks[run_id] = task

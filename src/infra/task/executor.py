@@ -69,6 +69,7 @@ class TaskExecutor:
         persona_system_prompt: Optional[str] = None,
         disabled_mcp_tools: Optional[List[str]] = None,
         display_message: Optional[str] = None,
+        team_id: Optional[str] = None,
     ) -> None:
         """执行任务"""
         from src.infra.writer.present import Presenter, PresenterConfig
@@ -161,6 +162,7 @@ class TaskExecutor:
                 enabled_skills=enabled_skills,
                 persona_system_prompt=persona_system_prompt,
                 disabled_mcp_tools=disabled_mcp_tools,
+                team_id=team_id,
             ):
                 await presenter.save_event(event)
 

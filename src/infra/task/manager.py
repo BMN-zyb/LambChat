@@ -184,6 +184,7 @@ class BackgroundTaskManager:
         disabled_mcp_tools: Optional[List[str]] = None,
         session_name: Optional[str] = None,
         display_message: Optional[str] = None,
+        team_id: Optional[str] = None,
     ) -> Tuple[str, str]:
         """
         提交后台任务
@@ -240,6 +241,7 @@ class BackgroundTaskManager:
                     persona_system_prompt=persona_system_prompt,
                     disabled_mcp_tools=disabled_mcp_tools,
                     display_message=display_message,
+                    team_id=team_id,
                 )
             )
             self._tasks[run_id] = task
@@ -273,6 +275,7 @@ class BackgroundTaskManager:
         user_message_written: bool = False,
         payload_store: Optional[TaskArqPayloadStore] = None,
         arq_pool: Any | None = None,
+        team_id: Optional[str] = None,
     ) -> Tuple[str, str]:
         """Submit a task to arq after persisting serializable task context."""
         task_executor = self._ensure_executor()
@@ -312,6 +315,7 @@ class BackgroundTaskManager:
                     "persona_system_prompt": persona_system_prompt,
                     "disabled_mcp_tools": disabled_mcp_tools,
                     "user_message_written": user_message_written,
+                    "team_id": team_id,
                 },
             )
 
