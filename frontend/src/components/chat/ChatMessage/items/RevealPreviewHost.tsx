@@ -72,12 +72,14 @@ function ProjectRevealPreviewPanel({
   onClose,
   onUserInteraction,
   registryKey,
+  footer,
 }: {
   project: ParsedProjectRevealData;
   openInFullscreen?: boolean;
   onClose: () => void;
   onUserInteraction?: () => void;
   registryKey?: string;
+  footer?: React.ReactNode;
 }) {
   const { t } = useTranslation();
   const [isMobile, setIsMobile] = useState(() => window.innerWidth < 640);
@@ -303,6 +305,7 @@ function ProjectRevealPreviewPanel({
         }}
         panelElementRef={panelElementRef}
         onUserInteraction={onUserInteraction}
+        footer={footer}
         headerActions={
           !isFolder ? (
             <div className="flex items-center gap-1 shrink-0">
@@ -403,6 +406,7 @@ export function RevealPreviewHost({
         onUserInteraction={onUserInteraction}
         registryKey={`reveal-preview:${preview.previewKey}`}
         mobileFillViewport
+        footer={preview.footer}
       />
     );
   }
@@ -415,6 +419,7 @@ export function RevealPreviewHost({
       onClose={onClose}
       onUserInteraction={onUserInteraction}
       registryKey={`reveal-preview:${preview.previewKey}`}
+      footer={preview.footer}
     />
   );
 }

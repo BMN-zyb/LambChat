@@ -82,6 +82,8 @@ export function MessagePartRenderer({
           success={part.success}
           isPending={part.isPending}
           cancelled={part.cancelled}
+          startedAt={part.startedAt}
+          completedAt={part.completedAt}
         />
       );
     }
@@ -101,6 +103,8 @@ export function MessagePartRenderer({
             allowAutoPreview={allowAutoPreview}
             activePreview={activePreview}
             onOpenPreview={onOpenPreview}
+            startedAt={part.startedAt}
+            completedAt={part.completedAt}
           />
         </div>
       );
@@ -121,6 +125,8 @@ export function MessagePartRenderer({
             allowAutoPreview={allowAutoPreview}
             activePreview={activePreview}
             onOpenPreview={onOpenPreview}
+            startedAt={part.startedAt}
+            completedAt={part.completedAt}
           />
         </div>
       );
@@ -134,6 +140,8 @@ export function MessagePartRenderer({
           success={part.success}
           isPending={part.isPending}
           cancelled={part.cancelled}
+          startedAt={part.startedAt}
+          completedAt={part.completedAt}
         />
       );
     }
@@ -146,6 +154,8 @@ export function MessagePartRenderer({
           success={part.success}
           isPending={part.isPending}
           cancelled={part.cancelled}
+          startedAt={part.startedAt}
+          completedAt={part.completedAt}
         />
       );
     }
@@ -158,6 +168,8 @@ export function MessagePartRenderer({
           success={part.success}
           isPending={part.isPending}
           cancelled={part.cancelled}
+          startedAt={part.startedAt}
+          completedAt={part.completedAt}
         />
       );
     }
@@ -170,6 +182,8 @@ export function MessagePartRenderer({
           success={part.success}
           isPending={part.isPending}
           cancelled={part.cancelled}
+          startedAt={part.startedAt}
+          completedAt={part.completedAt}
         />
       );
     }
@@ -182,6 +196,8 @@ export function MessagePartRenderer({
           success={part.success}
           isPending={part.isPending}
           cancelled={part.cancelled}
+          startedAt={part.startedAt}
+          completedAt={part.completedAt}
         />
       );
     }
@@ -194,6 +210,8 @@ export function MessagePartRenderer({
           success={part.success}
           isPending={part.isPending}
           cancelled={part.cancelled}
+          startedAt={part.startedAt}
+          completedAt={part.completedAt}
         />
       );
     }
@@ -205,6 +223,8 @@ export function MessagePartRenderer({
         success={part.success}
         isPending={part.isPending}
         cancelled={part.cancelled}
+        startedAt={part.startedAt}
+        completedAt={part.completedAt}
       />
     );
   }

@@ -63,7 +63,7 @@ export function DesktopMoreMenu({
       }}
       onMouseDown={(e) => e.stopPropagation()}
     >
-      <div className="flex flex-col gap-px px-2 py-1 space-y-1">
+      <div className="flex flex-col gap-px p-2 space-y-1">
         {visibleItems.map(renderItem)}
       </div>
     </div>,

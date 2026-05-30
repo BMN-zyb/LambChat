@@ -18,6 +18,7 @@ import { setActiveRevealPreviewState } from "./items/activeRevealPreviewStore";
 import { createActiveRevealPreviewState } from "./items/revealPreviewState";
 import { copyToClipboard } from "../../../utils/clipboard";
 import { useSessionImageGallery } from "./sessionImageGallery";
+import { ImageWithSkeleton } from "./ImageWithSkeleton";
 
 function extractNodeText(node: React.ReactNode): string {
   if (typeof node === "string" || typeof node === "number") {
@@ -501,11 +502,11 @@ export const MarkdownContent = memo(function MarkdownContent({
           img: ({ src, alt }) => {
             const resolvedSrc = getFullUrl(src);
             return (
-              <img
+              <ImageWithSkeleton
                 src={resolvedSrc}
                 alt={alt}
                 loading="lazy"
-                className="max-w-full h-auto my-2 rounded-lg shadow cursor-zoom-in hover:opacity-90 transition-opacity"
+                className="max-w-full h-auto rounded-lg shadow hover:opacity-90 transition-opacity"
                 onClick={() => {
                   if (!resolvedSrc) return;
                   sessionImageGallery?.openImage(resolvedSrc, alt || undefined);

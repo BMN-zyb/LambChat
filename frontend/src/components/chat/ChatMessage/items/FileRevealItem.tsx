@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo, useCallback } from "react";
 import { clsx } from "clsx";
-import { ExternalLink } from "lucide-react";
+import { ExternalLink, Clock } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { LoadingSpinner, ImageViewer, VideoViewer } from "../../../common";
 import { getFileTypeInfo } from "../../../documents/utils";
@@ -78,6 +78,8 @@ export function FileRevealItem({
   allowAutoPreview,
   activePreview,
   onOpenPreview,
+  startedAt,
+  completedAt,
 }: {
   args: Record<string, unknown>;
   result?: string | Record<string, unknown>;
@@ -90,8 +92,26 @@ export function FileRevealItem({
     preview: RevealPreviewRequest,
     source?: RevealPreviewOpenSource,
   ) => boolean;
+  startedAt?: string;
+  completedAt?: string;
 }) {
   const { t } = useTranslation();
+  const durationFooter = useMemo(() => {
+    if (!startedAt || !completedAt) return undefined;
+    const ms = new Date(completedAt).getTime() - new Date(startedAt).getTime();
+    if (ms < 0) return undefined;
+    const seconds = Math.round(ms / 1000);
+    const text =
+      seconds < 60
+        ? `${seconds}s`
+        : `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+    return (
+      <span className="inline-flex items-center gap-1 text-xs text-[var(--theme-text-secondary)] tabular-nums">
+        <Clock size={11} className="shrink-0" />
+        {text}
+      </span>
+    );
+  }, [startedAt, completedAt]);
   const [imageViewerSrc, setImageViewerSrc] = useState<string | null>(null);
   const [videoViewerSrc, setVideoViewerSrc] = useState<string | null>(null);
   const [mediaLoaded, setMediaLoaded] = useState(false);
@@ -173,6 +193,7 @@ export function FileRevealItem({
             s3Key: parsed.s3Key || undefined,
             signedUrl: parsed.s3Url || undefined,
             fileSize: parsed.fileSize,
+            footer: durationFooter,
           }
         : null,
     [
@@ -181,6 +202,7 @@ export function FileRevealItem({
       parsed.s3Key,
       parsed.s3Url,
       parsed.fileSize,
+      durationFooter,
     ],
   );
 

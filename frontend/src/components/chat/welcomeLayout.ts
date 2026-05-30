@@ -69,7 +69,7 @@ export function getWelcomeSuggestionsContainerClass(
   variant: "personas" | "prompts",
 ): string {
   const base =
-    "welcome-suggestions relative px-0 sm:px-4 sm:mt-2 md:mt-3 xl:mt-4 2xl:mt-4";
+    "welcome-suggestions relative px-0 sm:px-4 sm:mt-1.5 md:mt-2 xl:mt-3 2xl:mt-3";
   if (variant === "personas") {
     return `${base} w-full sm:max-w-[44rem] md:max-w-[46rem] lg:max-w-[48rem] xl:max-w-[50rem] 2xl:max-w-[52rem]`;
   }

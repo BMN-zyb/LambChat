@@ -32,6 +32,7 @@ interface SidebarRailProps {
   moreMenuBtnRef: React.RefObject<HTMLButtonElement | null>;
   recentChatsBtnRef: React.RefObject<HTMLButtonElement | null>;
   onShowProfile: () => void;
+  unreadCount?: number;
 }
 
 export function SidebarRail({
@@ -50,6 +51,7 @@ export function SidebarRail({
   moreMenuBtnRef,
   recentChatsBtnRef,
   onShowProfile,
+  unreadCount = 0,
 }: SidebarRailProps) {
   const { t } = useTranslation();
   const { hasPermission } = useAuth();
@@ -148,11 +150,16 @@ export function SidebarRail({
           type="button"
           ref={recentChatsBtnRef}
           onClick={onOpenRecentChats}
-          className={railBtn}
+          className={`${railBtn} relative`}
           title={t("sidebar.recentChats")}
           aria-label={t("sidebar.recentChats")}
         >
           <Clock size={20} />
+          {unreadCount > 0 && (
+            <span className="absolute -top-0 right-0 flex h-3.5 min-w-[14px] items-center justify-center rounded-full bg-gradient-to-br from-red-400 to-rose-500 px-0.5 text-[9px] font-bold leading-none text-white shadow-[0_1px_3px_rgba(239,68,68,0.4)] ring-1 ring-white/20">
+              {unreadCount > 99 ? "99+" : unreadCount}
+            </span>
+          )}
         </button>
         {hasMoreMenuItems && (
           <button

@@ -189,14 +189,14 @@ export default function ProjectPreview({
           </div>
 
           {/* 右侧：标签切换 + 操作按钮 */}
-          <div className="flex items-center gap-0.5 sm:gap-1 shrink-0 flex-nowrap">
+          <div className="flex items-center gap-1 shrink-0 flex-nowrap">
             {showTabs && canPreview && (
               <>
                 <button
                   onClick={() =>
                     setActiveTab(activeTab === "preview" ? "code" : "preview")
                   }
-                  className="sm:hidden flex items-center justify-center w-7 h-7 rounded-md bg-stone-100 dark:bg-stone-800 text-stone-600 dark:text-stone-300 transition-colors"
+                  className="sm:hidden flex items-center justify-center size-7 rounded-lg bg-stone-100 dark:bg-stone-800 text-stone-600 dark:text-stone-300 transition-all duration-200 active:scale-95"
                   title={
                     activeTab === "preview"
                       ? t("project.code", "代码")
@@ -210,11 +210,11 @@ export default function ProjectPreview({
                   )}
                 </button>
 
-                <div className="hidden sm:flex items-center bg-stone-100 dark:bg-stone-800 rounded-lg p-0.5">
+                <div className="hidden sm:flex items-center bg-stone-100 dark:bg-stone-800 rounded-xl p-0.5">
                   <button
                     onClick={() => setActiveTab("preview")}
                     className={clsx(
-                      "flex items-center gap-1 px-3 py-1 rounded-md text-xs font-medium transition-colors",
+                      "flex items-center gap-1 px-3 py-1 rounded-lg text-xs font-medium transition-colors",
                       activeTab === "preview"
                         ? "bg-white dark:bg-stone-700 text-stone-900 dark:text-stone-100 shadow-sm"
                         : "text-stone-500 dark:text-stone-400 hover:text-stone-700 dark:hover:text-stone-300",
@@ -226,7 +226,7 @@ export default function ProjectPreview({
                   <button
                     onClick={() => setActiveTab("code")}
                     className={clsx(
-                      "flex items-center gap-1 px-3 py-1 rounded-md text-xs font-medium transition-colors",
+                      "flex items-center gap-1 px-3 py-1 rounded-lg text-xs font-medium transition-colors",
                       activeTab === "code"
                         ? "bg-white dark:bg-stone-700 text-stone-900 dark:text-stone-100 shadow-sm"
                         : "text-stone-500 dark:text-stone-400 hover:text-stone-700 dark:hover:text-stone-300",
@@ -243,7 +243,7 @@ export default function ProjectPreview({
               <button
                 onClick={() => setShowExplorer(!showExplorer)}
                 className={clsx(
-                  "p-1 sm:p-1.5 rounded-md sm:rounded-lg transition-colors",
+                  "flex items-center justify-center size-7 sm:size-8 rounded-lg sm:rounded-xl transition-all duration-200 active:scale-95",
                   showExplorer
                     ? "bg-blue-100 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400"
                     : "text-stone-400 dark:text-stone-500 hover:bg-stone-100 dark:hover:bg-stone-800",
@@ -257,7 +257,7 @@ export default function ProjectPreview({
             {isFullscreen && (
               <button
                 onClick={() => exportProjectZip(files, name)}
-                className="flex items-center gap-1 px-2 sm:px-3 py-1 sm:py-1.5 rounded-lg bg-stone-100 dark:bg-stone-800 hover:bg-stone-200 dark:hover:bg-stone-700 text-stone-600 dark:text-stone-300 text-xs font-medium transition-colors"
+                className="flex items-center justify-center size-7 sm:size-8 rounded-lg sm:rounded-xl bg-stone-100 dark:bg-stone-800 hover:bg-stone-200 dark:hover:bg-stone-700 text-stone-600 dark:text-stone-300 text-xs font-medium transition-all duration-200 active:scale-95"
               >
                 <Download size={14} />
                 <span className="hidden sm:inline">
@@ -269,7 +269,7 @@ export default function ProjectPreview({
             {onClose && (
               <button
                 onClick={onClose}
-                className="p-1 sm:p-1.5 rounded-md sm:rounded-lg text-stone-400 dark:text-stone-500 hover:bg-stone-100 dark:hover:bg-stone-800 transition-colors"
+                className="flex items-center justify-center size-7 sm:size-8 rounded-lg sm:rounded-xl text-stone-400 dark:text-stone-500 hover:bg-stone-100 dark:hover:bg-stone-800 transition-all duration-200 active:scale-95"
                 title={t("common.close")}
               >
                 <X size={14} className="sm:w-4 sm:h-4" />
@@ -279,7 +279,7 @@ export default function ProjectPreview({
             {onToggleSidebar && (
               <button
                 onClick={onToggleSidebar}
-                className="hidden sm:flex items-center justify-center w-7 h-7 rounded-lg text-stone-400 dark:text-stone-500 hover:bg-stone-100 dark:hover:bg-stone-800 transition-colors"
+                className="hidden sm:flex items-center justify-center size-8 rounded-xl text-stone-400 dark:text-stone-500 hover:bg-stone-100 dark:hover:bg-stone-800 transition-all duration-200 active:scale-95"
                 title={t("documents.sidebarView", "侧边栏")}
               >
                 <PanelRight size={14} />

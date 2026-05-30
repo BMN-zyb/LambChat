@@ -18,6 +18,7 @@ interface RecentChatsDialogProps {
   onSelectSession: (sessionId: string) => void;
   currentSessionId?: string | null;
   anchorEl: HTMLElement | null;
+  unreadCount?: number;
 }
 
 const PAGE_SIZE = 20;
@@ -34,6 +35,7 @@ export function RecentChatsDialog({
   onSelectSession,
   currentSessionId,
   anchorEl,
+  unreadCount = 0,
 }: RecentChatsDialogProps) {
   const { t } = useTranslation();
   const [sessions, setSessions] = useState<BackendSession[]>([]);
@@ -208,15 +210,22 @@ export function RecentChatsDialog({
       }}
     >
       {/* Header */}
-      <div className="flex items-center gap-2 px-4 pt-3 pb-2 border-b border-stone-200/60 dark:border-stone-800/60 shrink-0">
-        <img
-          src="/images/lamb.webp"
-          alt={APP_NAME}
-          className="h-5 object-contain"
-        />
-        <span className="text-sm font-bold text-stone-800 dark:text-stone-100 font-serif leading-none">
-          {t("sidebar.recentChats")}
-        </span>
+      <div className="flex items-center justify-between px-4 pt-3 pb-2 border-b border-stone-200/60 dark:border-stone-800/60 shrink-0">
+        <div className="flex items-center gap-2">
+          <img
+            src="/images/lamb.webp"
+            alt={APP_NAME}
+            className="h-5 object-contain"
+          />
+          <span className="text-sm font-bold text-stone-800 dark:text-stone-100 font-serif leading-none">
+            {t("sidebar.recentChats")}
+          </span>
+        </div>
+        {unreadCount > 0 && (
+          <span className="inline-flex h-4 min-w-[16px] items-center justify-center rounded-full bg-red-500 px-1 text-[10px] font-medium leading-none text-white">
+            {unreadCount > 99 ? "99+" : unreadCount}
+          </span>
+        )}
       </div>
 
       {/* Session list */}

@@ -20,6 +20,7 @@ import {
   extractGeneratedImageResults,
   type GeneratedImageResult,
 } from "./toolImageResults";
+import { ImageWithSkeleton } from "../ImageWithSkeleton";
 import {
   closeBlockPreview,
   getBlockPreview,
@@ -52,10 +53,12 @@ export function BlockPreviewPortal() {
     title = t("chat.message.toolOutput");
     content = (
       <div className="flex items-center justify-center p-4 bg-stone-50 dark:bg-stone-900 min-h-[200px]">
-        <img
+        <ImageWithSkeleton
           src={preview.src}
           alt={t("chat.message.toolOutput")}
+          skipUrlResolve
           className="max-w-full max-h-[70dvh] object-contain rounded-lg"
+          wrapperClassName="!my-0"
         />
       </div>
     );
@@ -211,11 +214,13 @@ function GeneratedImageResults({ images }: { images: GeneratedImageResult[] }) {
               onClick={() => setActiveImage(image)}
               aria-label={t("chat.message.openImage", "Open image")}
             >
-              <img
+              <ImageWithSkeleton
                 src={image.url}
                 alt={image.name}
+                skipUrlResolve
                 className="mx-auto max-h-[70dvh] w-full object-contain"
                 loading="lazy"
+                wrapperClassName="!my-0 !shadow-none"
               />
             </button>
             <figcaption className="flex items-center gap-2 border-t border-stone-200 px-3 py-2 text-xs text-stone-600 dark:border-stone-700 dark:text-stone-300">

@@ -265,6 +265,27 @@ export const SessionSidebar = forwardRef<
   );
 
   const projectRefs = useRef<Map<string, ProjectItemHandle>>(new Map());
+
+  const totalUnreadCount = useMemo(() => {
+    const realtimeIds = new Set(unreadBySession.keys());
+    let total = 0;
+    for (const entry of unreadBySession.values()) {
+      total += entry.count;
+    }
+    const addSessions = (sessions: BackendSession[]) => {
+      for (const s of sessions) {
+        if (!realtimeIds.has(s.id) && (s.unread_count ?? 0) > 0) {
+          total += s.unread_count ?? 0;
+        }
+      }
+    };
+    addSessions(uncategorizedList.sessions);
+    for (const [, handle] of projectRefs.current) {
+      addSessions(handle.sessions);
+    }
+    return total;
+  }, [unreadBySession, uncategorizedList.sessions]);
+
   const lastAppliedNewSessionKeyRef = useRef<string | null>(null);
   const recentChatsBtnRef = useRef<HTMLButtonElement>(null);
 
@@ -754,6 +775,7 @@ export const SessionSidebar = forwardRef<
             moreMenuBtnRef={moreMenuBtnRef}
             recentChatsBtnRef={recentChatsBtnRef}
             onShowProfile={onShowProfile!}
+            unreadCount={totalUnreadCount}
           />
         </div>
       </div>
@@ -833,6 +855,7 @@ export const SessionSidebar = forwardRef<
         onSelectSession={(id) => selectAndClose(id)}
         currentSessionId={currentSessionId}
         anchorEl={recentChatsBtnRef.current}
+        unreadCount={totalUnreadCount}
       />
 
       {!isMobile && (

@@ -49,11 +49,10 @@ type ToolbarProps = Pick<
   | "setIsFullscreen"
 >;
 
-const toolbarActionButtonClass =
-  "flex items-center justify-center size-8 sm:size-auto sm:gap-1.5 sm:px-2.5 sm:py-2 rounded-lg sm:rounded-xl text-xs sm:text-sm font-medium text-stone-600 dark:text-stone-300 hover:bg-stone-200/80 dark:hover:bg-stone-700/60 active:bg-stone-200 dark:active:bg-stone-600/60 transition-all duration-200 active:scale-95 cursor-pointer";
-
-const desktopToolbarActionButtonClass =
-  "hidden sm:flex items-center justify-center gap-1.5 px-2.5 py-2 rounded-xl text-xs sm:text-sm font-medium text-stone-600 dark:text-stone-300 hover:bg-stone-200/80 dark:hover:bg-stone-700/60 active:bg-stone-200 dark:active:bg-stone-600/60 transition-all duration-200 active:scale-95 cursor-pointer";
+const toolbarBtnClass = (compact: boolean) =>
+  compact
+    ? "flex items-center justify-center size-8 rounded-lg text-stone-600 dark:text-stone-300 hover:bg-stone-200/80 dark:hover:bg-stone-700/60 active:bg-stone-200 dark:active:bg-stone-600/60 transition-all duration-200 active:scale-95 cursor-pointer"
+    : "flex items-center justify-center size-8 rounded-xl size-auto gap-1.5 px-2.5 py-2 text-xs text-sm font-medium text-stone-600 dark:text-stone-300 hover:bg-stone-200/80 dark:hover:bg-stone-700/60 active:bg-stone-200 dark:active:bg-stone-600/60 transition-all duration-200 active:scale-95 cursor-pointer";
 
 export default function DocumentPreviewToolbar({
   t,
@@ -99,10 +98,11 @@ export default function DocumentPreviewToolbar({
             e.stopPropagation();
             effectiveOnBack();
           }}
-          className="flex items-center justify-center size-8 sm:size-9 rounded-lg sm:rounded-xl hover:bg-stone-200/80 dark:hover:bg-stone-700/60 active:bg-stone-200 dark:active:bg-stone-600/60 transition-all duration-200 active:scale-95 cursor-pointer shrink-0"
+          className={toolbarBtnClass(toolbarCompact) + " shrink-0"}
           title={t("common.back", "Back")}
         >
-          <BackIcon size={16} className="text-stone-500 dark:text-stone-400" />
+          <BackIcon size={16} />
+          {!toolbarCompact && <span>{t("common.back", "Back")}</span>}
         </button>
       )}
       <FileIcon icon={Icon} bg={fileInfo.bg} color={fileInfo.color} />
@@ -136,26 +136,18 @@ export default function DocumentPreviewToolbar({
               e.stopPropagation();
               setViewSource(!viewSource);
             }}
-            className={toolbarActionButtonClass}
+            className={toolbarBtnClass(toolbarCompact)}
             title={viewSource ? t("documents.preview") : t("documents.source")}
           >
             {viewSource ? (
               <>
                 <Eye size={16} />
-                {!toolbarCompact && (
-                  <span className="hidden sm:inline">
-                    {t("documents.preview")}
-                  </span>
-                )}
+                {!toolbarCompact && <span>{t("documents.preview")}</span>}
               </>
             ) : (
               <>
                 <Code2 size={16} />
-                {!toolbarCompact && (
-                  <span className="hidden sm:inline">
-                    {t("documents.source")}
-                  </span>
-                )}
+                {!toolbarCompact && <span>{t("documents.source")}</span>}
               </>
             )}
           </button>
@@ -172,7 +164,7 @@ export default function DocumentPreviewToolbar({
               if (isFullscreen) setIsFullscreen(false);
             }
           }}
-          className={desktopToolbarActionButtonClass}
+          className={toolbarBtnClass(toolbarCompact)}
           title={
             isSidebar
               ? t("documents.centerView", "Center view")
@@ -203,7 +195,7 @@ export default function DocumentPreviewToolbar({
             }
             setIsFullscreen(!isFullscreen);
           }}
-          className={toolbarActionButtonClass}
+          className={toolbarBtnClass(toolbarCompact)}
           title={
             isFullscreen
               ? t("documents.exitFullscreen")
@@ -213,20 +205,12 @@ export default function DocumentPreviewToolbar({
           {isFullscreen ? (
             <>
               <Shrink size={16} />
-              {!toolbarCompact && (
-                <span className="hidden sm:inline">
-                  {t("documents.exitFullscreen")}
-                </span>
-              )}
+              {!toolbarCompact && <span>{t("documents.exitFullscreen")}</span>}
             </>
           ) : (
             <>
               <Expand size={16} />
-              {!toolbarCompact && (
-                <span className="hidden sm:inline">
-                  {t("documents.fullscreen")}
-                </span>
-              )}
+              {!toolbarCompact && <span>{t("documents.fullscreen")}</span>}
             </>
           )}
         </button>
@@ -242,15 +226,11 @@ export default function DocumentPreviewToolbar({
                 e.stopPropagation();
                 handleDownload();
               }}
-              className={toolbarActionButtonClass}
+              className={toolbarBtnClass(toolbarCompact)}
               title={t("documents.download")}
             >
               <Download size={16} />
-              {!toolbarCompact && (
-                <span className="hidden sm:inline">
-                  {t("documents.download")}
-                </span>
-              )}
+              {!toolbarCompact && <span>{t("documents.download")}</span>}
             </button>
             {data?.content && !unsupportedPreviewFile && (
               <button
@@ -259,7 +239,8 @@ export default function DocumentPreviewToolbar({
                   e.stopPropagation();
                   handleCopy();
                 }}
-                className={toolbarActionButtonClass}
+                className={toolbarBtnClass(toolbarCompact)}
+                title={t("documents.copy")}
               >
                 {copied ? (
                   <>
@@ -268,7 +249,7 @@ export default function DocumentPreviewToolbar({
                       className="text-green-500 dark:text-green-400"
                     />
                     {!toolbarCompact && (
-                      <span className="hidden sm:inline text-green-500 dark:text-green-400">
+                      <span className="text-green-500 dark:text-green-400">
                         {t("documents.copied")}
                       </span>
                     )}
@@ -276,11 +257,7 @@ export default function DocumentPreviewToolbar({
                 ) : (
                   <>
                     <Copy size={16} />
-                    {!toolbarCompact && (
-                      <span className="hidden sm:inline">
-                        {t("documents.copy")}
-                      </span>
-                    )}
+                    {!toolbarCompact && <span>{t("documents.copy")}</span>}
                   </>
                 )}
               </button>
@@ -293,10 +270,12 @@ export default function DocumentPreviewToolbar({
             e.stopPropagation();
             onClose();
           }}
-          className="flex items-center justify-center size-8 sm:size-9 rounded-lg sm:rounded-xl hover:bg-stone-200/80 dark:hover:bg-stone-700/60 active:bg-stone-200 dark:active:bg-stone-600/60 transition-all duration-200 active:scale-95 cursor-pointer"
+          className={toolbarBtnClass(toolbarCompact)}
+          title={t("common.close")}
           aria-label={t("common.close")}
         >
-          <X size={16} className="text-stone-500 dark:text-stone-400" />
+          <X size={16} />
+          {!toolbarCompact && <span>{t("common.close")}</span>}
         </button>
       </div>
     </div>

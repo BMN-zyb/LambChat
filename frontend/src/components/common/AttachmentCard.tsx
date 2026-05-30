@@ -3,6 +3,7 @@ import { X, Loader2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import clsx from "clsx";
 import type { MessageAttachment } from "../../types";
+import { ImageWithSkeleton } from "../chat/ChatMessage/ImageWithSkeleton";
 import {
   getFileTypeInfo,
   formatFileSize as formatFileSizeUtil,
@@ -106,11 +107,11 @@ export const AttachmentCard = memo(function AttachmentCard({
           {isUploading ? (
             <Loader2 size={18} className={clsx(iconColor, "animate-spin")} />
           ) : isImage ? (
-            <img
+            <ImageWithSkeleton
               src={attachment.url}
               alt={attachment.name}
-              referrerPolicy="no-referrer"
-              className="w-full h-full object-cover"
+              skipUrlResolve
+              inline
             />
           ) : (
             <FileIcon size={18} className={iconColor} />

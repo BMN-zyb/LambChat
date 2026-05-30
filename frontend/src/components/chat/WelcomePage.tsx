@@ -359,9 +359,9 @@ export const WelcomePage = memo(function WelcomePage({
       className="welcome-root relative flex h-full flex-col items-center justify-center px-4"
     >
       {/* Greeting section */}
-      <div className="welcome-hero relative flex flex-col items-center mb-3 sm:mb-4 md:mb-5 xl:mb-6 2xl:mb-7 w-full max-w-[90vw]">
+      <div className="welcome-hero relative flex flex-col items-center mb-2 sm:mb-3 md:mb-4 xl:mb-4 2xl:mb-5 w-full max-w-[90vw]">
         {/* App icon (mobile only) */}
-        <div className="sm:hidden relative mb-3">
+        <div className="sm:hidden relative mb-2">
           <WelcomeIcon
             label="LambChat"
             className="welcome-icon relative size-12 object-contain"
@@ -370,15 +370,15 @@ export const WelcomePage = memo(function WelcomePage({
 
         {/* Greeting */}
         <h1
-          className="welcome-greeting max-w-[90vw] text-[1.65rem] sm:text-[2rem] md:text-[2.25rem] lg:text-[2.35rem] xl:text-[2.4rem] 2xl:text-[2.5rem] font-semibold tracking-[-0.02em] leading-[1.2] text-center font-serif"
+          className="welcome-greeting max-w-[90vw] text-[1.5rem] sm:text-[1.875rem] md:text-[2rem] lg:text-[2.25rem] xl:text-[2.35rem] 2xl:text-[2.5rem] font-semibold tracking-[-0.02em] leading-[1.2] text-center font-serif"
           style={{ color: "var(--theme-text)" }}
         >
-          <WelcomeIcon className="welcome-icon hidden sm:inline-block size-14 2xl:size-16 mr-4 align-text-bottom object-contain" />
+          <WelcomeIcon className="welcome-icon hidden sm:inline-block size-12 xl:size-14 2xl:size-16 mr-4 align-text-bottom object-contain" />
           {greeting}
         </h1>
         {/* Subtle subtitle prompt */}
         <p
-          className="welcome-subtitle mt-2 sm:mt-3 md:mt-3.5 xl:mt-4 2xl:mt-4 text-sm sm:text-base md:text-[17px] xl:text-lg 2xl:text-lg text-center font-serif"
+          className="welcome-subtitle mt-1.5 sm:mt-2 md:mt-2.5 xl:mt-3 2xl:mt-3 text-sm sm:text-base md:text-[17px] xl:text-lg 2xl:text-lg text-center font-serif"
           style={{ color: "var(--theme-text-secondary)" }}
         >
           {subtitle}

@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { getFullUrl } from "../../../../services/api/config";
 import { rewriteProjectTextFiles } from "./projectRevealAssetUtils";
 
@@ -84,12 +85,14 @@ export type RevealPreviewRequest =
       signedUrl?: string;
       imageUrl?: string;
       fileSize?: number;
+      footer?: ReactNode;
     }
   | {
       kind: "project";
       previewKey: string;
       project: ParsedProjectRevealData;
       openInFullscreen?: boolean;
+      footer?: ReactNode;
     };
 
 function isProjectRevealV2(

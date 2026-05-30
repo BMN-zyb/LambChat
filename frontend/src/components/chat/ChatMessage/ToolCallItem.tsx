@@ -1,40 +1,62 @@
-import { Wrench, Globe } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { Wrench, Globe, Clock } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { CollapsiblePill, CopyButton, LoadingSpinner } from "../../common";
 import type { CollapsibleStatus } from "../../common";
 import { ToolResultContent } from "./items/McpBlockPreview";
 import { openPersistentToolPanel } from "./items/persistentToolPanelState";
 
-/** Returns the number of seconds elapsed since isPending became true, or 0 when not pending. */
-function useElapsedSeconds(isPending?: boolean): number {
+/** Returns the number of seconds elapsed since the tool started, or 0 when not pending. */
+function useElapsedSeconds(isPending?: boolean, startedAt?: string): number {
   const [elapsed, setElapsed] = useState(0);
-  const startedAt = useRef<number | null>(null);
+  const startTimeMs = useRef<number | null>(null);
   const raf = useRef<number>(0);
 
   useEffect(() => {
     if (isPending) {
-      startedAt.current = Date.now();
+      // Use the tool's actual start time from the backend, fall back to now
+      startTimeMs.current = startedAt
+        ? new Date(startedAt).getTime()
+        : Date.now();
       setElapsed(0);
       const tick = () => {
-        if (startedAt.current !== null) {
-          setElapsed(Math.floor((Date.now() - startedAt.current) / 1000));
+        if (startTimeMs.current !== null) {
+          setElapsed(Math.floor((Date.now() - startTimeMs.current) / 1000));
           raf.current = requestAnimationFrame(tick);
         }
       };
       raf.current = requestAnimationFrame(tick);
       return () => cancelAnimationFrame(raf.current);
     } else {
-      startedAt.current = null;
+      startTimeMs.current = null;
       setElapsed(0);
       return () => cancelAnimationFrame(raf.current);
     }
-  }, [isPending]);
+  }, [isPending, startedAt]);
 
   return elapsed;
 }
 
 function formatElapsed(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`;
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  return `${m}m ${s}s`;
+}
+
+/** Compute the tool's final duration in seconds from startedAt/completedAt ISO strings. */
+function computeDuration(
+  startedAt?: string,
+  completedAt?: string,
+): number | null {
+  if (!startedAt || !completedAt) return null;
+  const ms = new Date(completedAt).getTime() - new Date(startedAt).getTime();
+  if (ms < 0) return null;
+  return Math.round(ms / 1000);
+}
+
+/** Format duration for display: <60s → "Xs", >=60s → "Xm Ys". For sub-second use ".Xs". */
+function formatDuration(seconds: number): string {
   if (seconds < 60) return `${seconds}s`;
   const m = Math.floor(seconds / 60);
   const s = seconds % 60;
@@ -60,6 +82,8 @@ export function ToolCallItem({
   success,
   isPending,
   cancelled,
+  startedAt,
+  completedAt,
 }: {
   name: string;
   args: Record<string, unknown>;
@@ -67,10 +91,23 @@ export function ToolCallItem({
   success?: boolean;
   isPending?: boolean;
   cancelled?: boolean;
+  startedAt?: string;
+  completedAt?: string;
 }) {
   const { t } = useTranslation();
   const hasResult = result !== undefined;
-  const elapsedSeconds = useElapsedSeconds(isPending);
+  const elapsedSeconds = useElapsedSeconds(isPending, startedAt);
+  const finalDuration = computeDuration(startedAt, completedAt);
+
+  const durationFooter = useMemo(() => {
+    if (finalDuration === null) return undefined;
+    return (
+      <div className="flex items-center gap-1.5 px-4 py-2 text-xs text-stone-400 dark:text-stone-500 border-t border-stone-100 dark:border-stone-800">
+        <Clock size={11} className="shrink-0" />
+        <span className="tabular-nums">{formatDuration(finalDuration)}</span>
+      </div>
+    );
+  }, [finalDuration]);
 
   // Parse MCP server name from tool name (format: "server_name:tool_name")
   const colonIdx = name.indexOf(":");
@@ -151,6 +188,13 @@ export function ToolCallItem({
           <span className="tabular-nums">{formatElapsed(elapsedSeconds)}</span>
         </div>
       )}
+
+      {!isPending && finalDuration !== null && (
+        <div className="flex items-center gap-1.5 text-xs text-stone-400 dark:text-stone-500">
+          <Clock size={11} className="shrink-0" />
+          <span className="tabular-nums">{formatDuration(finalDuration)}</span>
+        </div>
+      )}
     </div>
   );
 
@@ -183,6 +227,7 @@ export function ToolCallItem({
             status,
             subtitle: serverName || undefined,
             children: panelContent,
+            footer: durationFooter,
           });
         }}
       >
@@ -227,6 +272,15 @@ export function ToolCallItem({
                 <span>{t("chat.message.running")}</span>
                 <span className="tabular-nums">
                   {formatElapsed(elapsedSeconds)}
+                </span>
+              </div>
+            )}
+
+            {!isPending && finalDuration !== null && (
+              <div className="flex items-center gap-1.5 text-xs text-stone-400 dark:text-stone-500">
+                <Clock size={11} className="shrink-0" />
+                <span className="tabular-nums">
+                  {formatDuration(finalDuration)}
                 </span>
               </div>
             )}

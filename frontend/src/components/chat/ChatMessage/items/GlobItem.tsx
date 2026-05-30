@@ -1,6 +1,6 @@
 import { memo, useMemo } from "react";
 import { clsx } from "clsx";
-import { FolderSearch, FileText } from "lucide-react";
+import { Clock, FolderSearch, FileText } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { CollapsiblePill, CopyButton } from "../../../common";
 import { extractPaths } from "./toolUtils";
@@ -12,14 +12,34 @@ const GlobItem = memo(function GlobItem({
   success,
   isPending,
   cancelled,
+  startedAt,
+  completedAt,
 }: {
   args: Record<string, unknown>;
   result?: string | Record<string, unknown>;
   success?: boolean;
   isPending?: boolean;
   cancelled?: boolean;
+  startedAt?: string;
+  completedAt?: string;
 }) {
   const { t } = useTranslation();
+  const durationFooter = useMemo(() => {
+    if (!startedAt || !completedAt) return undefined;
+    const ms = new Date(completedAt).getTime() - new Date(startedAt).getTime();
+    if (ms < 0) return undefined;
+    const seconds = Math.round(ms / 1000);
+    const text =
+      seconds < 60
+        ? `${seconds}s`
+        : `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+    return (
+      <div className="flex items-center gap-1.5 px-4 py-2 text-xs text-stone-400 dark:text-stone-500 border-t border-stone-100 dark:border-stone-800">
+        <Clock size={11} className="shrink-0" />
+        <span className="tabular-nums">{text}</span>
+      </div>
+    );
+  }, [startedAt, completedAt]);
   const pattern = (args.pattern as string) || "";
   const searchPath = (args.path as string) || "";
 
@@ -120,6 +140,7 @@ const GlobItem = memo(function GlobItem({
             status,
             subtitle: searchPath || undefined,
             children: detailContent,
+            footer: durationFooter,
           });
         }}
       >

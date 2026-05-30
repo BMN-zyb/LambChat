@@ -31,6 +31,7 @@ export function createToolPart(
   depth: number,
   agentId?: string,
   toolCallId?: string,
+  startedAt?: string,
 ): ToolPart {
   return {
     type: "tool",
@@ -40,6 +41,7 @@ export function createToolPart(
     isPending: true,
     depth,
     agent_id: agentId,
+    startedAt,
   };
 }
 
@@ -487,19 +489,34 @@ export function updateToolResultInDepth(
   error?: string,
   _targetDepth?: number,
   targetAgentId?: string,
+  completedAt?: string,
 ): MessagePart[] {
   // Try direct match on top-level tools first
   for (let i = parts.length - 1; i >= 0; i--) {
     const p = parts[i];
     if (p.type === "tool" && p.id === toolCallId && p.isPending) {
       const newParts = [...parts];
-      newParts[i] = { ...p, result, success, error, isPending: false };
+      newParts[i] = {
+        ...p,
+        result,
+        success,
+        error,
+        isPending: false,
+        completedAt,
+      };
       return newParts;
     }
     // Backward compat: match by name when no id
     if (p.type === "tool" && !p.id && p.isPending) {
       const newParts = [...parts];
-      newParts[i] = { ...p, result, success, error, isPending: false };
+      newParts[i] = {
+        ...p,
+        result,
+        success,
+        error,
+        isPending: false,
+        completedAt,
+      };
       return newParts;
     }
   }
@@ -517,6 +534,7 @@ export function updateToolResultInDepth(
         result,
         success,
         error,
+        completedAt,
       );
       if (updatedParts) {
         const newParts = [...parts];
@@ -537,17 +555,32 @@ export function updateToolResultInPartsById(
   result: string | Record<string, unknown>,
   success: boolean,
   error?: string,
+  completedAt?: string,
 ): MessagePart[] | null {
   for (let i = 0; i < parts.length; i++) {
     const p = parts[i];
     if (p.type === "tool" && p.id === toolCallId && p.isPending) {
       const newParts = [...parts];
-      newParts[i] = { ...p, result, success, error, isPending: false };
+      newParts[i] = {
+        ...p,
+        result,
+        success,
+        error,
+        isPending: false,
+        completedAt,
+      };
       return newParts;
     }
     if (p.type === "tool" && !p.id && p.isPending) {
       const newParts = [...parts];
-      newParts[i] = { ...p, result, success, error, isPending: false };
+      newParts[i] = {
+        ...p,
+        result,
+        success,
+        error,
+        isPending: false,
+        completedAt,
+      };
       return newParts;
     }
     if (p.type === "subagent" && p.parts) {
@@ -557,6 +590,7 @@ export function updateToolResultInPartsById(
         result,
         success,
         error,
+        completedAt,
       );
       if (updatedParts) {
         const newParts = [...parts];

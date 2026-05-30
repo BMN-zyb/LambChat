@@ -241,6 +241,7 @@ export function processMessageEvent(
         depth,
         agentId,
         toolCallId,
+        data.timestamp as string | undefined,
       );
 
       if (depth > 0) {
@@ -265,6 +266,7 @@ export function processMessageEvent(
       const isSuccess = data.success !== false;
       const errorMsg = data.error as string | undefined;
       const resultContent = data.result || "";
+      const completedAt = data.timestamp as string | undefined;
 
       if (depth > 0 || toolCallId) {
         result.parts = updateToolResultInDepth(
@@ -275,6 +277,7 @@ export function processMessageEvent(
           errorMsg,
           depth,
           agentId,
+          completedAt,
         );
       } else {
         let updated = false;
@@ -292,6 +295,7 @@ export function processMessageEvent(
               success: isSuccess,
               error: errorMsg,
               isPending: false,
+              completedAt,
             };
           }
           return p;

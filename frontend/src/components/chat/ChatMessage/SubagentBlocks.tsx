@@ -28,6 +28,7 @@ import {
 import { FluentEmoji } from "@lobehub/fluent-emoji";
 import { useTranslation } from "react-i18next";
 import { LoadingSpinner, CollapsiblePill, CopyButton } from "../../common";
+import { ImageWithSkeleton } from "./ImageWithSkeleton";
 import type { CollapsibleStatus } from "../../common";
 import { PersonaAvatarIcon } from "../../persona/PersonaAvatarIcon";
 import {
@@ -724,16 +725,15 @@ export function SubagentBlock({
             <RoleIcon size={15} className={roleIconMeta.className} />
           )}
           {agentAvatarUrl && (
-            <img
-              src={agentAvatarUrl}
-              alt=""
-              className="absolute h-8 w-8 object-cover"
-              loading="lazy"
-              referrerPolicy="no-referrer"
-              onError={(e) => {
-                (e.currentTarget as HTMLImageElement).style.display = "none";
-              }}
-            />
+            <div className="absolute h-8 w-8 overflow-hidden rounded-full">
+              <ImageWithSkeleton
+                src={agentAvatarUrl}
+                alt=""
+                skipUrlResolve
+                inline
+                loading="lazy"
+              />
+            </div>
           )}
           {agent_avatar && !agentAvatarUrl && (
             <PersonaAvatarIcon

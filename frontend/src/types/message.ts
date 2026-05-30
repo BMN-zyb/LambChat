@@ -134,6 +134,8 @@ export interface ToolPart {
   cancelled?: boolean;
   depth?: number;
   agent_id?: string;
+  startedAt?: string;
+  completedAt?: string;
 }
 
 export interface SubagentPart {

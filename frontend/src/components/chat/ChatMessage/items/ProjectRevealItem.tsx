@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Code2, FolderTree, Download } from "lucide-react";
+import { Code2, FolderTree, Download, Clock } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { LoadingSpinner } from "../../../common";
 import { exportProjectZip } from "../../../../utils/exportProjectZip";
@@ -32,6 +32,8 @@ export function ProjectRevealItem({
   allowAutoPreview,
   activePreview,
   onOpenPreview,
+  startedAt,
+  completedAt,
 }: {
   args: Record<string, unknown>;
   result?: string | Record<string, unknown>;
@@ -44,8 +46,26 @@ export function ProjectRevealItem({
     preview: RevealPreviewRequest,
     source?: RevealPreviewOpenSource,
   ) => boolean;
+  startedAt?: string;
+  completedAt?: string;
 }) {
   const { t } = useTranslation();
+  const durationFooter = useMemo(() => {
+    if (!startedAt || !completedAt) return undefined;
+    const ms = new Date(completedAt).getTime() - new Date(startedAt).getTime();
+    if (ms < 0) return undefined;
+    const seconds = Math.round(ms / 1000);
+    const text =
+      seconds < 60
+        ? `${seconds}s`
+        : `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+    return (
+      <span className="inline-flex items-center gap-1 text-xs text-[var(--theme-text-secondary)] tabular-nums">
+        <Clock size={11} className="shrink-0" />
+        {text}
+      </span>
+    );
+  }, [startedAt, completedAt]);
   const { projectName, mode, template, error, fileCount, projectPath, parsed } =
     useMemo(
       () =>
@@ -89,8 +109,9 @@ export function ProjectRevealItem({
       kind: "project" as const,
       previewKey: projectAutoOpenKey,
       project: parsed,
+      footer: durationFooter,
     };
-  }, [parsed, projectAutoOpenKey]);
+  }, [parsed, projectAutoOpenKey, durationFooter]);
 
   const openPreview = (
     openInFullscreen = false,

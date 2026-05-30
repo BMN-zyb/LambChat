@@ -72,6 +72,16 @@ interface ToolResultPanelProps {
   onBack?: () => void;
 }
 
+const panelBtnClass = (compact: boolean) =>
+  compact
+    ? "flex items-center justify-center size-8 rounded-lg text-stone-400 dark:text-stone-500 hover:bg-stone-200/80 dark:hover:bg-stone-700/60 active:bg-stone-200 dark:active:bg-stone-600/60 transition-all duration-200 active:scale-95 cursor-pointer"
+    : "flex items-center justify-center size-8 rounded-xl size-auto gap-1.5 px-2.5 py-2 text-xs text-sm font-medium text-stone-400 dark:text-stone-500 hover:bg-stone-200/80 dark:hover:bg-stone-700/60 active:bg-stone-200 dark:active:bg-stone-600/60 transition-all duration-200 active:scale-95 cursor-pointer";
+
+const panelCloseBtnClass = (compact: boolean) =>
+  compact
+    ? "flex items-center justify-center size-8 rounded-lg text-stone-400 dark:text-stone-500 hover:bg-stone-200/80 dark:hover:bg-stone-700/60 active:bg-stone-200 dark:active:bg-stone-600/60 transition-all duration-200 active:scale-95 cursor-pointer"
+    : "flex items-center justify-center size-8 rounded-xl size-auto gap-1.5 px-2.5 py-2 text-xs text-sm font-medium text-stone-400 dark:text-stone-500 hover:bg-stone-200/80 dark:hover:bg-stone-700/60 active:bg-stone-200 dark:active:bg-stone-600/60 transition-all duration-200 active:scale-95 cursor-pointer";
+
 const statusConfig: Record<
   CollapsibleStatus,
   { bg: string; color: string; icon: React.ReactNode }
@@ -133,6 +143,19 @@ export function ToolResultPanel({
     "sidebar" | "center"
   >("sidebar");
   const [internalIsFullscreen, setInternalIsFullscreen] = useState(false);
+  const [toolbarCompact, setToolbarCompact] = useState(false);
+  const toolbarRef = useRef<HTMLDivElement>(null);
+
+  // Toolbar compact detection based on header width
+  useEffect(() => {
+    const el = toolbarRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver((entries) => {
+      setToolbarCompact(entries[0].contentRect.width < 640);
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
 
   const [historyAvailable, setHistoryAvailable] = useState(
     () => getSidebarHistoryLength() > 0,
@@ -344,7 +367,10 @@ export function ToolResultPanel({
 
       {/* Header section — sidebar mode always; center mode only when customHeader is provided; mobile always */}
       {(isSidebar || isMobile || (isCenter && hasCustomHeader)) && (
-        <div className="flex flex-col shrink-0 bg-gradient-to-r from-stone-50 to-white dark:from-stone-800 dark:to-[#292524]">
+        <div
+          ref={toolbarRef}
+          className="flex flex-col shrink-0 bg-gradient-to-r from-stone-50 to-white dark:from-stone-800 dark:to-[#292524]"
+        >
           {/* Mobile drag handle */}
           {isMobile && (
             <div ref={dragHandleRef} className="flex justify-center pt-4 pb-2">
@@ -354,7 +380,7 @@ export function ToolResultPanel({
           {hasCustomHeader ? (
             customHeader
           ) : (
-            <div className="flex items-center gap-2 sm:gap-3 px-2 sm:px-4 py-2 sm:py-3 border-b border-stone-200 dark:border-stone-700 shrink-0 overflow-hidden">
+            <div className="flex items-center gap-1 px-2 sm:px-4 py-2 sm:py-3 border-b border-stone-200 dark:border-stone-700 shrink-0 overflow-hidden">
               {/* Back button */}
               {effectiveOnBack && (
                 <button
@@ -363,13 +389,11 @@ export function ToolResultPanel({
                     e.stopPropagation();
                     effectiveOnBack();
                   }}
-                  className="flex items-center justify-center w-8 h-8 rounded-xl hover:bg-stone-100 dark:hover:bg-stone-800 transition-all duration-200 active:scale-95 shrink-0"
+                  className={panelCloseBtnClass(toolbarCompact) + " shrink-0"}
                   title={t("common.back", "Back")}
                 >
-                  <BackIcon
-                    size={15}
-                    className="text-stone-400 dark:text-stone-500"
-                  />
+                  <BackIcon size={16} />
+                  {!toolbarCompact && <span>{t("common.back", "Back")}</span>}
                 </button>
               )}
 
@@ -417,14 +441,14 @@ export function ToolResultPanel({
 
               {/* Center / Fullscreen / Close */}
               {!hideViewToggle && (
-                <div className="flex items-center gap-1 shrink-0">
+                <div className="flex items-center gap-px sm:gap-1 shrink-0">
                   <button
                     type="button"
                     onClick={(e) => {
                       e.stopPropagation();
                       handleToggleViewMode();
                     }}
-                    className="hidden sm:flex items-center justify-center w-8 h-8 rounded-xl hover:bg-stone-100 dark:hover:bg-stone-800 transition-all duration-200 active:scale-95"
+                    className={panelBtnClass(toolbarCompact)}
                     title={
                       isSidebar
                         ? t("documents.centerView", "Center view")
@@ -432,15 +456,19 @@ export function ToolResultPanel({
                     }
                   >
                     {isSidebar ? (
-                      <Columns2
-                        size={15}
-                        className="text-stone-400 dark:text-stone-500"
-                      />
+                      <>
+                        <Columns2 size={16} />
+                        {!toolbarCompact && (
+                          <span>{t("documents.centerView", "居中")}</span>
+                        )}
+                      </>
                     ) : (
-                      <PanelRight
-                        size={15}
-                        className="text-stone-400 dark:text-stone-500"
-                      />
+                      <>
+                        <PanelRight size={16} />
+                        {!toolbarCompact && (
+                          <span>{t("documents.sidebarView")}</span>
+                        )}
+                      </>
                     )}
                   </button>
                   <button
@@ -449,23 +477,27 @@ export function ToolResultPanel({
                       e.stopPropagation();
                       handleToggleFullscreen();
                     }}
-                    className="flex items-center justify-center w-8 h-8 rounded-xl hover:bg-stone-100 dark:hover:bg-stone-800 transition-all duration-200 active:scale-95"
+                    className={panelBtnClass(toolbarCompact)}
                     title={
                       isFullscreen
-                        ? t("documents.exitFullscreen", "退出全屏")
-                        : t("documents.fullscreen", "全屏")
+                        ? t("documents.exitFullscreen")
+                        : t("documents.fullscreen")
                     }
                   >
                     {isFullscreen ? (
-                      <Shrink
-                        size={15}
-                        className="text-stone-400 dark:text-stone-500"
-                      />
+                      <>
+                        <Shrink size={16} />
+                        {!toolbarCompact && (
+                          <span>{t("documents.exitFullscreen")}</span>
+                        )}
+                      </>
                     ) : (
-                      <Expand
-                        size={15}
-                        className="text-stone-400 dark:text-stone-500"
-                      />
+                      <>
+                        <Expand size={16} />
+                        {!toolbarCompact && (
+                          <span>{t("documents.fullscreen")}</span>
+                        )}
+                      </>
                     )}
                   </button>
                   <button
@@ -474,14 +506,12 @@ export function ToolResultPanel({
                       e.stopPropagation();
                       handleUserClose();
                     }}
-                    className="flex items-center justify-center w-8 h-8 rounded-xl hover:bg-stone-100 dark:hover:bg-stone-800 transition-all duration-200 active:scale-95"
-                    aria-label={t("common.close", "关闭")}
-                    title={t("common.close", "Close")}
+                    className={panelCloseBtnClass(toolbarCompact)}
+                    title={t("common.close")}
+                    aria-label={t("common.close")}
                   >
-                    <X
-                      size={15}
-                      className="text-stone-400 dark:text-stone-500"
-                    />
+                    <X size={16} />
+                    {!toolbarCompact && <span>{t("common.close")}</span>}
                   </button>
                 </div>
               )}
@@ -492,11 +522,12 @@ export function ToolResultPanel({
                     e.stopPropagation();
                     handleUserClose();
                   }}
-                  className="flex items-center justify-center w-8 h-8 rounded-xl hover:bg-stone-100 dark:hover:bg-stone-800 transition-all duration-200 active:scale-95 shrink-0"
-                  aria-label={t("common.close", "关闭")}
-                  title={t("common.close", "Close")}
+                  className={panelCloseBtnClass(toolbarCompact) + " shrink-0"}
+                  aria-label={t("common.close")}
+                  title={t("common.close")}
                 >
-                  <X size={15} className="text-stone-400 dark:text-stone-500" />
+                  <X size={16} />
+                  {!toolbarCompact && <span>{t("common.close")}</span>}
                 </button>
               )}
             </div>

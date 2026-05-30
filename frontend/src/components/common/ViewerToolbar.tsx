@@ -32,25 +32,21 @@ export function ViewerToolbar({
         <button
           type="button"
           onClick={onRotateLeft}
-          className="flex items-center justify-center gap-1.5 rounded-lg px-2.5 h-10 hover:bg-white/10 transition-colors cursor-pointer"
+          className="flex items-center justify-center size-8 rounded-lg hover:bg-white/10 transition-colors cursor-pointer text-white/70"
           aria-label={t("imageViewer.rotateLeft")}
+          title={t("imageViewer.rotateLeft")}
         >
-          <RotateCcw size={18} className="text-white/70" />
-          <span className="hidden sm:inline text-white/70 text-xs">
-            {t("imageViewer.rotateLeft")}
-          </span>
+          <RotateCcw size={18} />
         </button>
 
         <button
           type="button"
           onClick={onRotateRight}
-          className="flex items-center justify-center gap-1.5 rounded-lg px-2.5 h-10 hover:bg-white/10 transition-colors cursor-pointer"
+          className="flex items-center justify-center size-8 rounded-lg hover:bg-white/10 transition-colors cursor-pointer text-white/70"
           aria-label={t("imageViewer.rotateRight")}
+          title={t("imageViewer.rotateRight")}
         >
-          <RotateCw size={18} className="text-white/70" />
-          <span className="hidden sm:inline text-white/70 text-xs">
-            {t("imageViewer.rotateRight")}
-          </span>
+          <RotateCw size={18} />
         </button>
       </div>
 
@@ -61,13 +57,11 @@ export function ViewerToolbar({
           type="button"
           onClick={onZoomOut}
           disabled={scale <= minScale}
-          className="flex items-center justify-center gap-1.5 rounded-lg px-2.5 h-10 hover:bg-white/10 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+          className="flex items-center justify-center size-8 rounded-lg hover:bg-white/10 transition-colors cursor-pointer text-white/70 disabled:opacity-50 disabled:cursor-not-allowed"
           aria-label={t("imageViewer.zoomOut")}
+          title={t("imageViewer.zoomOut")}
         >
-          <ZoomOut size={18} className="text-white/70" />
-          <span className="hidden sm:inline text-white/70 text-xs">
-            {t("imageViewer.zoomOut")}
-          </span>
+          <ZoomOut size={18} />
         </button>
 
         <span className="min-w-[48px] sm:min-w-[52px] text-center text-white/70 text-xs sm:text-sm font-medium tabular-nums">
@@ -78,13 +72,11 @@ export function ViewerToolbar({
           type="button"
           onClick={onZoomIn}
           disabled={scale >= maxScale}
-          className="flex items-center justify-center gap-1.5 rounded-lg px-2.5 h-10 hover:bg-white/10 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+          className="flex items-center justify-center size-8 rounded-lg hover:bg-white/10 transition-colors cursor-pointer text-white/70 disabled:opacity-50 disabled:cursor-not-allowed"
           aria-label={t("imageViewer.zoomIn")}
+          title={t("imageViewer.zoomIn")}
         >
-          <ZoomIn size={18} className="text-white/70" />
-          <span className="hidden sm:inline text-white/70 text-xs">
-            {t("imageViewer.zoomIn")}
-          </span>
+          <ZoomIn size={18} />
         </button>
       </div>
 
@@ -94,13 +86,11 @@ export function ViewerToolbar({
         <button
           type="button"
           onClick={onReset}
-          className="flex items-center justify-center gap-1.5 rounded-lg px-2.5 h-10 hover:bg-white/10 transition-colors cursor-pointer"
+          className="flex items-center justify-center size-8 rounded-lg hover:bg-white/10 transition-colors cursor-pointer text-white/70"
           aria-label={t("imageViewer.reset")}
+          title={t("imageViewer.reset")}
         >
-          <Shrink size={18} className="text-white/70" />
-          <span className="hidden sm:inline text-white/70 text-xs">
-            {t("imageViewer.reset")}
-          </span>
+          <Shrink size={18} />
         </button>
       </div>
     </div>

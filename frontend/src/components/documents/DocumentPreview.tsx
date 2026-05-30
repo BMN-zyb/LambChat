@@ -38,7 +38,8 @@ export default function DocumentPreview(props: DocumentPreviewProps) {
                 {state.path}
               </span>
             </div>
-            <div className="flex items-center gap-1 shrink-0 ml-2">
+            <div className="flex items-center gap-3 shrink-0 ml-2">
+              {state.footer}
               <span className="hidden sm:inline">
                 {state.t("documents.pressEscToClose")}
               </span>

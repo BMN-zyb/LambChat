@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef } from "react";
+import { useState, useEffect, useMemo, useRef, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { uploadApi } from "../../services/api";
 import {
@@ -47,6 +47,7 @@ export interface DocumentPreviewProps {
   registryKey?: string;
   onBack?: () => void;
   mobileFillViewport?: boolean;
+  footer?: ReactNode;
 }
 
 export function useDocumentPreviewState(props: DocumentPreviewProps) {
@@ -118,7 +119,7 @@ export function useDocumentPreviewState(props: DocumentPreviewProps) {
     const el = toolbarRef.current;
     if (!el) return;
     const ro = new ResizeObserver((entries) => {
-      setToolbarCompact(entries[0].contentRect.width < 420);
+      setToolbarCompact(entries[0].contentRect.width < 640);
     });
     ro.observe(el);
     return () => ro.disconnect();
@@ -451,6 +452,7 @@ export function useDocumentPreviewState(props: DocumentPreviewProps) {
     onUserInteraction: props.onUserInteraction,
     registryKey: props.registryKey,
     mobileFillViewport: props.mobileFillViewport,
+    footer: props.footer,
     s3Key,
     signedUrl,
     externalImageUrl,

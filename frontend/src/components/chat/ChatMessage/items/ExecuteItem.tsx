@@ -1,6 +1,12 @@
 import { memo, useMemo } from "react";
 import { clsx } from "clsx";
-import { Terminal, CheckCircle2, XCircle, AlertTriangle } from "lucide-react";
+import {
+  Clock,
+  Terminal,
+  CheckCircle2,
+  XCircle,
+  AlertTriangle,
+} from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { CollapsiblePill, CopyButton } from "../../../common";
 import { extractText } from "./toolUtils";
@@ -12,14 +18,34 @@ const ExecuteItem = memo(function ExecuteItem({
   success,
   isPending,
   cancelled,
+  startedAt,
+  completedAt,
 }: {
   args: Record<string, unknown>;
   result?: string | Record<string, unknown>;
   success?: boolean;
   isPending?: boolean;
   cancelled?: boolean;
+  startedAt?: string;
+  completedAt?: string;
 }) {
   const { t } = useTranslation();
+  const durationFooter = useMemo(() => {
+    if (!startedAt || !completedAt) return undefined;
+    const ms = new Date(completedAt).getTime() - new Date(startedAt).getTime();
+    if (ms < 0) return undefined;
+    const seconds = Math.round(ms / 1000);
+    const text =
+      seconds < 60
+        ? `${seconds}s`
+        : `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+    return (
+      <div className="flex items-center gap-1.5 px-4 py-2 text-xs text-stone-400 dark:text-stone-500 border-t border-stone-100 dark:border-stone-800">
+        <Clock size={11} className="shrink-0" />
+        <span className="tabular-nums">{text}</span>
+      </div>
+    );
+  }, [startedAt, completedAt]);
   const command = (args.command as string) || "";
   const timeout = args.timeout as number | undefined;
 
@@ -154,6 +180,7 @@ const ExecuteItem = memo(function ExecuteItem({
             subtitle:
               command.length > 120 ? command.slice(0, 117) + "…" : command,
             children: detailContent,
+            footer: durationFooter,
           });
         }}
       >

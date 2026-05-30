@@ -4,18 +4,11 @@
 
 /* Welcome root */
 .welcome-root {
-  overflow-y: auto;
-  overflow-x: hidden;
-  -webkit-overflow-scrolling: touch;
-  scrollbar-width: none;
+  overflow: hidden;
   justify-content: safe center;
-  padding-top: max(1rem, env(safe-area-inset-top));
-  padding-bottom: max(1.25rem, env(safe-area-inset-bottom));
-  gap: clamp(0.5rem, 1.4vh, 1rem);
-}
-
-.welcome-root::-webkit-scrollbar {
-  display: none;
+  padding-top: max(0.5rem, env(safe-area-inset-top));
+  padding-bottom: max(0.75rem, env(safe-area-inset-bottom));
+  gap: clamp(0.25rem, 1vh, 0.75rem);
 }
 
 /* ── Content layers ── */
@@ -25,6 +18,7 @@
 .welcome-suggestions {
   position: relative;
   z-index: 1;
+  flex-shrink: 0;
 }
 
 /* ── Icon subtle pulse ── */
@@ -109,8 +103,12 @@
 .welcome-suggestions-grid-wrapper {
   --welcome-suggestion-row-height: 2.5rem;
   --welcome-suggestion-row-gap: 0.5rem;
-  max-height: calc(
-    var(--welcome-suggestion-row-height) * 2 + var(--welcome-suggestion-row-gap)
+  max-height: min(
+    40dvh,
+    calc(
+      var(--welcome-suggestion-row-height) * 2 +
+        var(--welcome-suggestion-row-gap)
+    )
   );
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
@@ -293,8 +291,11 @@
     --welcome-persona-row-gap: 0.75rem;
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
-    max-height: calc(
-      var(--welcome-persona-card-height) * 2 + var(--welcome-persona-row-gap)
+    max-height: min(
+      40dvh,
+      calc(
+        var(--welcome-persona-card-height) * 2 + var(--welcome-persona-row-gap)
+      )
     );
     overflow-y: auto;
     gap: var(--welcome-persona-row-gap);
@@ -364,11 +365,12 @@
   .welcome-root {
     padding-left: 0.875rem;
     padding-right: 0.875rem;
+    gap: clamp(0.25rem, 1vh, 0.5rem);
   }
 
   .welcome-suggestions-grid-wrapper {
     max-height: min(
-      38dvh,
+      35dvh,
       calc(
         var(--welcome-suggestion-row-height) * 3 +
           var(--welcome-suggestion-row-gap) * 2
@@ -471,8 +473,7 @@
   html[data-mobile-keyboard="true"] .welcome-root {
     justify-content: safe center;
     gap: 0.25rem;
-    overflow-y: auto;
-    overflow-x: hidden;
+    overflow: hidden;
     padding: 0.5rem 0.75rem max(0.5rem, env(safe-area-inset-bottom));
   }
 
