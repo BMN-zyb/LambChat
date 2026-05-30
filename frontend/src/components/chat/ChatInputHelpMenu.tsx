@@ -87,7 +87,7 @@ function MenuButtonItem({
 }
 
 // ── Component ───────────────────────────────────────────────
-export function ChatInputHelpMenu() {
+export function ChatInputHelpMenu({ className }: { className?: string }) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -108,7 +108,9 @@ export function ChatInputHelpMenu() {
   return createPortal(
     <div
       ref={ref}
-      className="fixed bottom-1 right-1 sm:bottom-2 sm:right-2 z-50 sm:hidden"
+      className={`fixed bottom-1 right-1 sm:bottom-2 sm:right-2 z-50${
+        className ? ` ${className}` : ""
+      }`}
     >
       <button
         type="button"

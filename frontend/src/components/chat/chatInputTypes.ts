@@ -99,6 +99,8 @@ export interface ChatInputProps {
 
   /** Show the help (?) button — defaults to false. */
   showHelpMenu?: boolean;
+  /** Additional className for the help menu (e.g. "sm:hidden" to hide on desktop). */
+  helpMenuClassName?: string;
 
   /** INTERNAL: panel state lifted from ChatInput for ChatView layout. */
   activePanel?: FeaturePanel;
