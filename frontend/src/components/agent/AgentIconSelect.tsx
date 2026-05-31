@@ -2,6 +2,7 @@ import { getFluentEmojiCDN } from "@lobehub/fluent-emoji";
 import { Smile } from "lucide-react";
 import React, { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { AgentIcon } from "./AgentIcon";
 
 const AGENT_ICON_EMOJIS: { emoji: string; labelKey: string }[] = [
   { emoji: "✨", labelKey: "personaPresets.emojiSparkles" },
@@ -28,6 +29,7 @@ interface AgentIconSelectProps {
 }
 
 export const AgentIconSelect = React.memo(function AgentIconSelect({
+  value,
   onChange,
 }: AgentIconSelectProps) {
   const { t } = useTranslation();
@@ -55,6 +57,7 @@ export const AgentIconSelect = React.memo(function AgentIconSelect({
         className="ppe-avatar-hint-btn"
         onClick={() => setOpen((current) => !current)}
       >
+        <AgentIcon icon={value || undefined} size={16} />
         <Smile size={12} />
         {t("personaPresets.pickIcon", "选择图标")}
       </button>
