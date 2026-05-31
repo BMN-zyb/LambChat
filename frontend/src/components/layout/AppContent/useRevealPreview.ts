@@ -282,6 +282,10 @@ export function useRevealPreview(
       return;
     }
 
+    if (typeof window !== "undefined" && window.innerWidth < 640) {
+      return;
+    }
+
     handleOpenPreview(latestAutoPreviewRequest, "auto");
   }, [handleOpenPreview, latestAutoPreviewRequest]);
 
