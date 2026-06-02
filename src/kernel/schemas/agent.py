@@ -119,6 +119,7 @@ class MemoryHealthSummary(BaseModel):
     baseline_reset_at: Optional[datetime] = None
     last_sample_at: Optional[datetime] = None
     last_error: Optional[str] = None
+    checkpointer: Optional[dict[str, Any]] = None
 
 
 class ToolParamInfo(BaseModel):

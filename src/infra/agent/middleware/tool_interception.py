@@ -10,6 +10,7 @@ import os
 import shlex
 import uuid
 from collections.abc import Awaitable, Callable
+from tempfile import SpooledTemporaryFile
 from typing import TYPE_CHECKING, Any
 
 from langchain.agents.middleware.types import (
@@ -38,6 +39,12 @@ from src.kernel.config import settings
 logger = logging.getLogger(__name__)
 
 _PROMPT_CACHE_VOLATILE_TOOL_EXTRA = "_lambchat_prompt_cache_volatile"
+_BINARY_UPLOAD_SPOOL_MEMORY_LIMIT = 2 * 1024 * 1024
+_BINARY_BLOCK_UPLOAD_MAX_BYTES = 50 * 1024 * 1024
+_BINARY_BLOCK_UPLOAD_TOTAL_MAX_BYTES = 50 * 1024 * 1024
+_BINARY_BLOCK_UPLOAD_MAX_BLOCKS = 4
+_READ_FILE_BINARY_UPLOAD_MAX_BYTES = 50 * 1024 * 1024
+_BASE64_DECODE_CHUNK_CHARS = 4 * 1024 * 1024
 
 
 # MCP content block types that may carry binary data
@@ -84,6 +91,105 @@ _BINARY_EXTENSIONS = frozenset(
         ".pptx",
     )
 )
+
+
+def _redact_failed_binary_block(block: dict[str, Any]) -> dict[str, Any]:
+    redacted = {k: v for k, v in block.items() if k != "base64"}
+    redacted["upload_error"] = "binary_upload_failed"
+    return redacted
+
+
+def _redact_oversized_binary_block(block: dict[str, Any]) -> dict[str, Any]:
+    redacted = {k: v for k, v in block.items() if k != "base64"}
+    redacted["upload_error"] = "binary_upload_too_large"
+    return redacted
+
+
+def _redact_excess_binary_block(block: dict[str, Any]) -> dict[str, Any]:
+    redacted = {k: v for k, v in block.items() if k != "base64"}
+    redacted["upload_error"] = "binary_upload_too_many_blocks"
+    return redacted
+
+
+def _estimated_base64_decoded_size(b64_data: str) -> int:
+    stripped = b64_data.rstrip("=")
+    return (len(stripped) * 3) // 4
+
+
+def _decode_base64_to_file(b64_data: str, file, *, max_bytes: int) -> int:
+    total = 0
+    carry = ""
+    for start in range(0, len(b64_data), _BASE64_DECODE_CHUNK_CHARS):
+        chunk = carry + b64_data[start : start + _BASE64_DECODE_CHUNK_CHARS]
+        decode_len = (len(chunk) // 4) * 4
+        if decode_len == 0:
+            carry = chunk
+            continue
+        decoded = base64.b64decode(chunk[:decode_len])
+        file.write(decoded)
+        total += len(decoded)
+        if total > max_bytes:
+            raise ValueError("binary_upload_too_large")
+        carry = chunk[decode_len:]
+    if carry:
+        decoded = base64.b64decode(carry)
+        file.write(decoded)
+        total += len(decoded)
+        if total > max_bytes:
+            raise ValueError("binary_upload_too_large")
+    file.seek(0)
+    return total
+
+
+def _write_bytes_to_file(data: bytes, file) -> int:
+    file.write(data)
+    size = len(data)
+    file.seek(0)
+    return size
+
+
+def _coerce_file_size(value: Any) -> int | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        size = int(value)
+    except (TypeError, ValueError):
+        return None
+    return size if size >= 0 else None
+
+
+async def _get_backend_file_size(backend: Any, file_path: str) -> int | None:
+    async_method = getattr(backend, "aget_file_size", None)
+    if callable(async_method):
+        try:
+            return _coerce_file_size(await async_method(file_path))
+        except Exception as exc:
+            logger.debug("aget_file_size failed for %s: %s", file_path, exc)
+
+    sync_method = getattr(backend, "get_file_size", None)
+    if callable(sync_method):
+        try:
+            return _coerce_file_size(await run_blocking_io(sync_method, file_path))
+        except Exception as exc:
+            logger.debug("get_file_size failed for %s: %s", file_path, exc)
+
+    private_method = getattr(backend, "_file_size", None)
+    if callable(private_method):
+        try:
+            return _coerce_file_size(await run_blocking_io(private_method, file_path))
+        except Exception as exc:
+            logger.debug("_file_size failed for %s: %s", file_path, exc)
+
+    return None
+
+
+async def _json_dumps_for_tool_message(value: Any) -> str:
+    return await run_blocking_io(
+        json.dumps,
+        value,
+        ensure_ascii=False,
+        default=str,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -211,32 +317,72 @@ class ToolResultBinaryMiddleware(AgentMiddleware):
         ):
             return result
 
-        # Upload and replace base64 with URL, keeping original block structure
+        # Upload and replace base64 with URL. Return JSON text instead of a raw
+        # content-block list so model providers do not parse MCP media blocks as
+        # provider-native image/file blocks on the next LLM call.
         new_blocks: list[str | dict[str, Any]] = []
+        uploaded_block_count = 0
+        estimated_total_bytes = 0
         for block in content:
             if (
                 isinstance(block, dict)
                 and block.get("base64")
                 and block.get("type") in _BINARY_BLOCK_TYPES
             ):
+                b64_data = block.get("base64")
+                estimated_bytes = (
+                    _estimated_base64_decoded_size(b64_data) if isinstance(b64_data, str) else 0
+                )
+                if uploaded_block_count >= _BINARY_BLOCK_UPLOAD_MAX_BLOCKS:
+                    new_blocks.append(_redact_excess_binary_block(block))
+                    continue
+                if estimated_total_bytes + estimated_bytes > _BINARY_BLOCK_UPLOAD_TOTAL_MAX_BYTES:
+                    new_blocks.append(_redact_oversized_binary_block(block))
+                    continue
                 url = await self._upload_block(block)
                 if url:
                     # Keep original structure, replace base64 with url
                     new_block = {k: v for k, v in block.items() if k != "base64"}
                     new_block["url"] = url
                     new_blocks.append(new_block)
+                    uploaded_block_count += 1
+                    estimated_total_bytes += estimated_bytes
                 else:
-                    new_blocks.append(block)
+                    new_blocks.append(_redact_failed_binary_block(block))
             else:
                 new_blocks.append(block)
 
         return ToolMessage(
-            content=new_blocks,
+            content=await self._format_uploaded_blocks_for_llm(new_blocks),
             tool_call_id=result.tool_call_id,
             name=getattr(result, "name", None),
             status=getattr(result, "status", None),
             artifact=getattr(result, "artifact", None),
         )
+
+    @staticmethod
+    async def _format_uploaded_blocks_for_llm(blocks: list[str | dict[str, Any]]) -> str:
+        text_parts: list[str] = []
+        media_blocks: list[dict[str, Any]] = []
+
+        for block in blocks:
+            if isinstance(block, str):
+                text_parts.append(block)
+                continue
+            if not isinstance(block, dict):
+                text_parts.append(str(block))
+                continue
+            if block.get("type") == "text":
+                text = block.get("text")
+                if text is not None:
+                    text_parts.append(str(text))
+                continue
+            media_blocks.append(block)
+
+        payload: dict[str, Any] = {"text": "".join(text_parts)}
+        if media_blocks:
+            payload["blocks"] = media_blocks
+        return await _json_dumps_for_tool_message(payload)
 
     @staticmethod
     def _is_binary_file(file_path: str) -> bool:
@@ -254,6 +400,17 @@ class ToolResultBinaryMiddleware(AgentMiddleware):
             if backend is None:
                 return None
 
+            known_size = await _get_backend_file_size(backend, file_path)
+            if known_size is not None and known_size > _READ_FILE_BINARY_UPLOAD_MAX_BYTES:
+                logger.warning(
+                    "read_file binary upload refused oversized file before download: "
+                    "%s size=%s max=%s",
+                    file_path,
+                    known_size,
+                    _READ_FILE_BINARY_UPLOAD_MAX_BYTES,
+                )
+                return None
+
             # Download from sandbox backend
             file_bytes: bytes | None = None
             if hasattr(backend, "adownload_files"):
@@ -261,6 +418,7 @@ class ToolResultBinaryMiddleware(AgentMiddleware):
                     responses = await backend.adownload_files([file_path])
                     if responses and responses[0].content:
                         file_bytes = responses[0].content
+                    del responses
                 except Exception:
                     pass
 
@@ -269,22 +427,40 @@ class ToolResultBinaryMiddleware(AgentMiddleware):
                     responses = await run_blocking_io(backend.download_files, [file_path])
                     if responses and responses[0].content:
                         file_bytes = responses[0].content
+                    del responses
                 except Exception:
                     pass
 
             if file_bytes is None:
                 return None
 
-            # Upload to storage
-            storage = await get_or_init_storage()
             filename = file_path.rsplit("/", 1)[-1]
             mime_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
-            upload_result = await storage.upload_bytes(
-                data=file_bytes,
-                folder="revealed_files",
-                filename=filename,
-                content_type=mime_type,
-            )
+            file_size = len(file_bytes)
+            if file_size > _READ_FILE_BINARY_UPLOAD_MAX_BYTES:
+                logger.warning(
+                    "read_file binary upload refused oversized file: %s size=%s max=%s",
+                    file_path,
+                    file_size,
+                    _READ_FILE_BINARY_UPLOAD_MAX_BYTES,
+                )
+                return None
+
+            # Upload to storage
+            storage = await get_or_init_storage()
+            with SpooledTemporaryFile(
+                max_size=_BINARY_UPLOAD_SPOOL_MEMORY_LIMIT,
+                mode="w+b",
+            ) as spooled:
+                file_size = await run_blocking_io(_write_bytes_to_file, file_bytes, spooled)
+                del file_bytes
+                upload_result = await storage.upload_file(
+                    file=spooled,
+                    folder="revealed_files",
+                    filename=filename,
+                    content_type=mime_type,
+                    skip_size_limit=True,
+                )
 
             base_url = self._base_url or getattr(settings, "APP_BASE_URL", "").rstrip("/")
             proxy_url = (
@@ -293,26 +469,25 @@ class ToolResultBinaryMiddleware(AgentMiddleware):
                 else f"/api/upload/file/{upload_result.key}"
             )
 
-            result_data = json.dumps(
+            result_data = await _json_dumps_for_tool_message(
                 {
                     "key": upload_result.key,
                     "url": proxy_url,
                     "name": filename,
                     "mime_type": upload_result.content_type or mime_type,
-                    "size": len(file_bytes),
+                    "size": file_size,
                     "_meta": {
                         "path": file_path,
                         "source": "read_file_binary_upload",
                     },
                 },
-                ensure_ascii=False,
             )
 
             logger.info(
                 "read_file binary upload: %s → %s (%d bytes)",
                 file_path,
                 upload_result.key,
-                len(file_bytes),
+                file_size,
             )
 
             return ToolMessage(
@@ -326,6 +501,18 @@ class ToolResultBinaryMiddleware(AgentMiddleware):
 
     async def _upload_block(self, block: dict) -> str | None:
         """Upload a single binary block to storage, return the access URL."""
+        b64_data = block.get("base64")
+        if not b64_data or not isinstance(b64_data, str):
+            return None
+
+        if _estimated_base64_decoded_size(b64_data) > _BINARY_BLOCK_UPLOAD_MAX_BYTES:
+            logger.warning(
+                "Refusing oversized binary block upload: estimated=%s max=%s",
+                _estimated_base64_decoded_size(b64_data),
+                _BINARY_BLOCK_UPLOAD_MAX_BYTES,
+            )
+            return None
+
         try:
             from src.infra.storage.s3.service import get_or_init_storage
 
@@ -334,23 +521,29 @@ class ToolResultBinaryMiddleware(AgentMiddleware):
             logger.warning("Failed to initialize storage for binary upload: %s", e)
             return None
 
-        b64_data = block.get("base64")
-        if not b64_data or not isinstance(b64_data, str):
-            return None
-
         try:
-            raw_bytes = base64.b64decode(b64_data)
             mime_type = block.get("mime_type", "application/octet-stream")
             ext = mimetypes.guess_extension(mime_type) or ".bin"
             ext = ext.lstrip(".")
             filename = f"binary_{uuid.uuid4().hex[:8]}.{ext}"
 
-            upload_result = await storage.upload_bytes(
-                data=raw_bytes,
-                folder="tool_binaries",
-                filename=filename,
-                content_type=mime_type,
-            )
+            with SpooledTemporaryFile(
+                max_size=_BINARY_UPLOAD_SPOOL_MEMORY_LIMIT,
+                mode="w+b",
+            ) as spooled:
+                size = await run_blocking_io(
+                    _decode_base64_to_file,
+                    b64_data,
+                    spooled,
+                    max_bytes=_BINARY_BLOCK_UPLOAD_MAX_BYTES,
+                )
+                upload_result = await storage.upload_file(
+                    file=spooled,
+                    folder="tool_binaries",
+                    filename=filename,
+                    content_type=mime_type,
+                    skip_size_limit=True,
+                )
 
             base_url = self._base_url
             if not base_url:
@@ -361,10 +554,17 @@ class ToolResultBinaryMiddleware(AgentMiddleware):
                 if base_url
                 else f"/api/upload/file/{upload_result.key}"
             )
-            logger.info(
-                "Middleware uploaded binary block: %s (%d bytes)", upload_result.key, len(raw_bytes)
-            )
+            logger.info("Middleware uploaded binary block: %s (%d bytes)", upload_result.key, size)
             return url
+        except ValueError as e:
+            if str(e) == "binary_upload_too_large":
+                logger.warning(
+                    "Refusing oversized binary block upload after decode exceeded %s bytes",
+                    _BINARY_BLOCK_UPLOAD_MAX_BYTES,
+                )
+                return None
+            logger.warning("Failed to upload binary block in middleware: %s", e)
+            return None
         except Exception as e:
             logger.warning("Failed to upload binary block in middleware: %s", e)
             return None
@@ -485,7 +685,7 @@ class ToolSearchMiddleware(AgentMiddleware):
                 content = (
                     result
                     if isinstance(result, str)
-                    else json.dumps(result, ensure_ascii=False, default=str)
+                    else await _json_dumps_for_tool_message(result)
                 )
                 return ToolMessage(
                     content=content,
@@ -523,7 +723,7 @@ class ToolSearchMiddleware(AgentMiddleware):
                     elif isinstance(result, str):
                         msg_content = result
                     elif isinstance(result, dict):
-                        msg_content = json.dumps(result, ensure_ascii=False, default=str)
+                        msg_content = await _json_dumps_for_tool_message(result)
                     elif result is not None:
                         msg_content = str(result)
                     else:

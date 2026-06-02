@@ -111,8 +111,11 @@ class SearchAgent(BaseGraphAgent):
         if self._initialized:
             return
 
-        # 不使用外层 checkpointer（历史消息由内层 MemorySaver 管理）
-        # 构建 graph
+        # Keep the outer graph stateless for now: it only wraps one agent node, while
+        # conversation history is persisted by the inner deep agent checkpointer.
+        # If this outer graph grows into a multi-node workflow that needs resume or
+        # per-node recovery, add an outer checkpointer with an isolated namespace or
+        # thread id so it cannot collide with the inner graph's message state.
         builder = GraphBuilder(self.state_class)
         self.build_graph(builder)
         self._graph = builder.compile(

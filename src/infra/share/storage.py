@@ -15,6 +15,8 @@ from src.kernel.schemas.share import (
     ShareVisibility,
 )
 
+SHARE_LIST_LIMIT_MAX = 100
+
 
 class ShareStorage:
     """
@@ -134,6 +136,7 @@ class ShareStorage:
         limit: int = 100,
     ) -> tuple[list[SharedSessionListItem], int]:
         """列出用户的所有分享"""
+        limit = min(max(int(limit), 1), SHARE_LIST_LIMIT_MAX)
         query = {"owner_id": owner_id}
         total = await self.collection.count_documents(query)
 
@@ -160,10 +163,14 @@ class ShareStorage:
         session_id: str,
     ) -> list[SharedSessionListItem]:
         """列出会话的所有分享"""
-        cursor = self.collection.find({"session_id": session_id}).sort("created_at", -1)
+        cursor = (
+            self.collection.find({"session_id": session_id})
+            .sort("created_at", -1)
+            .limit(SHARE_LIST_LIMIT_MAX)
+        )
 
         shares = []
-        for share_dict in await cursor.to_list(length=100):
+        for share_dict in await cursor.to_list(length=SHARE_LIST_LIMIT_MAX):
             shares.append(
                 SharedSessionListItem(
                     id=str(share_dict["_id"]),

@@ -366,11 +366,7 @@ class OAuthService:
                 jwks_data = jwks_resp.json()
 
             # 解码 JWT header 获取 kid
-            header_b64 = id_token.split(".")[0]
-            padding = 4 - len(header_b64) % 4
-            if padding != 4:
-                header_b64 += "=" * padding
-            header = json.loads(base64.urlsafe_b64decode(header_b64))
+            header = await run_blocking_io(_decode_apple_token_header, id_token)
             kid = header.get("kid")
 
             # 找到匹配的公钥
@@ -504,6 +500,15 @@ def get_oauth_service() -> OAuthService:
     if _oauth_service is None:
         _oauth_service = OAuthService()
     return _oauth_service
+
+
+def _decode_apple_token_header(id_token: str) -> dict[str, Any]:
+    """Decode Apple JWT header off the event loop."""
+    header_b64 = id_token.split(".")[0]
+    padding = 4 - len(header_b64) % 4
+    if padding != 4:
+        header_b64 += "=" * padding
+    return json.loads(base64.urlsafe_b64decode(header_b64))
 
 
 def _decode_apple_identity_token(

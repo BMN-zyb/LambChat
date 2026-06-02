@@ -16,6 +16,7 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
 
 from src.infra.agent import AgentEventProcessor
+from src.infra.async_utils import run_blocking_io
 from src.infra.logging import get_logger
 from src.infra.utils.datetime import utc_now
 from src.infra.writer.present import Presenter, PresenterConfig
@@ -28,6 +29,55 @@ logger = get_logger(__name__)
 # ============================================================================
 
 _AGENT_REGISTRY: Dict[str, Type[Any]] = {}
+
+
+def _coerce_checkpoint_time(ts_raw: Any, cutoff_time: datetime) -> datetime | None:
+    checkpoint_time = None
+    if isinstance(ts_raw, str):
+        try:
+            checkpoint_time = datetime.fromisoformat(ts_raw)
+        except (ValueError, TypeError):
+            return None
+    else:
+        try:
+            checkpoint_time = datetime.fromtimestamp(float(ts_raw))
+        except (TypeError, ValueError):
+            return None
+
+    if checkpoint_time.tzinfo is None and cutoff_time.tzinfo is not None:
+        checkpoint_time = checkpoint_time.replace(tzinfo=timezone.utc)
+    return checkpoint_time
+
+
+def _prune_memory_saver_storage(storage: Any, cutoff_time: datetime) -> int:
+    to_delete = []
+
+    for thread_id in list(storage.keys()):
+        try:
+            checkpoints = storage.get(thread_id, {})
+            if not checkpoints:
+                to_delete.append(thread_id)
+                continue
+
+            latest_checkpoint = max(checkpoints.values(), key=lambda x: getattr(x, "ts", 0))
+            checkpoint_time = _coerce_checkpoint_time(
+                getattr(latest_checkpoint, "ts", "0"),
+                cutoff_time,
+            )
+
+            if checkpoint_time is not None and checkpoint_time < cutoff_time:
+                to_delete.append(thread_id)
+        except Exception:
+            pass
+
+    deleted_count = 0
+    for thread_id in to_delete:
+        try:
+            del storage[thread_id]
+            deleted_count += 1
+        except Exception:
+            pass
+    return deleted_count
 
 
 def register_agent(agent_id: str):
@@ -180,49 +230,15 @@ class BaseGraphAgent(ABC):
 
                 # 清理 1 小时前的 checkpoint
                 cutoff_time = utc_now() - timedelta(hours=1)
-                to_delete = []
+                deleted_count = await run_blocking_io(
+                    _prune_memory_saver_storage,
+                    storage,
+                    cutoff_time,
+                )
 
-                for thread_id in list(storage.keys()):
-                    try:
-                        checkpoints = storage.get(thread_id, {})
-                        if not checkpoints:
-                            to_delete.append(thread_id)
-                            continue
-
-                        # 检查最新 checkpoint 的时间
-                        # LangGraph 的 ts 字段是 ISO 格式字符串（如 "2024-01-01T00:00:00"），
-                        # 需要用 datetime.fromisoformat() 而非 datetime.fromtimestamp()
-                        latest_checkpoint = max(
-                            checkpoints.values(), key=lambda x: getattr(x, "ts", 0)
-                        )
-                        ts_raw = getattr(latest_checkpoint, "ts", "0")
-                        checkpoint_time = None
-                        if isinstance(ts_raw, str):
-                            try:
-                                checkpoint_time = datetime.fromisoformat(ts_raw)
-                            except (ValueError, TypeError):
-                                pass
-                        else:
-                            try:
-                                checkpoint_time = datetime.fromtimestamp(float(ts_raw))
-                            except (TypeError, ValueError):
-                                pass
-
-                        if checkpoint_time is not None and checkpoint_time < cutoff_time:
-                            to_delete.append(thread_id)
-                    except Exception:
-                        pass
-
-                # 删除旧的 checkpoint
-                for thread_id in to_delete:
-                    try:
-                        del storage[thread_id]
-                    except Exception:
-                        pass
-
-                if to_delete:
+                if deleted_count:
                     logger.info(
-                        f"[Agent {self._agent_id}] Cleaned {len(to_delete)} old checkpoints "
+                        f"[Agent {self._agent_id}] Cleaned {deleted_count} old checkpoints "
                         f"(total remaining: {len(storage)})"
                     )
 
@@ -386,6 +402,18 @@ class BaseGraphAgent(ABC):
             stream_error = None
             stream_done = False
 
+            def put_terminal_queue_item(item: tuple[str, Any]) -> None:
+                """Put terminal wake-up items without blocking on a full event queue."""
+                while True:
+                    try:
+                        event_queue.put_nowait(item)
+                        return
+                    except asyncio.QueueFull:
+                        try:
+                            event_queue.get_nowait()
+                        except asyncio.QueueEmpty:
+                            continue
+
             async def run_stream():
                 """运行 graph 流并将事件放入队列"""
                 nonlocal stream_error, stream_done
@@ -405,11 +433,11 @@ class BaseGraphAgent(ABC):
                     raise
                 except Exception as e:
                     stream_error = e
-                    await event_queue.put(("error", e))
+                    put_terminal_queue_item(("error", e))
                 finally:
                     stream_done = True
                     # 放入终止信号，唤醒主循环（避免 await get() 永久阻塞）
-                    await event_queue.put(("done", None))
+                    put_terminal_queue_item(("done", None))
 
             # 启动流任务
             stream_task = asyncio.create_task(run_stream())
@@ -432,17 +460,28 @@ class BaseGraphAgent(ABC):
                 except Exception as e:
                     logger.warning(f"Failed to emit token:usage event during cleanup: {e}")
 
-            async def drain_event_queue() -> None:
-                while not event_queue.empty():
+            async def drain_event_queue(
+                *,
+                max_events: int = 100,
+                per_event_timeout: float = 0.05,
+            ) -> None:
+                drained = 0
+                while not event_queue.empty() and drained < max_events:
                     try:
                         item_type, item_data = event_queue.get_nowait()
                     except asyncio.QueueEmpty:
                         break
                     if item_type == "event" and item_data:
                         try:
-                            await event_processor.process_event(item_data)
+                            await asyncio.wait_for(
+                                event_processor.process_event(item_data),
+                                timeout=per_event_timeout,
+                            )
+                        except (asyncio.TimeoutError, asyncio.CancelledError):
+                            break
                         except Exception:
                             pass
+                    drained += 1
 
             try:
                 while True:

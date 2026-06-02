@@ -6,6 +6,7 @@ import json
 import os
 from typing import Any, Optional
 
+from src.infra.async_utils import run_blocking_io
 from src.infra.settings.storage import (
     RESTART_REQUIRED_SETTINGS,
     SETTING_DEFINITIONS,
@@ -67,7 +68,7 @@ class SettingsService:
         # Fallback to environment variable
         env_value = os.environ.get(key)
         if env_value is not None:
-            return self._parse_env_value(key, env_value)
+            return await self._parse_env_value_async(key, env_value)
 
         # Return default
         return SETTING_DEFINITIONS[key]["default"]
@@ -95,7 +96,7 @@ class SettingsService:
         # Fallback to environment variable
         env_value = os.environ.get(key)
         if env_value is not None:
-            return self._parse_env_value(key, env_value)
+            return await self._parse_env_value_async(key, env_value)
 
         # Return default
         return SETTING_DEFINITIONS[key]["default"]
@@ -161,7 +162,7 @@ class SettingsService:
                 continue  # No env value, skip
 
             # Parse and store via self.set() to trigger refresh + pub/sub broadcast
-            parsed_value = self._parse_env_value(key, env_value)
+            parsed_value = await self._parse_env_value_async(key, env_value)
             result = await self.set(key, parsed_value, "system:init")
             if result is not None:
                 imported += 1
@@ -236,6 +237,20 @@ class SettingsService:
         else:
             return value
 
+    async def _parse_env_value_async(self, key: str, value: str) -> Any:
+        """Parse environment variable values without blocking async request paths."""
+        if key not in SETTING_DEFINITIONS:
+            return value
+
+        setting_type = SETTING_DEFINITIONS[key]["type"]
+        if setting_type == SettingType.JSON:
+            try:
+                return await run_blocking_io(json.loads, value)
+            except json.JSONDecodeError:
+                return value
+
+        return self._parse_env_value(key, value)
+
     @staticmethod
     def requires_restart(key: str) -> bool:
         """Check if setting requires server restart"""
@@ -261,9 +276,10 @@ class SettingsService:
 
             redis_client = get_redis_client()
             instance_id = get_settings_pubsub().instance_id
+            payload = await run_blocking_io(json.dumps, {"key": key, "instance_id": instance_id})
             await redis_client.publish(
                 SETTINGS_CHANNEL,
-                json.dumps({"key": key, "instance_id": instance_id}),
+                payload,
             )
         except Exception as e:
             # Pub/sub failure should not block the setting update

@@ -6,10 +6,52 @@ Contains grep and glob utility methods used by the backend.
 
 import fnmatch
 
+from src.infra.async_utils import run_blocking_io
 from src.infra.backend.protocol_compat import FileInfo, GrepMatch
 from src.infra.logging import get_logger
 
 logger = get_logger(__name__)
+SKILLS_GREP_MAX_MATCHES = 1000
+
+
+def _iter_text_lines(content: str):
+    start = 0
+    line_number = 1
+    while True:
+        newline_index = content.find("\n", start)
+        if newline_index < 0:
+            yield line_number, content[start:]
+            return
+        yield line_number, content[start:newline_index]
+        start = newline_index + 1
+        line_number += 1
+
+
+def _grep_skill_files(
+    pattern: str,
+    skill_name: str,
+    file_paths: list[str],
+    files: dict[str, str],
+    max_matches: int,
+) -> list[GrepMatch]:
+    matches: list[GrepMatch] = []
+    for fp in file_paths:
+        content = files.get(fp)
+        if content is None:
+            continue
+        for line_number, line in _iter_text_lines(content):
+            if pattern in line:
+                matches.append(
+                    GrepMatch(
+                        path=f"/{skill_name}/{fp}",
+                        line=line_number,
+                        text=line[:2000],
+                    )
+                )
+                if len(matches) >= max_matches:
+                    return matches
+
+    return matches
 
 
 async def grep_single_skill(
@@ -20,6 +62,7 @@ async def grep_single_skill(
     file_paths: list[str],
     user_id: str,
     is_skill_visible_fn,
+    max_matches: int = SKILLS_GREP_MAX_MATCHES,
 ) -> list[GrepMatch]:
     """在单个 skill 的指定文件中搜索"""
     if not is_skill_visible_fn(skill_name):
@@ -41,47 +84,43 @@ async def grep_single_skill(
     files_map = await storage.batch_get_skill_files([(skill_name, user_id)])
     files = files_map.get((skill_name, user_id), {})
 
-    matches: list[GrepMatch] = []
-    for fp in file_paths:
-        content = files.get(fp)
-        if content is None:
-            continue
-        for i, line in enumerate(content.split("\n"), start=1):
-            if pattern in line:
-                matches.append(
-                    GrepMatch(
-                        path=f"/{skill_name}/{fp}",
-                        line=i,
-                        text=line[:2000],
-                    )
-                )
-
-    return matches
+    return await run_blocking_io(
+        _grep_skill_files,
+        pattern,
+        skill_name,
+        file_paths,
+        files,
+        max_matches,
+    )
 
 
 def grep_across_skills(
     pattern: str,
     glob_pattern: str | None,
     all_files: dict[tuple[str, str], dict[str, str]],
+    max_matches: int = SKILLS_GREP_MAX_MATCHES,
 ) -> list[GrepMatch]:
     """在多个 skill 中搜索"""
     matches: list[GrepMatch] = []
     for (skill_name, _user_id), files in all_files.items():
-        for fp, content in files.items():
-            if glob_pattern and not (
-                fnmatch.fnmatch(fp, glob_pattern)
+        file_paths = list(files)
+        if glob_pattern:
+            file_paths = [
+                fp
+                for fp in file_paths
+                if fnmatch.fnmatch(fp, glob_pattern)
                 or fnmatch.fnmatch(fp.split("/")[-1], glob_pattern)
-            ):
-                continue
-            for i, line in enumerate(content.split("\n"), start=1):
-                if pattern in line:
-                    matches.append(
-                        GrepMatch(
-                            path=f"/{skill_name}/{fp}",
-                            line=i,
-                            text=line[:2000],
-                        )
-                    )
+            ]
+        skill_matches = _grep_skill_files(
+            pattern,
+            skill_name,
+            file_paths,
+            files,
+            max_matches - len(matches),
+        )
+        matches.extend(skill_matches)
+        if len(matches) >= max_matches:
+            return matches
     return matches
 
 

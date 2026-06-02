@@ -20,6 +20,7 @@ Transfer File / Transfer Path 工具
 - 目录深度/文件数限制（深度 5 层，1000 文件）
 """
 
+import inspect
 import json
 import os
 from typing import Annotated, Any, Optional
@@ -112,6 +113,11 @@ BINARY_EXTENSIONS = frozenset(
 
 logger = get_logger(__name__)
 
+
+async def _json_dumps_result(data: dict[str, Any]) -> str:
+    return await run_blocking_io(json.dumps, data, ensure_ascii=False)
+
+
 # ==========================================
 # 安全常量
 # ==========================================
@@ -124,6 +130,8 @@ MAX_BATCH_SIZE = 100 * 1024 * 1024
 MAX_RECURSION_DEPTH = 5
 # 批量传输最大文件数
 MAX_BATCH_FILES = 500
+# 工具响应中最多返回的逐文件明细数，避免大批量传输把 LLM 消息体撑爆。
+TRANSFER_PATH_RESULT_FILE_LIMIT = 100
 
 
 # ==========================================
@@ -168,6 +176,13 @@ def _check_file_size(content: bytes, filename: str) -> Optional[str]:
     return None
 
 
+def _check_known_file_size(size: int | None, filename: str) -> Optional[str]:
+    """检查已知文件大小是否超限，避免先下载大文件再拒绝。"""
+    if size is not None and size > MAX_FILE_SIZE:
+        return f"file too large: {filename} ({size} bytes, limit {MAX_FILE_SIZE} bytes)"
+    return None
+
+
 def _validate_text_file(filename: str, content: bytes) -> Optional[str]:
     """综合校验文件类型和内容。
 
@@ -181,6 +196,72 @@ def _validate_text_file(filename: str, content: bytes) -> Optional[str]:
     size_err = _check_file_size(content, filename)
     if size_err:
         return size_err
+    return None
+
+
+def _append_transfer_result(
+    results: list[dict[str, Any]],
+    result: dict[str, Any],
+    omitted_count: int,
+) -> int:
+    if len(results) < TRANSFER_PATH_RESULT_FILE_LIMIT:
+        results.append(result)
+        return omitted_count
+    return omitted_count + 1
+
+
+def _entry_path(entry: Any) -> str | None:
+    if isinstance(entry, dict):
+        path = entry.get("path")
+    else:
+        path = getattr(entry, "path", None)
+    return path if isinstance(path, str) else None
+
+
+def _entry_is_dir(entry: Any) -> bool:
+    if isinstance(entry, dict):
+        return bool(entry.get("is_dir"))
+    return bool(getattr(entry, "is_dir", False))
+
+
+def _entry_size(entry: Any) -> int | None:
+    value = entry.get("size") if isinstance(entry, dict) else getattr(entry, "size", None)
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+async def _get_backend_file_size(backend: Any, file_path: str) -> int | None:
+    """Best-effort size preflight across sandbox/store backends."""
+    async_method = getattr(backend, "aget_file_size", None)
+    if callable(async_method):
+        try:
+            size = async_method(file_path)
+            if inspect.isawaitable(size):
+                size = await size
+            return int(size) if size is not None else None
+        except Exception as e:
+            logger.debug(f"[transfer_file] aget_file_size failed for {file_path}: {e}")
+
+    sync_method = getattr(backend, "get_file_size", None)
+    if callable(sync_method):
+        try:
+            size = await run_blocking_io(sync_method, file_path)
+            return int(size) if size is not None else None
+        except Exception as e:
+            logger.debug(f"[transfer_file] get_file_size failed for {file_path}: {e}")
+
+    private_method = getattr(backend, "_file_size", None)
+    if callable(private_method):
+        try:
+            size = await run_blocking_io(private_method, file_path)
+            return int(size) if size is not None else None
+        except Exception as e:
+            logger.debug(f"[transfer_file] _file_size failed for {file_path}: {e}")
+
     return None
 
 
@@ -274,67 +355,71 @@ async def transfer_file(
     backend = get_backend_from_runtime(runtime)
 
     if backend is None:
-        return json.dumps({"success": False, "error": "backend not available"}, ensure_ascii=False)
+        return await _json_dumps_result({"success": False, "error": "backend not available"})
 
     # 1. 路径安全检查
     for label, path in [("source", source_path), ("target", target_path)]:
         traversal_err = _check_path_traversal(path)
         if traversal_err:
-            return json.dumps(
-                {"success": False, "error": f"{label} {traversal_err}"},
-                ensure_ascii=False,
-            )
+            return await _json_dumps_result({"success": False, "error": f"{label} {traversal_err}"})
 
     # 2. 下载
+    filename = source_path.split("/")[-1]
+    known_size = await _get_backend_file_size(backend, source_path)
+    size_err = _check_known_file_size(known_size, filename)
+    if size_err:
+        return await _json_dumps_result(
+            {
+                "success": False,
+                "error": size_err,
+                "source": source_path,
+            }
+        )
+
     content = await _download_from_backend(backend, source_path)
     if content is None:
-        return json.dumps(
+        return await _json_dumps_result(
             {
                 "success": False,
                 "error": f"file not found or empty: {source_path}",
                 "source": source_path,
-            },
-            ensure_ascii=False,
+            }
         )
 
     # 3. 文件类型 + 大小校验
-    filename = source_path.split("/")[-1]
     validation_err = _validate_text_file(filename, content)
     if validation_err:
-        return json.dumps(
+        return await _json_dumps_result(
             {
                 "success": False,
                 "error": validation_err,
                 "source": source_path,
-            },
-            ensure_ascii=False,
+            }
         )
 
     # 4. 上传
     upload_error = await _upload_to_backend(backend, target_path, content)
     if upload_error:
-        return json.dumps(
+        return await _json_dumps_result(
             {
                 "success": False,
                 "error": upload_error,
                 "source": source_path,
                 "target": target_path,
-            },
-            ensure_ascii=False,
+            }
         )
 
     logger.info(
         f"[transfer_file] Transferred {source_path} -> {target_path} ({len(content)} bytes)"
     )
 
-    return json.dumps(
+    return await _json_dumps_result(
         {
             "success": True,
             "source": source_path,
             "target": target_path,
             "size": len(content),
-        },
-        ensure_ascii=False,
+        }
     )
 
 
@@ -348,16 +433,23 @@ def get_transfer_file_tool() -> BaseTool:
 # ==========================================
 
 
-async def _list_dir_files(backend: Any, dir_path: str) -> list[str]:
+async def _list_dir_files(
+    backend: Any,
+    dir_path: str,
+    *,
+    limit: int | None = None,
+) -> list[tuple[str, int | None]]:
     """列出目录下所有文件路径（通过 ls 递归）。
 
     Returns:
         文件路径列表（相对/绝对路径，取决于 backend 返回格式）
     """
-    all_files: list[str] = []
+    all_files: list[tuple[str, int | None]] = []
     visited_dirs: set[str] = set()
 
     async def _recurse(current_dir: str, depth: int) -> None:
+        if limit is not None and len(all_files) > limit:
+            return
         if depth > MAX_RECURSION_DEPTH:
             return
         if current_dir in visited_dirs:
@@ -378,10 +470,17 @@ async def _list_dir_files(backend: Any, dir_path: str) -> list[str]:
             return
 
         for entry in entries:
-            if entry.get("is_dir"):
-                await _recurse(entry["path"], depth + 1)
+            if limit is not None and len(all_files) > limit:
+                return
+            path = _entry_path(entry)
+            if path is None:
+                continue
+            if _entry_is_dir(entry):
+                await _recurse(path, depth + 1)
             else:
-                all_files.append(entry["path"])
+                all_files.append((path, _entry_size(entry)))
+                if limit is not None and len(all_files) > limit:
+                    return
 
     await _recurse(dir_path, 0)
     return all_files
@@ -428,16 +527,13 @@ async def transfer_path(
     backend = get_backend_from_runtime(runtime)
 
     if backend is None:
-        return json.dumps({"success": False, "error": "backend not available"}, ensure_ascii=False)
+        return await _json_dumps_result({"success": False, "error": "backend not available"})
 
     # 1. 路径安全检查
     for label, path in [("source_dir", source_dir), ("target_prefix", target_prefix)]:
         traversal_err = _check_path_traversal(path)
         if traversal_err:
-            return json.dumps(
-                {"success": False, "error": f"{label} {traversal_err}"},
-                ensure_ascii=False,
-            )
+            return await _json_dumps_result({"success": False, "error": f"{label} {traversal_err}"})
 
     # 确保 target_prefix 以 / 结尾
     if not target_prefix.endswith("/"):
@@ -445,20 +541,18 @@ async def transfer_path(
 
     # 防止同源传输（不能从 skills 传到 skills）
     if source_dir.startswith("/skills/") and target_prefix.startswith("/skills/"):
-        return json.dumps(
+        return await _json_dumps_result(
             {
                 "success": False,
                 "error": "source and target cannot both be /skills/ (same backend)",
-            },
-            ensure_ascii=False,
+            }
         )
     if source_dir.startswith("/memories/") and target_prefix.startswith("/memories/"):
-        return json.dumps(
+        return await _json_dumps_result(
             {
                 "success": False,
                 "error": "source and target cannot both be /memories/ (same backend)",
-            },
-            ensure_ascii=False,
+            }
         )
 
     # 2. 从 source_dir 提取目录名作为目标子路径
@@ -473,10 +567,10 @@ async def transfer_path(
     target_base = f"{target_prefix}{dir_name}"
 
     # 3. 列出源目录下所有文件
-    file_paths = await _list_dir_files(backend, source_dir)
+    file_paths = await _list_dir_files(backend, source_dir, limit=MAX_BATCH_FILES)
 
     if not file_paths:
-        return json.dumps(
+        return await _json_dumps_result(
             {
                 "success": True,
                 "message": f"no files found in {source_dir}",
@@ -485,19 +579,17 @@ async def transfer_path(
                 "transferred": 0,
                 "skipped": 0,
                 "failed": 0,
-            },
-            ensure_ascii=False,
+            }
         )
 
     # 文件数限制
     if len(file_paths) > MAX_BATCH_FILES:
-        return json.dumps(
+        return await _json_dumps_result(
             {
                 "success": False,
                 "error": f"too many files: {len(file_paths)} (limit {MAX_BATCH_FILES})",
                 "source_dir": source_dir,
-            },
-            ensure_ascii=False,
+            }
         )
 
     # 4. 逐个传输
@@ -506,8 +598,9 @@ async def transfer_path(
     transferred = 0
     skipped = 0
     failed = 0
+    files_omitted = 0
 
-    for file_path in file_paths:
+    for file_path, known_size in file_paths:
         filename = file_path.rsplit("/", 1)[-1]
 
         # 计算相对路径，映射到目标
@@ -517,18 +610,48 @@ async def transfer_path(
             rel_path = file_path[len(source_dir_stripped) :].lstrip("/")
         target_path = f"{target_base}/{rel_path}" if rel_path else f"{target_base}/{filename}"
 
+        size_err = _check_known_file_size(known_size, filename)
+        if size_err:
+            files_omitted = _append_transfer_result(
+                results,
+                {"file": file_path, "status": "skipped", "error": size_err},
+                files_omitted,
+            )
+            skipped += 1
+            continue
+        if known_size is not None and total_size + known_size > MAX_BATCH_SIZE:
+            files_omitted = _append_transfer_result(
+                results,
+                {
+                    "file": file_path,
+                    "status": "skipped",
+                    "error": (
+                        f"batch size limit exceeded ({total_size + known_size} > {MAX_BATCH_SIZE})"
+                    ),
+                },
+                files_omitted,
+            )
+            skipped += 1
+            continue
+
         # 下载
         try:
             content = await _download_from_backend(backend, file_path)
         except Exception as e:
             logger.warning(f"[transfer_path] Download failed for {file_path}: {e}")
-            results.append({"file": file_path, "status": "failed", "error": str(e)})
+            files_omitted = _append_transfer_result(
+                results,
+                {"file": file_path, "status": "failed", "error": str(e)},
+                files_omitted,
+            )
             failed += 1
             continue
 
         if content is None:
-            results.append(
-                {"file": file_path, "status": "skipped", "error": "file not found or empty"}
+            files_omitted = _append_transfer_result(
+                results,
+                {"file": file_path, "status": "skipped", "error": "file not found or empty"},
+                files_omitted,
             )
             skipped += 1
             continue
@@ -536,19 +659,25 @@ async def transfer_path(
         # 文件校验
         validation_err = _validate_text_file(filename, content)
         if validation_err:
-            results.append({"file": file_path, "status": "skipped", "error": validation_err})
+            files_omitted = _append_transfer_result(
+                results,
+                {"file": file_path, "status": "skipped", "error": validation_err},
+                files_omitted,
+            )
             skipped += 1
             continue
 
         # 总大小检查
         total_size += len(content)
         if total_size > MAX_BATCH_SIZE:
-            results.append(
+            files_omitted = _append_transfer_result(
+                results,
                 {
                     "file": file_path,
                     "status": "skipped",
                     "error": f"batch size limit exceeded ({total_size} > {MAX_BATCH_SIZE})",
-                }
+                },
+                files_omitted,
             )
             skipped += 1
             continue
@@ -556,16 +685,22 @@ async def transfer_path(
         # 上传
         upload_err = await _upload_to_backend(backend, target_path, content)
         if upload_err:
-            results.append({"file": file_path, "status": "failed", "error": upload_err})
+            files_omitted = _append_transfer_result(
+                results,
+                {"file": file_path, "status": "failed", "error": upload_err},
+                files_omitted,
+            )
             failed += 1
         else:
-            results.append(
+            files_omitted = _append_transfer_result(
+                results,
                 {
                     "file": file_path,
                     "status": "transferred",
                     "target": target_path,
                     "size": len(content),
-                }
+                },
+                files_omitted,
             )
             transferred += 1
 
@@ -575,7 +710,7 @@ async def transfer_path(
         f"total_size={total_size})"
     )
 
-    return json.dumps(
+    return await _json_dumps_result(
         {
             "success": failed == 0,
             "source_dir": source_dir,
@@ -585,8 +720,8 @@ async def transfer_path(
             "failed": failed,
             "total_size": total_size,
             "files": results,
-        },
-        ensure_ascii=False,
+            "files_omitted": files_omitted,
+        }
     )
 
 

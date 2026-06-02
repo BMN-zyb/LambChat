@@ -9,12 +9,17 @@ import asyncio
 import json
 from typing import Any, Callable, Dict, Optional
 
+from src.infra.async_utils import run_blocking_io
 from src.infra.logging import get_logger
 from src.infra.pubsub_hub import get_pubsub_hub
 
 from .constants import CANCEL_CHANNEL
 
 logger = get_logger(__name__)
+
+
+async def _cancel_message_json_loads(raw_value: Any) -> Any:
+    return await run_blocking_io(json.loads, raw_value)
 
 
 class TaskPubSub:
@@ -73,7 +78,7 @@ class TaskPubSub:
     ) -> None:
         """处理取消消息"""
         try:
-            data = json.loads(message["data"])
+            data = await _cancel_message_json_loads(message["data"])
             run_id = data.get("run_id")
             agent_id = data.get("agent_id")
             session_id = data.get("session_id")

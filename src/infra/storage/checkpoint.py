@@ -21,6 +21,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import BaseCheckpointSaver, CheckpointTuple, empty_checkpoint
 
+from src.infra.async_utils import run_blocking_io
 from src.infra.logging import get_logger
 from src.kernel.config import settings
 
@@ -94,6 +95,34 @@ def close_async_checkpointer() -> None:
         delattr(get_async_checkpointer, "_memory_saver_cache")
     if hasattr(get_async_checkpointer, "_memory_saver_access_count"):
         delattr(get_async_checkpointer, "_memory_saver_access_count")
+
+
+def get_checkpointer_diagnostics() -> dict[str, Any]:
+    """Return lightweight checkpointer runtime state for memory diagnostics."""
+    cache: OrderedDict[str, tuple[object, float]] | None = getattr(
+        get_async_checkpointer,
+        "_memory_saver_cache",
+        None,
+    )
+    return {
+        "configured_backend": str(getattr(settings, "CHECKPOINT_BACKEND", "mongodb")),
+        "backend_enabled": is_checkpoint_backend_enabled(),
+        "mongo_checkpointer_active": _mongo_checkpointer is not None,
+        "postgres_checkpointer_active": _pg_checkpointer is not None,
+        "postgres_pool_active": _pg_checkpointer_pool is not None,
+        "memory_saver_singleton_active": hasattr(get_async_checkpointer, "_memory_saver"),
+        "memory_saver_cache_active": cache is not None,
+        "memory_saver_cache_size": len(cache or {}),
+        "memory_saver_cache_limit": _MEMORY_SAVER_MAX_THREADS,
+        "memory_saver_ttl_seconds": _MEMORY_SAVER_TTL_SECONDS,
+    }
+
+
+async def reset_checkpointer_runtime_state() -> None:
+    """Drop process-local checkpointer references after checkpoint settings change."""
+    close_async_checkpointer()
+    close_mongo_checkpointer()
+    await close_pg_checkpointer()
 
 
 def get_mongo_checkpointer(collection_name: str = "checkpoints") -> BaseCheckpointSaver[Any] | None:
@@ -352,6 +381,15 @@ def _matches_fork_boundary(
     return False
 
 
+def _copy_checkpoint_put_payload(
+    checkpoint_tuple: CheckpointTuple,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    checkpoint = copy.deepcopy(checkpoint_tuple.checkpoint)
+    metadata = copy.deepcopy(checkpoint_tuple.metadata)
+    channel_versions = copy.deepcopy(checkpoint_tuple.checkpoint.get("channel_versions", {}))
+    return checkpoint, metadata, channel_versions
+
+
 async def _find_fork_boundary_checkpoint(
     source_saver: BaseCheckpointSaver[Any],
     default_config: RunnableConfig,
@@ -419,11 +457,15 @@ async def clone_checkpoints_for_fork(
             "checkpoint_ns": cfg.get("checkpoint_ns", ""),
         }
     }
+    checkpoint, metadata, channel_versions = await run_blocking_io(
+        _copy_checkpoint_put_payload,
+        boundary_tuple,
+    )
     await target_saver.aput(
         target_config,
-        copy.deepcopy(boundary_tuple.checkpoint),
-        copy.deepcopy(boundary_tuple.metadata),
-        copy.deepcopy(boundary_tuple.checkpoint.get("channel_versions", {})),
+        checkpoint,
+        metadata,
+        channel_versions,
     )
     return 1
 
@@ -438,7 +480,8 @@ async def seed_checkpoint_from_messages(
 
     target_saver = await get_async_checkpointer(thread_id=target_thread_id)
     checkpoint = empty_checkpoint()
-    checkpoint["channel_values"] = {"messages": copy.deepcopy(messages)}
+    copied_messages = await run_blocking_io(copy.deepcopy, messages)
+    checkpoint["channel_values"] = {"messages": copied_messages}
     checkpoint["channel_versions"] = {"messages": "1"}
     checkpoint["versions_seen"] = {}
     checkpoint["updated_channels"] = ["messages"]
@@ -465,7 +508,7 @@ async def delete_checkpoints_for_thread(thread_id: str) -> None:
 
     sync_delete = getattr(saver, "delete_thread", None)
     if callable(sync_delete):
-        result = sync_delete(thread_id)
+        result = await run_blocking_io(sync_delete, thread_id)
         if inspect.isawaitable(result):
             await result
         return

@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Iterable
 from datetime import datetime
+from itertools import islice
 from typing import TYPE_CHECKING, Any
 
 from langgraph.store.base import (
@@ -48,6 +49,9 @@ from src.kernel.config import settings
 logger = get_logger(__name__)
 
 COLLECTION_NAME = "store"
+DEFAULT_STORE_BATCH_CONCURRENCY = 16
+MONGODB_STORE_BATCH_MAX_OPS = 1000
+MONGODB_STORE_QUERY_LIMIT = 100
 
 
 def _ns_to_list(namespace: tuple[str, ...]) -> list[str]:
@@ -149,6 +153,44 @@ def _build_match_conditions_query(
     return {"$and": conditions}
 
 
+def _store_batch_concurrency() -> int:
+    return max(
+        1,
+        int(
+            getattr(
+                settings,
+                "MONGODB_STORE_BATCH_CONCURRENCY",
+                DEFAULT_STORE_BATCH_CONCURRENCY,
+            )
+            or 1
+        ),
+    )
+
+
+def _clamp_query_limit(value: int | None) -> int:
+    try:
+        candidate = int(value or 1)
+    except (TypeError, ValueError):
+        candidate = 1
+    return min(max(candidate, 1), MONGODB_STORE_QUERY_LIMIT)
+
+
+def _clamp_query_offset(value: int | None) -> int:
+    try:
+        return max(int(value or 0), 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _bounded_ops_list(ops: Iterable[Op]) -> list[Op]:
+    ops_list = list(islice(ops, MONGODB_STORE_BATCH_MAX_OPS + 1))
+    if len(ops_list) > MONGODB_STORE_BATCH_MAX_OPS:
+        raise ValueError(
+            f"too many store operations in one batch (max {MONGODB_STORE_BATCH_MAX_OPS})"
+        )
+    return ops_list
+
+
 class MongoDBStore(BaseStore):
     """基于 MongoDB 的 LangGraph Store 实现。
 
@@ -215,7 +257,7 @@ class MongoDBStore(BaseStore):
     def batch(self, ops: Iterable[Op]) -> list[Result]:
         """同步批量操作 — 使用 pymongo 同步客户端，与 motor 事件循环隔离。"""
         col = self._sync_collection()
-        ops_list = list(ops)
+        ops_list = _bounded_ops_list(ops)
         results: list[Result] = [None] * len(ops_list)
 
         for i, op in enumerate(ops_list):
@@ -245,7 +287,9 @@ class MongoDBStore(BaseStore):
                 if op.filter:
                     for key, val in op.filter.items():
                         query[f"value.{key}"] = val
-                docs = list(col.find(query).skip(op.offset).limit(op.limit))
+                offset = _clamp_query_offset(op.offset)
+                limit = _clamp_query_limit(op.limit)
+                docs = list(col.find(query).skip(offset).limit(limit))
                 results[i] = [_doc_to_search_item(doc) for doc in docs]
 
             elif isinstance(op, ListNamespacesOp):
@@ -263,8 +307,8 @@ class MongoDBStore(BaseStore):
                     [
                         {"$group": {"_id": group_id}},
                         {"$sort": {"_id": 1}},
-                        {"$skip": op.offset},
-                        {"$limit": op.limit},
+                        {"$skip": _clamp_query_offset(op.offset)},
+                        {"$limit": _clamp_query_limit(op.limit)},
                     ]
                 )
                 docs = list(col.aggregate(pipeline))
@@ -276,35 +320,33 @@ class MongoDBStore(BaseStore):
         return results
 
     async def abatch(self, ops: Iterable[Op]) -> list[Result]:
-        ops_list = list(ops)
+        ops_list = _bounded_ops_list(ops)
         results: list[Result] = [None] * len(ops_list)
         col = self.collection
+        next_index = 0
+        worker_count = min(_store_batch_concurrency(), len(ops_list))
 
-        # 按类型分组，并行执行
-        tasks: list[tuple[int, Any]] = []
+        if not worker_count:
+            return results
 
-        for i, op in enumerate(ops_list):
-            if isinstance(op, GetOp):
-                tasks.append((i, self._aget(col, op)))
-            elif isinstance(op, PutOp):
-                tasks.append((i, self._aput(col, op)))
-            elif isinstance(op, SearchOp):
-                tasks.append((i, self._asearch(col, op)))
-            elif isinstance(op, ListNamespacesOp):
-                tasks.append((i, self._alist_namespaces(col, op)))
-            else:
-                raise ValueError(f"Unknown operation type: {type(op)}")
+        async def _worker() -> None:
+            nonlocal next_index
+            while next_index < len(ops_list):
+                i = next_index
+                next_index += 1
+                op = ops_list[i]
+                if isinstance(op, GetOp):
+                    results[i] = await self._aget(col, op)
+                elif isinstance(op, PutOp):
+                    await self._aput(col, op)
+                elif isinstance(op, SearchOp):
+                    results[i] = await self._asearch(col, op)
+                elif isinstance(op, ListNamespacesOp):
+                    results[i] = await self._alist_namespaces(col, op)
+                else:
+                    raise ValueError(f"Unknown operation type: {type(op)}")
 
-        # 并行执行所有任务，按顺序收集结果
-        gather_results = await asyncio.gather(
-            *(task for _, task in tasks),
-            return_exceptions=False,
-        )
-
-        for (i, _), result in zip(tasks, gather_results):
-            if result is not None:  # PutOp 返回 None
-                results[i] = result
-
+        await asyncio.gather(*(_worker() for _ in range(worker_count)))
         return results
 
     # ------------------------------------------------------------------
@@ -348,8 +390,10 @@ class MongoDBStore(BaseStore):
             for key, val in op.filter.items():
                 query[f"value.{key}"] = val
 
-        cursor = col.find(query).skip(op.offset).limit(op.limit)
-        docs = await cursor.to_list(length=op.limit)
+        offset = _clamp_query_offset(op.offset)
+        limit = _clamp_query_limit(op.limit)
+        cursor = col.find(query).skip(offset).limit(limit)
+        docs = await cursor.to_list(length=limit)
         return [_doc_to_search_item(doc) for doc in docs]
 
     # ------------------------------------------------------------------
@@ -373,11 +417,12 @@ class MongoDBStore(BaseStore):
 
         pipeline.append({"$group": {"_id": group_id}})
         pipeline.append({"$sort": {"_id": 1}})
-        pipeline.append({"$skip": op.offset})
-        pipeline.append({"$limit": op.limit})
+        limit = _clamp_query_limit(op.limit)
+        pipeline.append({"$skip": _clamp_query_offset(op.offset)})
+        pipeline.append({"$limit": limit})
 
         cursor = col.aggregate(pipeline)
-        docs = await cursor.to_list(length=op.limit)
+        docs = await cursor.to_list(length=limit)
         return [_list_to_ns(doc["_id"]) for doc in docs]
 
 

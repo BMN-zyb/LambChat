@@ -16,6 +16,42 @@ class _Runtime:
         self.config = {"configurable": {"context": context, "base_url": base_url}}
 
 
+class _BlockingOnlySpooledFile:
+    def __init__(self, *args, **kwargs) -> None:
+        self.data = bytearray()
+        self.position = 0
+        self.closed = False
+
+    def write(self, chunk: bytes) -> int:
+        from src.infra.tool import image_generation_tool
+
+        if not getattr(image_generation_tool, "_inside_fake_blocking_io", False):
+            raise AssertionError("image download spool writes must run in blocking IO executor")
+        self.data.extend(chunk)
+        self.position += len(chunk)
+        return len(chunk)
+
+    def seek(self, position: int, whence: int = 0) -> int:
+        from src.infra.tool import image_generation_tool
+
+        if not getattr(image_generation_tool, "_inside_fake_blocking_io", False):
+            raise AssertionError("image download spool seek must run in blocking IO executor")
+        if whence == 2:
+            self.position = len(self.data) + position
+        else:
+            self.position = position
+        return self.position
+
+    def tell(self) -> int:
+        return self.position
+
+    def read(self) -> bytes:
+        return bytes(self.data)
+
+    def close(self) -> None:
+        self.closed = True
+
+
 def _load_module_from_path(module_name: str, relative_path: str):
     path = Path(__file__).parents[3] / relative_path
     spec = importlib.util.spec_from_file_location(module_name, path)
@@ -99,8 +135,11 @@ async def test_image_generate_calls_images_api_and_uploads_base64_result(
         is_local = False
 
         async def upload_bytes(self, data: bytes, folder: str, filename: str, content_type: str):
+            raise AssertionError("generated images should use upload_file")
+
+        async def upload_file(self, file, folder: str, filename: str, content_type: str):
             captured["upload"] = {
-                "data": data,
+                "data": file.read(),
                 "folder": folder,
                 "filename": filename,
                 "content_type": content_type,
@@ -188,12 +227,144 @@ def test_image_generate_schema_describes_supported_parameters() -> None:
         assert tool.args_schema.model_fields[field_name].description
 
 
+def test_decode_base64_to_spooled_file_rejects_oversized_payload_before_decode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.infra.tool import image_generation_tool
+
+    monkeypatch.setattr(image_generation_tool, "_IMAGE_DOWNLOAD_MAX_BYTES", 4)
+
+    def fail_b64decode(*args, **kwargs):
+        raise AssertionError("oversized image payload should be rejected before decoding")
+
+    monkeypatch.setattr(image_generation_tool.base64, "b64decode", fail_b64decode)
+
+    oversized = base64.b64encode(b"image-data").decode("ascii")
+    with pytest.raises(ValueError, match="Image download too large"):
+        image_generation_tool._decode_base64_to_spooled_file(oversized)
+
+
+@pytest.mark.asyncio
+async def test_download_image_source_rejects_oversized_remote_image(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.infra.tool import image_generation_tool
+
+    monkeypatch.setattr(image_generation_tool, "_IMAGE_DOWNLOAD_MAX_BYTES", 5)
+
+    class _FakeStreamResponse:
+        headers = {"content-type": "image/png"}
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        def raise_for_status(self) -> None:
+            return None
+
+        async def aiter_bytes(self):
+            yield b"abc"
+            yield b"def"
+
+    class _FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        def stream(self, method: str, url: str):
+            assert method == "GET"
+            assert url == "https://example.com/image.png"
+            return _FakeStreamResponse()
+
+    monkeypatch.setattr(image_generation_tool.httpx, "AsyncClient", lambda **kwargs: _FakeClient())
+
+    with pytest.raises(ValueError, match="Image download too large"):
+        await image_generation_tool._download_image_source("https://example.com/image.png", None)
+
+
+@pytest.mark.asyncio
+async def test_download_image_source_offloads_spooled_file_io(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.infra.tool import image_generation_tool
+
+    calls: list[str] = []
+
+    class _FakeStreamResponse:
+        headers = {"content-type": "image/png"}
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        def raise_for_status(self) -> None:
+            return None
+
+        async def aiter_bytes(self):
+            yield b"abc"
+            yield b"def"
+
+    class _FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        def stream(self, method: str, url: str):
+            return _FakeStreamResponse()
+
+    async def fake_run_blocking_io(func, *args, **kwargs):
+        calls.append(func.__name__)
+        monkeypatch.setattr(image_generation_tool, "_inside_fake_blocking_io", True, raising=False)
+        try:
+            return func(*args, **kwargs)
+        finally:
+            monkeypatch.setattr(
+                image_generation_tool,
+                "_inside_fake_blocking_io",
+                False,
+                raising=False,
+            )
+
+    monkeypatch.setattr(image_generation_tool.httpx, "AsyncClient", lambda **kwargs: _FakeClient())
+    monkeypatch.setattr(image_generation_tool, "SpooledTemporaryFile", _BlockingOnlySpooledFile)
+    monkeypatch.setattr(image_generation_tool, "run_blocking_io", fake_run_blocking_io)
+    monkeypatch.setattr(image_generation_tool, "_inside_fake_blocking_io", False, raising=False)
+
+    image_file, content_type, filename = await image_generation_tool._download_image_source(
+        "https://example.com/image.png",
+        None,
+    )
+
+    try:
+        assert bytes(image_file.data) == b"abcdef"
+        assert content_type == "image/png"
+        assert filename == "image.png"
+        assert calls == ["write", "write", "seek"]
+    finally:
+        image_file.close()
+
+
 @pytest.mark.asyncio
 async def test_image_generate_returns_error_when_api_key_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from src.infra.tool import image_generation_tool
 
+    calls: list[object] = []
+
+    async def fake_run_blocking_io(func, *args, **kwargs):
+        calls.append(func)
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(image_generation_tool, "run_blocking_io", fake_run_blocking_io)
     monkeypatch.setattr(image_generation_tool.settings, "IMAGE_GENERATION_API_KEY", "")
 
     result = json.loads(
@@ -204,6 +375,36 @@ async def test_image_generate_returns_error_when_api_key_missing(
     )
 
     assert result == {"error": "IMAGE_GENERATION_API_KEY is not configured"}
+    assert json.dumps in calls
+
+
+@pytest.mark.asyncio
+async def test_image_generate_offloads_exception_result_json(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.infra.tool import image_generation_tool
+
+    calls: list[object] = []
+
+    async def fake_run_blocking_io(func, *args, **kwargs):
+        calls.append(func)
+        return func(*args, **kwargs)
+
+    async def fake_call_generation_api(**kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(image_generation_tool, "run_blocking_io", fake_run_blocking_io)
+    monkeypatch.setattr(image_generation_tool, "_call_generation_api", fake_call_generation_api)
+
+    result = json.loads(
+        await image_generation_tool.image_generate.coroutine(
+            prompt="draw a cat",
+            runtime=_Runtime("user-1"),
+        )
+    )
+
+    assert result == {"error": "Image generation failed: boom"}
+    assert json.dumps in calls
 
 
 @pytest.mark.asyncio
@@ -240,6 +441,9 @@ async def test_image_generate_normalizes_unsupported_portrait_size_for_generatio
         is_local = False
 
         async def upload_bytes(self, data: bytes, folder: str, filename: str, content_type: str):
+            raise AssertionError("generated images should use upload_file")
+
+        async def upload_file(self, file, folder: str, filename: str, content_type: str):
             return SimpleNamespace(
                 key=f"{folder}/{filename}", url="https://oss.example.com/gen.png"
             )
@@ -281,9 +485,19 @@ async def test_image_generate_normalizes_unsupported_portrait_size_for_edits(
     class _FakeResponse:
         def __init__(self, payload: dict[str, object]) -> None:
             self._payload = payload
+            self.headers = {"content-type": "image/png"}
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
 
         def raise_for_status(self) -> None:
             return None
+
+        async def aiter_bytes(self):
+            yield image_bytes
 
         def json(self) -> dict[str, object]:
             return self._payload
@@ -295,12 +509,9 @@ async def test_image_generate_normalizes_unsupported_portrait_size_for_edits(
         async def __aexit__(self, exc_type, exc, tb):
             return None
 
-        async def get(self, request_url: str):
-            return SimpleNamespace(
-                content=image_bytes,
-                headers={"content-type": "image/png"},
-                raise_for_status=lambda: None,
-            )
+        def stream(self, method: str, request_url: str):
+            assert method == "GET"
+            return _FakeResponse({})
 
         async def post(self, request_url: str, **kwargs):
             captured["kwargs"] = kwargs
@@ -310,6 +521,9 @@ async def test_image_generate_normalizes_unsupported_portrait_size_for_edits(
         is_local = False
 
         async def upload_bytes(self, data: bytes, folder: str, filename: str, content_type: str):
+            raise AssertionError("generated images should use upload_file")
+
+        async def upload_file(self, file, folder: str, filename: str, content_type: str):
             return SimpleNamespace(
                 key=f"{folder}/{filename}", url="https://oss.example.com/edit.png"
             )
@@ -351,9 +565,19 @@ async def test_image_generate_with_input_images_uses_edits_endpoint(
     class _FakeResponse:
         def __init__(self, payload: dict[str, object]) -> None:
             self._payload = payload
+            self.headers = {"content-type": "image/png"}
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
 
         def raise_for_status(self) -> None:
             return None
+
+        async def aiter_bytes(self):
+            yield image_bytes
 
         def json(self) -> dict[str, object]:
             return self._payload
@@ -365,13 +589,10 @@ async def test_image_generate_with_input_images_uses_edits_endpoint(
         async def __aexit__(self, exc_type, exc, tb):
             return None
 
-        async def get(self, request_url: str):
+        def stream(self, method: str, request_url: str):
+            assert method == "GET"
             captured.setdefault("download_urls", []).append(request_url)
-            return SimpleNamespace(
-                content=image_bytes,
-                headers={"content-type": "image/png"},
-                raise_for_status=lambda: None,
-            )
+            return _FakeResponse({})
 
         async def post(self, request_url: str, **kwargs):
             captured["request_url"] = request_url
@@ -382,8 +603,11 @@ async def test_image_generate_with_input_images_uses_edits_endpoint(
         is_local = False
 
         async def upload_bytes(self, data: bytes, folder: str, filename: str, content_type: str):
+            raise AssertionError("generated images should use upload_file")
+
+        async def upload_file(self, file, folder: str, filename: str, content_type: str):
             captured["upload"] = {
-                "data": data,
+                "data": file.read(),
                 "folder": folder,
                 "filename": filename,
                 "content_type": content_type,
@@ -438,6 +662,241 @@ async def test_image_generate_with_input_images_uses_edits_endpoint(
 
 
 @pytest.mark.asyncio
+async def test_image_generate_streams_input_image_downloads_for_edits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.infra.tool import image_generation_tool
+
+    captured: dict[str, object] = {}
+    image_bytes = b"streamed-edit-source"
+    b64_image = base64.b64encode(b"fake-png").decode("ascii")
+
+    class _FakeResponse:
+        def __init__(self, payload: dict[str, object] | None = None) -> None:
+            self._payload = payload or {}
+            self.headers = {"content-type": "image/png"}
+
+        @property
+        def content(self):
+            raise AssertionError("image downloads should stream into a file")
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        def raise_for_status(self) -> None:
+            return None
+
+        async def aiter_bytes(self):
+            yield image_bytes[:8]
+            yield image_bytes[8:]
+
+        def json(self) -> dict[str, object]:
+            return self._payload
+
+    class _FakeHttpClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        def stream(self, method: str, request_url: str):
+            assert method == "GET"
+            captured["download_url"] = request_url
+            return _FakeResponse()
+
+        async def post(self, request_url: str, **kwargs):
+            captured["request_url"] = request_url
+            captured["uploaded_source"] = kwargs["files"][0][1][1].read()
+            return _FakeResponse({"data": [{"b64_json": b64_image}]})
+
+    class _FakeStorage:
+        async def upload_file(self, file, folder: str, filename: str, content_type: str):
+            captured["result_upload"] = file.read()
+            return SimpleNamespace(
+                key=f"{folder}/{filename}", url="https://oss.example.com/edit.png"
+            )
+
+    async def fake_get_or_init_storage():
+        return _FakeStorage()
+
+    monkeypatch.setattr(
+        image_generation_tool.httpx, "AsyncClient", lambda **kwargs: _FakeHttpClient()
+    )
+    monkeypatch.setattr(image_generation_tool, "get_or_init_storage", fake_get_or_init_storage)
+    monkeypatch.setattr(image_generation_tool.settings, "IMAGE_GENERATION_API_KEY", "sk-test")
+    monkeypatch.setattr(
+        image_generation_tool.settings,
+        "IMAGE_GENERATION_BASE_URL",
+        "https://api.example.com/v1",
+    )
+    monkeypatch.setattr(image_generation_tool.settings, "IMAGE_GENERATION_MODEL", "gpt-image-2")
+
+    result = json.loads(
+        await image_generation_tool.image_generate.coroutine(
+            prompt="make it brighter",
+            input_images=["https://files.example.com/source.png"],
+            runtime=_Runtime("user-1"),
+        )
+    )
+
+    assert result["success"] is True
+    assert captured["download_url"] == "https://files.example.com/source.png"
+    assert captured["request_url"] == "https://api.example.com/v1/images/edits"
+    assert captured["uploaded_source"] == image_bytes
+
+
+@pytest.mark.asyncio
+async def test_image_generate_decodes_base64_result_in_chunks_before_upload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.infra.tool import image_generation_tool
+
+    captured: dict[str, object] = {}
+    image_bytes = b"x" * (1024 * 1024)
+    b64_image = base64.b64encode(image_bytes).decode("ascii")
+    real_b64decode = image_generation_tool.base64.b64decode
+
+    def guarded_b64decode(data, *args, **kwargs):
+        if isinstance(data, str) and len(data) == len(b64_image):
+            raise AssertionError("generated image payload should not be decoded in one block")
+        return real_b64decode(data, *args, **kwargs)
+
+    class _FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {"data": [{"b64_json": b64_image}]}
+
+    class _FakeHttpClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def post(self, request_url: str, **kwargs):
+            return _FakeResponse()
+
+    class _FakeStorage:
+        async def upload_file(self, file, folder: str, filename: str, content_type: str):
+            captured["upload"] = file.read()
+            return SimpleNamespace(
+                key=f"{folder}/{filename}", url="https://oss.example.com/generated.png"
+            )
+
+    async def fake_get_or_init_storage():
+        return _FakeStorage()
+
+    monkeypatch.setattr(image_generation_tool.base64, "b64decode", guarded_b64decode)
+    monkeypatch.setattr(
+        image_generation_tool.httpx, "AsyncClient", lambda **kwargs: _FakeHttpClient()
+    )
+    monkeypatch.setattr(image_generation_tool, "get_or_init_storage", fake_get_or_init_storage)
+    monkeypatch.setattr(image_generation_tool.settings, "IMAGE_GENERATION_API_KEY", "sk-test")
+    monkeypatch.setattr(
+        image_generation_tool.settings,
+        "IMAGE_GENERATION_BASE_URL",
+        "https://api.example.com/v1",
+    )
+    monkeypatch.setattr(image_generation_tool.settings, "IMAGE_GENERATION_MODEL", "gpt-image-2")
+
+    result = json.loads(
+        await image_generation_tool.image_generate.coroutine(
+            prompt="draw a cat",
+            runtime=_Runtime("user-1"),
+        )
+    )
+
+    assert result["success"] is True
+    assert captured["upload"] == image_bytes
+
+
+@pytest.mark.asyncio
+async def test_image_generate_offloads_base64_result_spooled_file_io(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.infra.tool import image_generation_tool
+
+    calls: list[str] = []
+    b64_image = base64.b64encode(b"fake-png").decode("ascii")
+
+    class _FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {"data": [{"b64_json": b64_image}]}
+
+    class _FakeHttpClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def post(self, request_url: str, **kwargs):
+            return _FakeResponse()
+
+    class _FakeStorage:
+        async def upload_file(self, file, folder: str, filename: str, content_type: str):
+            assert bytes(file.data) == b"fake-png"
+            return SimpleNamespace(
+                key=f"{folder}/{filename}", url="https://oss.example.com/generated.png"
+            )
+
+    async def fake_get_or_init_storage():
+        return _FakeStorage()
+
+    async def fake_run_blocking_io(func, *args, **kwargs):
+        calls.append(func.__name__)
+        monkeypatch.setattr(image_generation_tool, "_inside_fake_blocking_io", True, raising=False)
+        try:
+            return func(*args, **kwargs)
+        finally:
+            monkeypatch.setattr(
+                image_generation_tool,
+                "_inside_fake_blocking_io",
+                False,
+                raising=False,
+            )
+
+    monkeypatch.setattr(
+        image_generation_tool.httpx,
+        "AsyncClient",
+        lambda **kwargs: _FakeHttpClient(),
+    )
+    monkeypatch.setattr(image_generation_tool, "get_or_init_storage", fake_get_or_init_storage)
+    monkeypatch.setattr(image_generation_tool, "SpooledTemporaryFile", _BlockingOnlySpooledFile)
+    monkeypatch.setattr(image_generation_tool, "run_blocking_io", fake_run_blocking_io)
+    monkeypatch.setattr(image_generation_tool, "_inside_fake_blocking_io", False, raising=False)
+    monkeypatch.setattr(image_generation_tool.settings, "IMAGE_GENERATION_API_KEY", "sk-test")
+    monkeypatch.setattr(
+        image_generation_tool.settings,
+        "IMAGE_GENERATION_BASE_URL",
+        "https://api.example.com/v1",
+    )
+    monkeypatch.setattr(image_generation_tool.settings, "IMAGE_GENERATION_MODEL", "gpt-image-2")
+
+    result = json.loads(
+        await image_generation_tool.image_generate.coroutine(
+            prompt="draw a cat",
+            runtime=_Runtime("user-1"),
+        )
+    )
+
+    assert result["success"] is True
+    assert "_extract_image_payload" in calls
+    assert "_file_size" in calls
+    assert "seek" in calls
+    assert "dumps" in calls
+
+
+@pytest.mark.asyncio
 async def test_image_generate_retries_retryable_api_status(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -482,6 +941,9 @@ async def test_image_generate_retries_retryable_api_status(
 
     class _FakeStorage:
         async def upload_bytes(self, data: bytes, folder: str, filename: str, content_type: str):
+            raise AssertionError("generated images should use upload_file")
+
+        async def upload_file(self, file, folder: str, filename: str, content_type: str):
             return SimpleNamespace(
                 key=f"{folder}/{filename}", url="https://oss.example.com/gen.png"
             )

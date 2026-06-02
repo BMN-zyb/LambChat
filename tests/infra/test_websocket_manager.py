@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import json
 
 import pytest
 
+import src.infra.websocket as websocket_module
 from src.infra.websocket import ConnectionManager
 
 
@@ -94,6 +96,33 @@ class _ScanOnlyRedisClient(_FakeRedisClient):
             midpoint = max(1, len(keys) // 2)
             return (1 if len(keys) > midpoint else 0), keys[:midpoint]
         return 0, keys[max(1, len(keys) // 2) :]
+
+
+class _PagedScanRedisClient(_FakeRedisClient):
+    def __init__(self, page_size: int) -> None:
+        super().__init__()
+        self.page_size = page_size
+        self.scan_calls = 0
+
+    async def scan(
+        self,
+        cursor: int = 0,
+        match: str | None = None,
+        count: int | None = None,
+    ) -> tuple[int, list[str]]:
+        del count
+        self.scan_calls += 1
+        if not match:
+            return 0, []
+        if match.endswith("*"):
+            prefix = match[:-1]
+            keys = sorted(key for key in self.values if key.startswith(prefix))
+        else:
+            keys = [match] if match in self.values else []
+        start = int(cursor)
+        end = min(start + self.page_size, len(keys))
+        next_cursor = 0 if end >= len(keys) else end
+        return next_cursor, keys[start:end]
 
 
 class _FakeHub:
@@ -206,6 +235,115 @@ async def test_send_to_user_uses_instance_targeted_channels(
 
 
 @pytest.mark.asyncio
+async def test_broadcast_offloads_message_json_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[object] = []
+    manager = ConnectionManager()
+    websocket_a = _FakeWebSocket()
+    websocket_b = _FakeWebSocket()
+
+    async def _fake_run_blocking_io(func, /, *args, **kwargs):
+        calls.append(func)
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(
+        websocket_module,
+        "run_blocking_io",
+        _fake_run_blocking_io,
+        raising=False,
+    )
+
+    manager._connections = {"user-1": {websocket_a}, "user-2": {websocket_b}}
+
+    sent = await manager.broadcast({"type": "task:complete", "data": {"text": "消息"}})
+
+    assert sent == 2
+    assert calls == [json.dumps]
+    assert websocket_a.sent_texts == [
+        json.dumps({"type": "task:complete", "data": {"text": "消息"}}, ensure_ascii=False)
+    ]
+    assert websocket_b.sent_texts == websocket_a.sent_texts
+
+
+@pytest.mark.asyncio
+async def test_send_to_user_with_broadcast_offloads_delivery_json_serialization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[object] = []
+    fake_redis = _FakeRedisClient()
+    fake_redis.values["ws:route:user-1:instance-a"] = "1"
+    monkeypatch.setattr(
+        "src.infra.websocket.create_redis_client",
+        lambda isolated_pool=False: fake_redis,
+    )
+
+    async def _fake_run_blocking_io(func, /, *args, **kwargs):
+        calls.append(func)
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(
+        websocket_module,
+        "run_blocking_io",
+        _fake_run_blocking_io,
+        raising=False,
+    )
+
+    manager = ConnectionManager()
+    manager._instance_id = "instance-local"
+
+    sent = await manager.send_to_user_with_broadcast(
+        "user-1",
+        {"type": "task:complete", "data": {"text": "消息"}},
+    )
+
+    assert sent == 1
+    assert calls == [json.dumps]
+    assert json.loads(fake_redis.published[0][1])["message"]["data"]["text"] == "消息"
+
+
+@pytest.mark.asyncio
+async def test_handle_pubsub_message_offloads_delivery_json_parse(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[object] = []
+    handled: list[dict] = []
+
+    async def _fake_run_blocking_io(func, /, *args, **kwargs):
+        calls.append(func)
+        return func(*args, **kwargs)
+
+    async def _fake_handle_broadcast_message(data: dict) -> int:
+        handled.append(data)
+        return 1
+
+    monkeypatch.setattr(
+        websocket_module,
+        "run_blocking_io",
+        _fake_run_blocking_io,
+        raising=False,
+    )
+
+    manager = ConnectionManager()
+    manager._handle_broadcast_message = _fake_handle_broadcast_message
+
+    await manager._handle_pubsub_message(
+        {
+            "data": json.dumps(
+                {
+                    "user_id": "user-1",
+                    "message": {"type": "task:complete"},
+                    "source_instance_id": "instance-a",
+                }
+            )
+        }
+    )
+
+    assert calls == [json.loads]
+    assert handled[0]["user_id"] == "user-1"
+
+
+@pytest.mark.asyncio
 async def test_send_to_user_scans_routes_without_blocking_redis_keys(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -233,6 +371,36 @@ async def test_send_to_user_scans_routes_without_blocking_redis_keys(
 
 
 @pytest.mark.asyncio
+async def test_send_to_user_limits_scanned_route_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_redis = _PagedScanRedisClient(page_size=25)
+    fake_redis.values = {
+        f"ws:route:user-1:instance-{index:03d}": "1"
+        for index in range(websocket_module.WS_ROUTE_SCAN_LIMIT + 50)
+    }
+    monkeypatch.setattr(
+        "src.infra.websocket.create_redis_client",
+        lambda isolated_pool=False: fake_redis,
+    )
+
+    manager = ConnectionManager()
+    manager._instance_id = "instance-local"
+
+    sent = await manager.send_to_user_with_broadcast(
+        "user-1",
+        {"type": "task:complete", "data": {"run_id": "run-1"}},
+    )
+
+    assert sent == websocket_module.WS_ROUTE_SCAN_LIMIT
+    assert len(fake_redis.published) == websocket_module.WS_ROUTE_SCAN_LIMIT
+    assert fake_redis.published[-1][0] == (
+        f"ws:deliver:instance-{websocket_module.WS_ROUTE_SCAN_LIMIT - 1:03d}"
+    )
+    assert fake_redis.scan_calls < 10
+
+
+@pytest.mark.asyncio
 async def test_send_to_user_reports_zero_when_route_channel_has_no_subscribers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -253,6 +421,45 @@ async def test_send_to_user_reports_zero_when_route_channel_has_no_subscribers(
     )
 
     assert sent == 0
+
+
+@pytest.mark.asyncio
+async def test_websocket_broadcast_drops_oversized_local_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = ConnectionManager()
+    websocket = _FakeWebSocket()
+    manager._connections = {"user-1": {websocket}}
+    monkeypatch.setattr(websocket_module, "WS_MESSAGE_MAX_BYTES", 4, raising=False)
+
+    sent = await manager.broadcast({"type": "notice", "data": {"text": "too-large"}})
+
+    assert sent == 0
+    assert websocket.sent_texts == []
+
+
+@pytest.mark.asyncio
+async def test_websocket_send_to_user_drops_oversized_delivery_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_redis = _FakeRedisClient()
+    fake_redis.values["ws:route:user-1:instance-a"] = "1"
+    monkeypatch.setattr(
+        "src.infra.websocket.create_redis_client",
+        lambda isolated_pool=False: fake_redis,
+    )
+    monkeypatch.setattr(websocket_module, "WS_MESSAGE_MAX_BYTES", 4, raising=False)
+
+    manager = ConnectionManager()
+    manager._instance_id = "instance-local"
+
+    sent = await manager.send_to_user_with_broadcast(
+        "user-1",
+        {"type": "notice", "data": {"text": "too-large"}},
+    )
+
+    assert sent == 0
+    assert fake_redis.published == []
 
 
 @pytest.mark.asyncio
@@ -362,4 +569,43 @@ async def test_route_refresh_task_cleans_itself_up_when_it_exits(
     task = manager._route_refresh_tasks["user-1"]
     await task
 
+    assert "user-1" not in manager._route_refresh_tasks
+
+
+@pytest.mark.asyncio
+async def test_stop_pubsub_listener_waits_for_route_refresh_task_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_redis = _FakeRedisClient()
+    fake_hub = _FakeHub()
+    monkeypatch.setattr(
+        "src.infra.websocket.create_redis_client",
+        lambda isolated_pool=False: fake_redis,
+    )
+    monkeypatch.setattr("src.infra.websocket.get_pubsub_hub", lambda: fake_hub)
+
+    manager = ConnectionManager()
+    manager._instance_id = "instance-a"
+    cleanup_finished = False
+    started = asyncio.Event()
+
+    async def _refresh_forever() -> None:
+        nonlocal cleanup_finished
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cleanup_finished = True
+
+    task = asyncio.create_task(_refresh_forever())
+    await started.wait()
+    manager._route_refresh_tasks["user-1"] = task
+    manager._connections["user-1"] = {_FakeWebSocket()}
+    manager._subscription_token = "token-1"
+    manager._running = True
+
+    await manager.stop_pubsub_listener()
+
+    assert task.cancelled() is True
+    assert cleanup_finished is True
     assert "user-1" not in manager._route_refresh_tasks

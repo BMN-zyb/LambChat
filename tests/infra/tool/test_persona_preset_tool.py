@@ -73,12 +73,85 @@ def test_create_persona_preset_description_guides_team_role_creation() -> None:
 
 
 @pytest.mark.asyncio
+async def test_create_persona_preset_offloads_result_json(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.infra.tool import persona_preset_tool
+
+    calls: list[object] = []
+
+    class FakeManager:
+        async def create_preset(self, *args, **kwargs):
+            return _preset("preset-1")
+
+    async def fake_resolve_user(user_id: str) -> TokenPayload:
+        assert user_id == "admin-1"
+        return _admin_user()
+
+    async def fake_run_blocking_io(func, *args, **kwargs):
+        calls.append(func)
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(persona_preset_tool, "_resolve_user", fake_resolve_user)
+    monkeypatch.setattr(persona_preset_tool, "PersonaPresetManager", FakeManager)
+    monkeypatch.setattr(
+        persona_preset_tool,
+        "run_blocking_io",
+        fake_run_blocking_io,
+        raising=False,
+    )
+
+    result = json.loads(
+        await persona_preset_tool.create_persona_preset.coroutine(
+            name="动画师",
+            system_prompt="Animate with care.",
+            runtime=_Runtime("admin-1"),
+        )
+    )
+
+    assert result["success"] is True
+    assert json.dumps in calls
+
+
+@pytest.mark.asyncio
+async def test_create_persona_preset_offloads_error_result_json(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.infra.tool import persona_preset_tool
+
+    calls: list[object] = []
+
+    async def fake_run_blocking_io(func, *args, **kwargs):
+        calls.append(func)
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(
+        persona_preset_tool,
+        "run_blocking_io",
+        fake_run_blocking_io,
+        raising=False,
+    )
+
+    result = json.loads(
+        await persona_preset_tool.create_persona_preset.coroutine(
+            name="动画师",
+            system_prompt="Animate with care.",
+            runtime=_Runtime(None),
+        )
+    )
+
+    assert result == {"error": "No user context available"}
+    assert json.dumps in calls
+
+
+@pytest.mark.asyncio
 async def test_update_persona_preset_tool_promotes_named_user_preset_to_global(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from src.infra.tool import persona_preset_tool
 
     calls: list[tuple[str, object]] = []
+    dump_calls: list[object] = []
 
     class FakeManager:
         async def list_presets(self, **kwargs):
@@ -105,8 +178,18 @@ async def test_update_persona_preset_tool_promotes_named_user_preset_to_global(
         assert user_id == "admin-1"
         return _admin_user()
 
+    async def fake_run_blocking_io(func, *args, **kwargs):
+        dump_calls.append(func)
+        return func(*args, **kwargs)
+
     monkeypatch.setattr(persona_preset_tool, "_resolve_user", fake_resolve_user)
     monkeypatch.setattr(persona_preset_tool, "PersonaPresetManager", FakeManager)
+    monkeypatch.setattr(
+        persona_preset_tool,
+        "run_blocking_io",
+        fake_run_blocking_io,
+        raising=False,
+    )
 
     result = json.loads(
         await persona_preset_tool.update_persona_preset.coroutine(
@@ -120,6 +203,7 @@ async def test_update_persona_preset_tool_promotes_named_user_preset_to_global(
     assert result["preset"]["scope"] == "global"
     assert result["preset"]["visibility"] == "public"
     assert result["preset"]["status"] == "published"
+    assert json.dumps in dump_calls
 
     assert calls[0][0] == "list"
     assert calls[0][1]["q"] == "动画师"

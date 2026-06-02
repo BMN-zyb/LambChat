@@ -77,3 +77,20 @@ async def test_ensure_trace_keeps_user_id_when_username_lookup_misses(
     assert len(writer.calls) == 1
     assert writer.calls[0]["metadata"]["user_id"] == "user-456"
     assert "username" not in writer.calls[0]["metadata"]
+
+
+def test_present_tool_start_compacts_large_input_and_tool_call_state() -> None:
+    large_input = "x" * 20_000
+    presenter = Presenter()
+
+    event = presenter.present_tool_start(
+        "large_tool",
+        {"query": large_input},
+        tool_call_id="tool-1",
+    )
+
+    assert event["data"]["args"]["query"] != large_input
+    assert len(event["data"]["args"]["query"]) < 3_000
+    assert "truncated from 20000 chars" in event["data"]["args"]["query"]
+    assert len(presenter._tool_calls) == 1
+    assert large_input not in str(presenter._tool_calls[0])

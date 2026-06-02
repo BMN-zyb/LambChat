@@ -11,6 +11,7 @@ with warnings.catch_warnings():
     warnings.simplefilter("ignore", SyntaxWarning)
     import jieba.posseg as pseg
 
+from src.infra.async_utils import run_blocking_io
 from src.infra.memory.client.native.models import CJK_STOPWORDS, has_cjk
 
 logger = logging.getLogger(__name__)
@@ -85,7 +86,7 @@ async def llm_enrich_memory(backend: Any, content: str) -> dict[str, Any]:
                 return _fallback_enrich(content)
 
         text = str(text).strip().strip("```json").strip("```").strip()
-        data = json.loads(text)
+        data = await run_blocking_io(json.loads, text)
         return {
             "title": str(data.get("title", ""))[:25] or build_summary(content, 25),
             "summary": str(data.get("summary", ""))[:100] or build_summary(content),

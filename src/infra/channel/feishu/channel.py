@@ -43,6 +43,19 @@ _FEISHU_WS_THREAD: threading.Thread | None = None
 _LARK_OAPI_WS_PRIVATE_API_VERSION = "1.6.5"
 
 
+async def _cancel_and_wait_future(future: Any) -> None:
+    if future is None or future.done():
+        return
+    future.cancel()
+    try:
+        if isinstance(future, asyncio.Future):
+            await future
+        else:
+            await asyncio.wrap_future(future)
+    except (asyncio.CancelledError, Exception):
+        pass
+
+
 def _ensure_feishu_ws_loop() -> asyncio.AbstractEventLoop:
     """Return the shared lark-oapi WebSocket loop.
 
@@ -465,6 +478,10 @@ class FeishuChannel(FeishuSenderMixin, BaseChannel):
         finally:
             if ping_task:
                 ping_task.cancel()
+                try:
+                    await ping_task
+                except asyncio.CancelledError:
+                    pass
             if self._ws_client is not None:
                 try:
                     await self._sdk_ws_disconnect()
@@ -530,10 +547,8 @@ class FeishuChannel(FeishuSenderMixin, BaseChannel):
                 )
             except Exception:
                 pass
-        if self._ws_future is not None:
-            self._ws_future.cancel()
-        if self._health_check_future is not None:
-            self._health_check_future.cancel()
+        await _cancel_and_wait_future(self._ws_future)
+        await _cancel_and_wait_future(self._health_check_future)
         await self.close_feishu_http_client()
         self._set_connection_state(ConnectionState.DISCONNECTED)
         logger.info(f"Feishu bot stopped for user {self.config.user_id}")
@@ -606,7 +621,9 @@ class FeishuChannel(FeishuSenderMixin, BaseChannel):
             attachments = []
 
             try:
-                content_json = json.loads(message.content) if message.content else {}
+                content_json = (
+                    await run_blocking_io(json.loads, message.content) if message.content else {}
+                )
             except json.JSONDecodeError:
                 content_json = {}
 
@@ -689,7 +706,7 @@ class FeishuChannel(FeishuSenderMixin, BaseChannel):
                 "system",
                 "merge_forward",
             ):
-                text = extract_share_card_content(content_json, msg_type)
+                text = await run_blocking_io(extract_share_card_content, content_json, msg_type)
                 if text:
                     content_parts.append(text)
 

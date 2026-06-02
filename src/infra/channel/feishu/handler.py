@@ -7,178 +7,59 @@ Feishu 消息处理器模块
 
 import asyncio
 import json
-import mimetypes
+import os
 import sys
-import time
 from datetime import datetime, timezone
+from tempfile import NamedTemporaryFile
 from typing import Any, AsyncGenerator, Callable, Optional, cast
-from urllib.parse import quote, unquote, urlparse
 
+from src.infra.async_utils import run_blocking_io
+from src.infra.channel.feishu import handler_helpers
 from src.infra.channel.feishu.channel import FeishuChannel
+from src.infra.channel.feishu.handler_helpers import (
+    _SESSION_LINK_TEXT,
+    EVENT_MESSAGE_CHUNK,
+    EVENT_TOOL_RESULT,
+    EVENT_TOOL_START,
+    FEISHU_REVEAL_DOWNLOAD_CHUNK_SIZE,
+    FEISHU_REVEAL_DOWNLOAD_MAX_BYTES,
+    FEISHU_REVEAL_LEGACY_DOWNLOAD_MAX_BYTES,
+    FEISHU_STREAM_FIRST_PAINT_CHARS,
+    FEISHU_STREAM_UPDATE_DEBOUNCE_SECONDS,
+    _build_session_run_url,
+    _create_new_feishu_session,
+    _extract_tool_media_files,
+    _get_feishu_session_id,
+)
 from src.infra.channel.feishu.manager import FeishuChannelManager
 from src.infra.channel.feishu.markdown import FeishuMarkdownAdapter
 from src.infra.logging import get_logger
 from src.infra.utils.datetime import utc_now
-from src.kernel.config import settings
+from src.kernel.config import settings  # noqa: F401 - compatibility for handler tests/patching
 
 logger = get_logger(__name__)
 
-# Redis key prefix for Feishu chat session mapping
-FEISHU_SESSION_KEY_PREFIX = "feishu:session:"
-
-# 事件类型定义
-EVENT_MESSAGE_CHUNK = "message:chunk"
-EVENT_THINKING = "thinking"
-EVENT_TOOL_START = "tool:start"
-EVENT_TOOL_RESULT = "tool:result"
-EVENT_DONE = "done"
-FEISHU_STREAM_UPDATE_DEBOUNCE_SECONDS = 0.12
-FEISHU_STREAM_FIRST_PAINT_CHARS = 12
-_UPLOAD_FILE_PATH_MARKER = "/api/upload/file/"
-_SESSION_LINK_TEXT = "查看这条消息"
+_STREAM_UPDATE_SIGNAL = object()
 
 
-async def _get_feishu_session_id(chat_id: str) -> str:
-    """获取飞书聊天对应的当前 session ID，如果不存在则创建默认的"""
-    from src.infra.storage.redis import RedisStorage
-
-    storage = RedisStorage()
-    key = f"{FEISHU_SESSION_KEY_PREFIX}{chat_id}"
-    session_id = await storage.get(key)
-
-    if session_id is None:
-        # 默认使用 chat_id 作为 session ID（兼容旧数据）
-        session_id = f"feishu_{chat_id}"
-        await storage.set(key, session_id)
-
-    return session_id
-
-
-async def _create_new_feishu_session(chat_id: str) -> str:
-    """为飞书聊天创建新的 session ID"""
-    from src.infra.storage.redis import RedisStorage
-
-    storage = RedisStorage()
-    key = f"{FEISHU_SESSION_KEY_PREFIX}{chat_id}"
-
-    # 使用时间戳生成唯一的 session ID
-    timestamp = int(time.time())
-    session_id = f"feishu_{chat_id}_{timestamp}"
-
-    # 存储到 Redis，不设置过期时间
-    await storage.set(key, session_id)
-
-    logger.info(f"[Feishu] Created new session for chat {chat_id}: {session_id}")
-    return session_id
-
-
-def _storage_key_from_upload_url(url: str) -> str | None:
-    """Extract the LambChat storage key from a proxied upload URL."""
-    if not url:
-        return None
-    try:
-        path = urlparse(url).path
-    except Exception:
-        path = url
-
-    if _UPLOAD_FILE_PATH_MARKER not in path:
-        return None
-    key = path.split(_UPLOAD_FILE_PATH_MARKER, 1)[1]
-    return unquote(key).lstrip("/") or None
-
-
-def _media_name_from_entry(entry: dict[str, Any], key: str | None, url: str, index: int) -> str:
-    for field in ("name", "file_name", "filename"):
-        value = entry.get(field)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-
-    source = key or urlparse(url).path or url
-    name = unquote(source.rstrip("/").rsplit("/", 1)[-1])
-    return name or f"attachment-{index + 1}.bin"
-
-
-def _media_mime_type(entry: dict[str, Any], name: str, url: str) -> str:
-    for field in ("mime_type", "mimeType", "content_type", "contentType"):
-        value = entry.get(field)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    return mimetypes.guess_type(name or url)[0] or "application/octet-stream"
-
-
-def _media_attachment_type(media_type: str, mime_type: str) -> str:
-    if media_type == "image" or mime_type.startswith("image/"):
-        return "image"
-    if media_type == "audio" or mime_type.startswith("audio/"):
-        return "audio"
-    if media_type == "video" or mime_type.startswith("video/"):
-        return "video"
-    return "document"
-
-
-def _media_file_info_from_entry(entry: dict[str, Any], index: int) -> dict[str, Any] | None:
-    """Normalize tool media entries into FeishuResponseCollector file metadata."""
-    media_type = str(entry.get("type") or "").lower()
-    if media_type not in {"image", "file", "audio", "video", ""}:
-        return None
-
-    url = entry.get("url")
-    url = url.strip() if isinstance(url, str) else ""
-    key = entry.get("key")
-    key = key.strip() if isinstance(key, str) else None
-    if not key and url:
-        key = _storage_key_from_upload_url(url)
-    if not key:
-        return None
-
-    name = _media_name_from_entry(entry, key, url, index)
-    mime_type = _media_mime_type(entry, name, url)
-    return {
-        "key": key,
-        "name": name,
-        "type": _media_attachment_type(media_type, mime_type),
-        "mime_type": mime_type,
-        "url": url,
-    }
-
-
-def _extract_tool_media_files(result: Any) -> list[dict[str, Any]]:
-    """Extract app-storage-backed image/file outputs from tool results."""
-    if not isinstance(result, dict):
-        return []
-
-    candidates: list[dict[str, Any]] = []
-
-    images = result.get("images")
-    if isinstance(images, list):
-        candidates.extend(item for item in images if isinstance(item, dict))
-
-    blocks = result.get("blocks")
-    if isinstance(blocks, list):
-        candidates.extend(
-            item
-            for item in blocks
-            if isinstance(item, dict) and item.get("type") in {"image", "file", "audio", "video"}
-        )
-
-    file_infos: list[dict[str, Any]] = []
-    seen_keys: set[str] = set()
-    for index, entry in enumerate(candidates):
-        file_info = _media_file_info_from_entry(entry, index)
-        if not file_info or file_info["key"] in seen_keys:
-            continue
-        seen_keys.add(file_info["key"])
-        file_infos.append(file_info)
-    return file_infos
-
-
-def _build_session_run_url(session_id: str, run_id: str | None = None) -> str:
-    path = f"/chat/{quote(session_id, safe='')}"
-    if run_id:
-        path = f"{path}?run_id={quote(run_id, safe='')}"
-
-    base_url = getattr(settings, "APP_BASE_URL", "").rstrip("/")
-    return f"{base_url}{path}" if base_url else path
+async def _download_storage_object_to_file(
+    backend: Any,
+    key: str,
+    file: Any,
+    *,
+    chunk_size: int = FEISHU_REVEAL_DOWNLOAD_CHUNK_SIZE,
+) -> int:
+    handler_helpers.FEISHU_REVEAL_LEGACY_DOWNLOAD_MAX_BYTES = (
+        FEISHU_REVEAL_LEGACY_DOWNLOAD_MAX_BYTES
+    )
+    handler_helpers.FEISHU_REVEAL_DOWNLOAD_MAX_BYTES = FEISHU_REVEAL_DOWNLOAD_MAX_BYTES
+    handler_helpers.run_blocking_io = run_blocking_io
+    return await handler_helpers._download_storage_object_to_file(
+        backend,
+        key,
+        file,
+        chunk_size=chunk_size,
+    )
 
 
 class FeishuResponseCollector:
@@ -225,9 +106,23 @@ class FeishuResponseCollector:
         self._stream_failed = False
         self._stream_finalized = False
         self._stream_lock = asyncio.Lock()
-        self._stream_update_queue: asyncio.Queue[str | None] = asyncio.Queue()
+        self._stream_update_queue: asyncio.Queue[object | None] = asyncio.Queue(maxsize=1)
         self._stream_update_task: asyncio.Task | None = None
         self._stream_last_pushed_content = ""
+
+    def _current_stream_content(self) -> str:
+        return "".join(self.text_parts)
+
+    def _queue_latest_stream_update(self) -> None:
+        while True:
+            try:
+                pending = self._stream_update_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            if pending is None:
+                self._stream_update_queue.put_nowait(None)
+                return
+        self._stream_update_queue.put_nowait(_STREAM_UPDATE_SIGNAL)
 
     def append_text(self, chunk: str) -> None:
         """追加文本内容"""
@@ -241,11 +136,12 @@ class FeishuResponseCollector:
 
         if self._stream_card_id:
             self._ensure_stream_update_worker()
-            self._stream_update_queue.put_nowait("".join(self.text_parts))
+            self._queue_latest_stream_update()
             return
 
         initialized = False
-        initial_content = self._first_paint_content("".join(self.text_parts))
+        content = self._current_stream_content()
+        initial_content = self._first_paint_content(content)
         async with self._stream_lock:
             if self._stream_failed or self._stream_finalized:
                 return
@@ -273,12 +169,11 @@ class FeishuResponseCollector:
                 initialized = True
 
         self._ensure_stream_update_worker()
-        content = "".join(self.text_parts)
         if initialized:
             if initial_content != content:
-                self._stream_update_queue.put_nowait(content)
+                self._queue_latest_stream_update()
         else:
-            self._stream_update_queue.put_nowait(content)
+            self._queue_latest_stream_update()
 
     def _first_paint_content(self, content: str) -> str:
         """Return a tiny first update so Feishu starts typewriter rendering quickly."""
@@ -307,21 +202,21 @@ class FeishuResponseCollector:
     async def _stream_update_worker(self) -> None:
         first_update = True
         while True:
-            content = await self._stream_update_queue.get()
-            if content is None:
+            marker = await self._stream_update_queue.get()
+            if marker is None:
                 return
 
             if not first_update:
                 await asyncio.sleep(FEISHU_STREAM_UPDATE_DEBOUNCE_SECONDS)
                 while True:
                     try:
-                        next_content = self._stream_update_queue.get_nowait()
+                        next_marker = self._stream_update_queue.get_nowait()
                     except asyncio.QueueEmpty:
                         break
-                    if next_content is None:
+                    if next_marker is None:
                         return
-                    content = next_content
             first_update = False
+            content = self._current_stream_content()
 
             if content == self._stream_last_pushed_content:
                 continue
@@ -424,10 +319,22 @@ class FeishuResponseCollector:
             s3_key = uri.replace("send://", "")
             storage = await get_or_init_storage()
             backend = storage._get_backend()
-            image_bytes = await backend.download(s3_key)
-            if not image_bytes:
-                return None
-            return await client.upload_image(image_bytes)
+            image_name = os.path.basename(s3_key) or "image"
+            with NamedTemporaryFile(
+                prefix="lambchat-feishu-image-", suffix=f"-{image_name}"
+            ) as tmp:
+                size = await _download_storage_object_to_file(
+                    backend,
+                    s3_key,
+                    tmp,
+                    chunk_size=FEISHU_REVEAL_DOWNLOAD_CHUNK_SIZE,
+                )
+                if size <= 0:
+                    return None
+                if not hasattr(client, "upload_image_file"):
+                    logger.warning("[Feishu] Client does not support streaming image upload")
+                    return None
+                return await client.upload_image_file(tmp.name)
         except Exception as e:
             logger.debug(f"[Feishu] Failed to upload image from URI {uri}: {e}")
             return None
@@ -451,7 +358,8 @@ class FeishuResponseCollector:
             client = self._get_client()
             if not client:
                 return False
-            final_text = self._append_session_link_to_text("".join(self.text_parts).strip() or " ")
+            final_content = self._current_stream_content()
+            final_text = self._append_session_link_to_text(final_content.strip() or " ")
             self._stream_sequence += 1
             success = await client.finalize_stream_card(
                 self._stream_card_id,
@@ -530,12 +438,12 @@ class FeishuResponseCollector:
             elements.append({"tag": "div", "text": {"tag": "plain_text", "content": "(无内容)"}})
 
         card = {"config": {"wide_screen_mode": True}, "elements": elements}
-        return json.dumps(card, ensure_ascii=False)
+        return await run_blocking_io(json.dumps, card, ensure_ascii=False)
 
     async def upload_and_send_files(self) -> None:
         """上传文件并发送文件卡片
 
-        直接从 S3 storage 读取文件内容，然后上传到飞书。
+        直接从 S3 storage 流式读取文件到临时文件，然后上传到飞书。
         """
         from src.infra.storage.s3.service import get_or_init_storage
 
@@ -569,50 +477,61 @@ class FeishuResponseCollector:
                 logger.info(f"[Feishu] Reading file {file_name} from storage, key={file_key}")
 
                 backend = storage._get_backend()
-                file_data = await backend.download(file_key)
-                if not file_data:
-                    logger.warning(f"[Feishu] File not found or empty: {file_key}")
-                    continue
+                safe_suffix = os.path.basename(file_name) or "file"
+                with NamedTemporaryFile(prefix="lambchat-feishu-", suffix=f"-{safe_suffix}") as tmp:
+                    size = await _download_storage_object_to_file(
+                        backend,
+                        file_key,
+                        tmp,
+                        chunk_size=FEISHU_REVEAL_DOWNLOAD_CHUNK_SIZE,
+                    )
+                    if size <= 0:
+                        logger.warning(f"[Feishu] File not found or empty: {file_key}")
+                        continue
 
-                logger.info(f"[Feishu] Read file {file_name}, size: {len(file_data)} bytes")
+                    logger.info(f"[Feishu] Streamed file {file_name}, size: {size} bytes")
 
-                file_type = str(file_info.get("type") or "").lower()
-                mime_type = str(file_info.get("mime_type") or "").lower()
-                if file_type == "image" or mime_type.startswith("image/"):
-                    feishu_image_key = await client.upload_image(file_data)
-                    if feishu_image_key:
-                        sent = await client.send_image_by_key(
+                    file_type = str(file_info.get("type") or "").lower()
+                    mime_type = str(file_info.get("mime_type") or "").lower()
+                    if file_type == "image" or mime_type.startswith("image/"):
+                        if not hasattr(client, "upload_image_file"):
+                            logger.warning(
+                                "[Feishu] Client does not support streaming image upload"
+                            )
+                            continue
+                        feishu_image_key = await client.upload_image_file(tmp.name)
+                        if feishu_image_key:
+                            sent = await client.send_image_by_key(
+                                chat_id=self.chat_id,
+                                image_key=feishu_image_key,
+                                reply_to_id=self.reply_to_message_id,
+                            )
+                            if sent:
+                                self._sent_file_keys.add(file_key)
+                                logger.info(f"[Feishu] Sent image: {file_name}")
+                            else:
+                                logger.warning(
+                                    f"[Feishu] Failed to send image {file_name} to Feishu"
+                                )
+                        else:
+                            logger.warning(f"[Feishu] Failed to upload image {file_name} to Feishu")
+                        continue
+
+                    feishu_file_key = await client.upload_file(tmp.name, file_name)
+                    if feishu_file_key:
+                        sent = await client.send_file_by_key(
                             chat_id=self.chat_id,
-                            image_key=feishu_image_key,
+                            file_key=feishu_file_key,
+                            file_name=file_name,
                             reply_to_id=self.reply_to_message_id,
                         )
                         if sent:
                             self._sent_file_keys.add(file_key)
-                            logger.info(f"[Feishu] Sent image: {file_name}")
+                            logger.info(f"[Feishu] Sent file: {file_name}")
                         else:
-                            logger.warning(f"[Feishu] Failed to send image {file_name} to Feishu")
+                            logger.warning(f"[Feishu] Failed to send file {file_name} to Feishu")
                     else:
-                        logger.warning(f"[Feishu] Failed to upload image {file_name} to Feishu")
-                    continue
-
-                feishu_file_key = await client.upload_bytes(
-                    file_data=file_data,
-                    file_name=file_name,
-                )
-                if feishu_file_key:
-                    sent = await client.send_file_by_key(
-                        chat_id=self.chat_id,
-                        file_key=feishu_file_key,
-                        file_name=file_name,
-                        reply_to_id=self.reply_to_message_id,
-                    )
-                    if sent:
-                        self._sent_file_keys.add(file_key)
-                        logger.info(f"[Feishu] Sent file: {file_name}")
-                    else:
-                        logger.warning(f"[Feishu] Failed to send file {file_name} to Feishu")
-                else:
-                    logger.warning(f"[Feishu] Failed to upload file {file_name} to Feishu")
+                        logger.warning(f"[Feishu] Failed to upload file {file_name} to Feishu")
             except Exception as e:
                 logger.error(f"[Feishu] Failed to upload file {file_info.get('name')}: {e}")
 
@@ -980,7 +899,7 @@ async def _process_events(
                     logger.info(f"[Feishu] reveal_file result type={type(result).__name__}")
                     if isinstance(result, str) and result:
                         try:
-                            file_info = json.loads(result)
+                            file_info = await run_blocking_io(json.loads, result)
                             if (
                                 isinstance(file_info, dict)
                                 and "key" in file_info

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import warnings
 
 import pytest
@@ -16,6 +17,48 @@ class _ModelStorage:
 
     async def get(self, model_id: str) -> ModelConfig | None:
         return self.model if self.model and self.model.id == model_id else None
+
+    async def get_by_value(self, value: str) -> ModelConfig | None:
+        return self.model if self.model and self.model.value == value else None
+
+
+@pytest.mark.asyncio
+async def test_clear_cache_by_model_tracks_and_drains_async_client_close() -> None:
+    close_started = False
+    close_finished = False
+
+    class _FakeAsyncClient:
+        async def aclose(self) -> None:
+            nonlocal close_started, close_finished
+            close_started = True
+            await asyncio.sleep(0.01)
+            close_finished = True
+
+    class _FakeModel:
+        async_client = _FakeAsyncClient()
+
+    LLMClient._model_cache.clear()
+    LLMClient._model_cache[
+        (
+            "openai",
+            "gpt-test",
+            0.7,
+            None,
+            "sk-test",
+            None,
+            None,
+            None,
+            3,
+        )
+    ] = _FakeModel()  # type: ignore[assignment]
+
+    assert LLMClient.clear_cache_by_model() == 1
+    assert close_started is False
+
+    await LLMClient.drain_close_tasks(timeout=1)
+
+    assert close_started is True
+    assert close_finished is True
 
 
 @pytest.mark.asyncio
@@ -92,6 +135,88 @@ async def test_get_model_uses_cached_key_for_sanitized_google_model_config(
     LLMClient.clear_cache_by_model()
 
 
+@pytest.mark.asyncio
+async def test_get_model_rehydrates_key_for_sanitized_anthropic_model_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clear_api_key_cache()
+    LLMClient.clear_cache_by_model()
+
+    stored_model = ModelConfig(
+        id="anthropic-model",
+        value="anthropic/claude-3-5-sonnet-latest",
+        provider="anthropic",
+        label="Claude",
+        api_key="anthropic-secret",
+        api_base="https://example.test",
+        enabled=True,
+    )
+    storage = _ModelStorage(stored_model)
+    captured: dict = {}
+
+    class FakeChatAnthropic:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr(
+        "src.infra.agent.model_storage.get_model_storage",
+        lambda: storage,
+    )
+    monkeypatch.setattr(
+        "src.infra.llm.client.ChatAnthropic",
+        FakeChatAnthropic,
+    )
+
+    await LLMClient.get_model(
+        model_config={
+            "id": "anthropic-model",
+            "value": "anthropic/claude-3-5-sonnet-latest",
+            "provider": "anthropic",
+            "label": "Claude",
+            "api_key": None,
+            "api_base": "https://example.test",
+            "enabled": True,
+        },
+    )
+
+    assert captured["api_key"].get_secret_value() == "anthropic-secret"
+    assert captured["base_url"] == "https://example.test"
+
+    clear_api_key_cache()
+    LLMClient.clear_cache_by_model()
+
+
+@pytest.mark.asyncio
+async def test_get_model_rejects_sanitized_anthropic_config_when_key_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clear_api_key_cache()
+    LLMClient.clear_cache_by_model()
+    storage = _ModelStorage(None)
+
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+    monkeypatch.setattr(
+        "src.infra.agent.model_storage.get_model_storage",
+        lambda: storage,
+    )
+
+    with pytest.raises(AuthorizationError, match="model_api_key_missing"):
+        await LLMClient.get_model(
+            model_config={
+                "id": "anthropic-model",
+                "value": "anthropic/claude-3-5-sonnet-latest",
+                "provider": "anthropic",
+                "label": "Claude",
+                "api_key": None,
+                "enabled": True,
+            },
+        )
+
+    clear_api_key_cache()
+    LLMClient.clear_cache_by_model()
+
+
 def test_create_model_does_not_forward_app_only_profile_keys() -> None:
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
@@ -110,3 +235,46 @@ def test_create_model_does_not_forward_app_only_profile_keys() -> None:
         for warning in caught
         if "Unrecognized keys in model profile" in str(warning.message)
     ]
+
+
+@pytest.mark.asyncio
+async def test_get_model_preserves_inferred_provider_for_known_unprefixed_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clear_api_key_cache()
+    LLMClient.clear_cache_by_model()
+
+    captured: dict = {}
+
+    class FakeChatOpenAI:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            self.profile = kwargs.get("profile")
+
+    monkeypatch.setattr(
+        "src.infra.llm.client.ChatOpenAI",
+        FakeChatOpenAI,
+    )
+
+    async def fake_get_default_model() -> str:
+        return "openai/gpt-4.1"
+
+    async def fake_get_available_models() -> list[dict]:
+        return []
+
+    monkeypatch.setattr(
+        "src.infra.llm.models_service.get_default_model",
+        fake_get_default_model,
+    )
+    monkeypatch.setattr(
+        "src.infra.llm.models_service.get_available_models",
+        fake_get_available_models,
+    )
+
+    await LLMClient.get_model(model="deepseek-v4-flash", api_key="sk-test")
+
+    assert captured["model"] == "deepseek-v4-flash"
+    assert "model_kwargs" not in captured
+
+    clear_api_key_cache()
+    LLMClient.clear_cache_by_model()

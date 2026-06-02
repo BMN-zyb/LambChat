@@ -1,5 +1,6 @@
 import pytest
 
+from src.infra.memory.client.native import backend as backend_module
 from src.infra.memory.client.native.backend import NativeMemoryBackend
 
 
@@ -49,3 +50,27 @@ async def test_delete_removes_store_payload_for_long_memory():
         "value": None,
     }
     assert seen["invalidated"] is True
+
+
+@pytest.mark.asyncio
+async def test_maybe_embed_offloads_sync_embedding_function(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[object] = []
+    backend = NativeMemoryBackend()
+
+    def sync_embedding(text: str) -> list[float]:
+        assert text == "hello"
+        return [1.0, 2.0]
+
+    async def fake_run_blocking_io(func, *args, **kwargs):
+        calls.append(func)
+        return func(*args, **kwargs)
+
+    backend._embedding_fn = sync_embedding
+    monkeypatch.setattr(backend_module, "run_blocking_io", fake_run_blocking_io)
+
+    result = await backend._maybe_embed("hello")
+
+    assert result == [1.0, 2.0]
+    assert calls == [sync_embedding]

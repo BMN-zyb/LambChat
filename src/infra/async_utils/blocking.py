@@ -15,12 +15,34 @@ from typing import Any, Callable, TypeVar
 
 T = TypeVar("T")
 
-_DEFAULT_MAX_WORKERS = max(4, min(32, (os.cpu_count() or 1) * 4))
+_DEFAULT_MAX_WORKERS = 8
+_DEFAULT_MAX_PENDING = 16
+_MAX_PENDING_BLOCKING_IO = max(
+    0,
+    int(os.getenv("BLOCKING_IO_MAX_PENDING", _DEFAULT_MAX_PENDING)),
+)
 _BLOCKING_IO_EXECUTOR = ThreadPoolExecutor(
     max_workers=int(os.getenv("BLOCKING_IO_MAX_WORKERS", _DEFAULT_MAX_WORKERS)),
     thread_name_prefix="blocking-io",
 )
-_POLL_INTERVAL_SECONDS = 0.01
+_LOOP_LIMITERS: dict[asyncio.AbstractEventLoop, asyncio.Semaphore] = {}
+
+
+def _get_submission_limiter(loop: asyncio.AbstractEventLoop) -> asyncio.Semaphore:
+    limiter = _LOOP_LIMITERS.get(loop)
+    if limiter is not None:
+        return limiter
+
+    max_workers = max(1, int(getattr(_BLOCKING_IO_EXECUTOR, "_max_workers", _DEFAULT_MAX_WORKERS)))
+    limiter = asyncio.Semaphore(max_workers + _MAX_PENDING_BLOCKING_IO)
+    _LOOP_LIMITERS[loop] = limiter
+    return limiter
+
+
+def _release_limiter(loop: asyncio.AbstractEventLoop, limiter: asyncio.Semaphore) -> None:
+    if loop.is_closed():
+        return
+    loop.call_soon_threadsafe(limiter.release)
 
 
 async def run_blocking_io(
@@ -30,22 +52,33 @@ async def run_blocking_io(
     **kwargs: Any,
 ) -> T:
     """Run a synchronous IO callable without blocking the current event loop."""
-    call = functools.partial(func, *args, **kwargs)
-    future = _BLOCKING_IO_EXECUTOR.submit(call)
-
-    async def _poll_result() -> T:
-        while True:
-            if future.done():
-                return future.result()
-            await asyncio.sleep(_POLL_INTERVAL_SECONDS)
-
+    loop = asyncio.get_running_loop()
+    limiter = _get_submission_limiter(loop)
+    start_time = loop.time()
     if timeout is not None:
-        try:
-            return await asyncio.wait_for(_poll_result(), timeout=timeout)
-        except asyncio.TimeoutError:
-            future.cancel()
-            raise
-    return await _poll_result()
+        await asyncio.wait_for(limiter.acquire(), timeout=timeout)
+    else:
+        await limiter.acquire()
+
+    call = functools.partial(func, *args, **kwargs)
+    try:
+        future = _BLOCKING_IO_EXECUTOR.submit(call)
+    except Exception:
+        limiter.release()
+        raise
+    future.add_done_callback(lambda _future: _release_limiter(loop, limiter))
+    wrapped = asyncio.wrap_future(future)
+
+    try:
+        if timeout is not None:
+            remaining_timeout = timeout - (loop.time() - start_time)
+            if remaining_timeout <= 0:
+                raise asyncio.TimeoutError
+            return await asyncio.wait_for(wrapped, timeout=remaining_timeout)
+        return await wrapped
+    except asyncio.TimeoutError:
+        future.cancel()
+        raise
 
 
 def shutdown_blocking_io_executor() -> None:

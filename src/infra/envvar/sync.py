@@ -27,4 +27,4 @@ async def sync_envvar_change(user_id: str, *, backend: Any | None = None) -> Non
             backend = None
 
     if backend is not None:
-        await ensure_sandbox_mcp(backend, user_id)
+        await ensure_sandbox_mcp(backend, user_id, force_rebuild=True)

@@ -12,6 +12,7 @@ import json
 import uuid
 from typing import Any, Dict, Optional
 
+from src.infra.async_utils import run_blocking_io
 from src.infra.logging import get_logger
 from src.infra.pubsub_hub import get_pubsub_hub
 from src.infra.storage.redis import get_redis_client
@@ -51,9 +52,10 @@ async def publish_memory_invalidation(user_id: str) -> None:
     """
     try:
         redis_client = get_redis_client()
+        payload = await run_blocking_io(json.dumps, {"user_id": user_id})
         await redis_client.publish(
             MEMORY_INVALIDATION_CHANNEL,
-            json.dumps({"user_id": user_id}),
+            payload,
         )
     except Exception as e:
         logger.debug("[Memory] Failed to publish invalidation for %s: %s", user_id, e)
@@ -212,7 +214,7 @@ class MemoryPubSub:
     async def _handle_message(self, message: Dict[str, Any]) -> None:
         """Invalidate local index cache for the user mentioned in the message."""
         try:
-            data = json.loads(message["data"])
+            data = await run_blocking_io(json.loads, message["data"])
             user_id = data.get("user_id")
             if not user_id:
                 return

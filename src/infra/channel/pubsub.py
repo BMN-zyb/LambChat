@@ -6,6 +6,7 @@ import json
 import uuid
 from typing import Any, Optional
 
+from src.infra.async_utils import run_blocking_io
 from src.infra.channel.registry import get_registry
 from src.infra.logging import get_logger
 from src.infra.pubsub_hub import get_pubsub_hub
@@ -53,7 +54,7 @@ class ChannelConfigPubSub:
 
     async def _handle_message(self, message: dict[str, Any]) -> None:
         try:
-            data = json.loads(message["data"])
+            data = await run_blocking_io(json.loads, message["data"])
             if data.get("instance_id") == self._instance_id:
                 return
 
@@ -109,14 +110,15 @@ async def publish_channel_config_changed(
     try:
         redis_client = get_redis_client()
         pubsub = get_channel_config_pubsub()
-        payload = json.dumps(
+        payload = await run_blocking_io(
+            json.dumps,
             {
                 "instance_id": pubsub.instance_id,
                 "user_id": user_id,
                 "channel_type": channel_type,
                 "channel_instance_id": channel_instance_id,
                 "action": action,
-            }
+            },
         )
         await redis_client.publish(CHANNEL_CONFIG_CHANNEL, payload)
     except Exception as e:

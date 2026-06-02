@@ -12,6 +12,7 @@ import json
 import time
 from typing import Any
 
+from src.infra.async_utils import run_blocking_io
 from src.infra.logging import get_logger
 
 logger = get_logger(__name__)
@@ -21,6 +22,7 @@ _sandbox_mcp_prompt_cache: dict[str, tuple[tuple[str, ...], int, float]] = {}
 
 # Cache TTL in seconds
 _CACHE_TTL = 1800  # 30 minutes
+_MAX_PROMPT_CACHE_ENTRIES = 500
 
 # Max tools to inject into system prompt (beyond this, LLM uses bash to discover more)
 # With descriptions + params, each tool uses ~60-120 tokens; 20 tools ≈ 1200-2400 tokens.
@@ -86,6 +88,24 @@ def _cleanup_stale_cache() -> None:
         del _sandbox_mcp_prompt_cache[uid]
     if stale:
         logger.debug(f"[SandboxMCP Prompt] Cleaned up {len(stale)} stale cache entries")
+    removed = _cleanup_excess_prompt_cache_entries()
+    if removed:
+        logger.debug(f"[SandboxMCP Prompt] Cleaned up {removed} excess cache entries")
+
+
+def _cleanup_excess_prompt_cache_entries() -> int:
+    max_entries = max(int(_MAX_PROMPT_CACHE_ENTRIES), 1)
+    if len(_sandbox_mcp_prompt_cache) <= max_entries:
+        return 0
+
+    to_remove = len(_sandbox_mcp_prompt_cache) - max_entries
+    oldest = sorted(
+        _sandbox_mcp_prompt_cache.items(),
+        key=lambda item: item[1][2],
+    )[:to_remove]
+    for user_id, _entry in oldest:
+        _sandbox_mcp_prompt_cache.pop(user_id, None)
+    return len(oldest)
 
 
 def invalidate_sandbox_mcp_prompt_cache(user_id: str) -> None:
@@ -340,7 +360,7 @@ async def _fetch_and_format(backend: Any) -> tuple[tuple[str, ...], int]:
             return (), 0
 
         try:
-            data = json.loads(result.output)
+            data = await run_blocking_io(json.loads, result.output)
             logger.debug(f"[SandboxMCP Prompt] mcporter list output: {data}")
         except json.JSONDecodeError:
             logger.warning("[SandboxMCP Prompt] mcporter list returned invalid JSON")

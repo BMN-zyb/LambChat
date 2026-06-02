@@ -5,6 +5,7 @@ LLM 客户端
 """
 
 import asyncio
+import os
 from collections import OrderedDict
 from functools import lru_cache
 from typing import Any, Optional
@@ -22,6 +23,7 @@ from src.kernel.exceptions import AuthorizationError
 from src.kernel.schemas.model import ModelConfig
 
 logger = get_logger(__name__)
+_close_tasks: set[asyncio.Task[None]] = set()
 
 # ── Provider 注册表 ──
 # 每个条目: provider_slug → (协议类型, 模型名前缀列表)
@@ -134,6 +136,51 @@ def _langchain_profile(profile: Optional[dict]) -> Optional[dict]:
     return {key: value for key, value in profile.items() if key in allowed_keys}
 
 
+async def _lookup_stored_api_key(
+    *,
+    model_id: Optional[str],
+    model_value: str,
+) -> Optional[str]:
+    """Resolve a per-model api_key from storage after sanitized cache misses."""
+    try:
+        from src.infra.agent.model_storage import get_model_storage
+        from src.infra.llm.models_service import set_cached_api_key
+
+        storage = get_model_storage()
+        stored_model = (
+            await storage.get(model_id) if model_id else await storage.get_by_value(model_value)
+        )
+        if stored_model and stored_model.api_key:
+            set_cached_api_key(stored_model.value, stored_model.api_key)
+            return stored_model.api_key
+    except Exception as e:
+        logger.debug("Failed to fetch api_key from DB for model %s: %s", model_value, e)
+    return None
+
+
+def _has_explicit_anthropic_auth_omission(kwargs: dict[str, Any]) -> bool:
+    """Return whether callers intentionally omitted Anthropic auth headers."""
+    default_headers = kwargs.get("default_headers")
+    if not isinstance(default_headers, dict):
+        return False
+    for header_name in ("X-Api-Key", "Authorization"):
+        if header_name not in default_headers:
+            continue
+        header_value = default_headers[header_name]
+        if header_value is None or header_value.__class__.__name__ == "Omit":
+            return True
+    return False
+
+
+def _has_env_provider_auth(protocol: str) -> bool:
+    """Return whether provider SDKs can resolve credentials from process env."""
+    if protocol == "anthropic":
+        return bool(os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"))
+    if protocol == "google":
+        return bool(os.environ.get("GOOGLE_API_KEY"))
+    return False
+
+
 def _safe_close_client(model_instance: BaseChatModel) -> None:
     """Safely close HTTP client with error logging."""
     try:
@@ -143,12 +190,14 @@ def _safe_close_client(model_instance: BaseChatModel) -> None:
         if _client and hasattr(_client, "aclose"):
 
             def _on_close_done(t: asyncio.Task) -> None:
+                _close_tasks.discard(t)
                 if not t.cancelled():
                     exc = t.exception()
                     if exc:
                         logger.debug(f"Failed to close LLM client connections: {exc}")
 
             task = asyncio.create_task(_client.aclose())
+            _close_tasks.add(task)
             task.add_done_callback(_on_close_done)
     except Exception as e:
         logger.debug(f"Failed to close LLM client connections: {e}")
@@ -327,29 +376,16 @@ class LLMClient:
 
                 set_cached_api_key(db_model.value, db_model.api_key)
             if not api_key:
-                from src.infra.llm.models_service import get_cached_api_key, set_cached_api_key
+                from src.infra.llm.models_service import get_cached_api_key
 
                 cached_key = get_cached_api_key(db_model.value)
                 if cached_key:
                     api_key = cached_key
                 else:
-                    try:
-                        from src.infra.agent.model_storage import get_model_storage
-
-                        storage = get_model_storage()
-                        stored_model = (
-                            await storage.get(db_model.id)
-                            if db_model.id
-                            else await storage.get_by_value(db_model.value)
-                        )
-                        if stored_model and stored_model.api_key:
-                            api_key = stored_model.api_key
-                            set_cached_api_key(db_model.value, stored_model.api_key)
-                    except Exception as e:
-                        logger.debug(
-                            f"Failed to fetch api_key from DB for sanitized model config "
-                            f"{db_model.value}: {e}"
-                        )
+                    api_key = await _lookup_stored_api_key(
+                        model_id=db_model.id,
+                        model_value=db_model.value,
+                    )
             if not api_base and db_model.api_base:
                 api_base = db_model.api_base
             if db_model.temperature is not None:
@@ -416,7 +452,7 @@ class LLMClient:
 
         # 当模型没有显式 provider 且没有 provider 前缀（无 '/'）且与默认模型不同时，
         # 使用默认模型的 provider，确保 API 格式一致性。
-        if not explicit_provider and "/" not in model:
+        if not explicit_provider and "/" not in model and provider == "openai":
             if resolved_default is None:
                 from src.infra.llm.models_service import get_default_model
 
@@ -456,17 +492,17 @@ class LLMClient:
                 if cached_key:
                     api_key = cached_key
                 else:
-                    # DB fallback (populates api_key cache for next time)
-                    try:
-                        from src.infra.agent.model_storage import get_model_storage
-                        from src.infra.llm.models_service import set_cached_api_key
+                    api_key = await _lookup_stored_api_key(
+                        model_id=model_id,
+                        model_value=model,
+                    )
 
-                        stored_model = await get_model_storage().get_by_value(model)
-                        if stored_model and stored_model.api_key:
-                            api_key = stored_model.api_key
-                            set_cached_api_key(model, stored_model.api_key)
-                    except Exception as e:
-                        logger.debug(f"Failed to fetch api_key from DB for model {model}: {e}")
+        protocol = _resolve_protocol(provider)
+        if not api_key and not _has_env_provider_auth(protocol):
+            if protocol == "anthropic" and not _has_explicit_anthropic_auth_omission(kwargs):
+                raise AuthorizationError("model_api_key_missing")
+            if protocol == "google":
+                raise AuthorizationError("model_api_key_missing")
 
         cache_key = _make_cache_key(
             provider,
@@ -543,6 +579,24 @@ class LLMClient:
                 _safe_close_client(evicted)
 
         return len(to_delete)
+
+    @staticmethod
+    async def drain_close_tasks(timeout: float = 10.0) -> None:
+        """Wait for deferred HTTP client close tasks during graceful shutdown."""
+        tasks = list(_close_tasks)
+        if not tasks:
+            return
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*tasks, return_exceptions=True),
+                timeout=max(0.0, float(timeout)),
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "LLM client close task drain timed out with %s task(s) still active",
+                len(_close_tasks),
+            )
+        _close_tasks.difference_update(tasks)
 
 
 @lru_cache

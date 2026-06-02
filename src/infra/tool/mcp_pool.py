@@ -12,6 +12,7 @@ from typing import Any, Optional, Set
 from langchain_core.tools import BaseTool
 from langchain_mcp_adapters.client import MultiServerMCPClient
 
+from src.infra.async_utils import run_blocking_io
 from src.infra.logging import get_logger
 from src.kernel.config import settings
 
@@ -82,11 +83,13 @@ class PooledConnection:
         self,
         server_name: str,
         server_config: dict[str, Any],
+        config_hash: str,
         client: MultiServerMCPClient,
         tools: list[BaseTool],
     ):
         self.server_name = server_name
         self.server_config = server_config
+        self.config_hash = config_hash
         self.client = client
         self.tools = tools
         self.created_at = time.time()
@@ -128,6 +131,7 @@ async def get_pooled_connection(
     """
     # 定期清理过期连接
     await _maybe_cleanup()
+    current_hash = await run_blocking_io(_compute_server_hash, server_config)
 
     async with _pool_lock:
         # 检查连接池
@@ -135,11 +139,7 @@ async def get_pooled_connection(
             pooled = _connection_pool[server_name]
 
             # 检查配置是否匹配
-            current_hash = _compute_server_hash(server_config)
-            if (
-                not pooled.is_expired()
-                and _compute_server_hash(pooled.server_config) == current_hash
-            ):
+            if not pooled.is_expired() and pooled.config_hash == current_hash:
                 pooled.touch()
                 logger.debug(
                     f"[MCP Pool] Reusing connection for server '{server_name}', "
@@ -167,34 +167,43 @@ async def add_pooled_connection(
         tools: 工具列表
     """
     to_close: list[MultiServerMCPClient] = []
+    reuse_existing = False
+    config_hash = await run_blocking_io(_compute_server_hash, server_config)
     async with _pool_lock:
         # 如果已存在且未过期，不覆盖
         if server_name in _connection_pool:
             pooled = _connection_pool[server_name]
             if not pooled.is_expired():
-                return
-            to_close.append(pooled.client)
+                reuse_existing = True
+                if pooled.client is not client:
+                    to_close.append(client)
+            else:
+                to_close.append(pooled.client)
 
-        _connection_pool[server_name] = PooledConnection(
-            server_name=server_name,
-            server_config=server_config,
-            client=client,
-            tools=tools,
-        )
-        logger.info(
-            f"[MCP Pool] Added connection for server '{server_name}', "
-            f"{len(tools)} tools, pool size: {len(_connection_pool)}"
-        )
+        if not reuse_existing:
+            _connection_pool[server_name] = PooledConnection(
+                server_name=server_name,
+                server_config=server_config,
+                config_hash=config_hash,
+                client=client,
+                tools=tools,
+            )
+            logger.info(
+                f"[MCP Pool] Added connection for server '{server_name}', "
+                f"{len(tools)} tools, pool size: {len(_connection_pool)}"
+            )
 
-        max_connections = _get_max_connections()
-        if len(_connection_pool) > max_connections:
-            sorted_entries = sorted(_connection_pool.items(), key=lambda x: x[1].last_access)
-            for oldest_name, oldest in sorted_entries[: len(_connection_pool) - max_connections]:
-                if oldest_name == server_name and len(_connection_pool) <= max_connections:
-                    continue
-                removed = _connection_pool.pop(oldest_name, None)
-                if removed:
-                    to_close.append(removed.client)
+            max_connections = _get_max_connections()
+            if len(_connection_pool) > max_connections:
+                sorted_entries = sorted(_connection_pool.items(), key=lambda x: x[1].last_access)
+                for oldest_name, oldest in sorted_entries[
+                    : len(_connection_pool) - max_connections
+                ]:
+                    if oldest_name == server_name and len(_connection_pool) <= max_connections:
+                        continue
+                    removed = _connection_pool.pop(oldest_name, None)
+                    if removed:
+                        to_close.append(removed.client)
 
     for stale_client in to_close:
         await _close_client(stale_client)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import uuid
 from typing import Any, Awaitable, Callable
 
 from src.agents.core import resolve_agent_name
@@ -352,9 +353,10 @@ class TaskRecoveryService:
 
         redis_client = get_redis_client()
         lock_key = f"{RECOVERY_LOCK_PREFIX}{session.id}:{source_run_id}"
+        lock_token = uuid.uuid4().hex
         acquired = await redis_client.set(
             lock_key,
-            utc_now_iso(),
+            lock_token,
             ex=RECOVERY_LOCK_TTL_SECONDS,
             nx=True,
         )
@@ -370,7 +372,7 @@ class TaskRecoveryService:
             session_metadata = getattr(session, "metadata", None) or {}
             current_run_id = session_metadata.get("current_run_id")
             if current_run_id and str(current_run_id) != str(source_run_id):
-                await self.release_recovery_lock(lock_key)
+                await self.release_recovery_lock(lock_key, lock_token)
                 return {
                     "success": False,
                     "run_id": None,
@@ -401,7 +403,7 @@ class TaskRecoveryService:
                 )
             return recovery_result
         except Exception as e:
-            await self.release_recovery_lock(lock_key)
+            await self.release_recovery_lock(lock_key, lock_token)
             await self._restore_recoverable_failure(
                 session.id,
                 source_run_id,
@@ -415,10 +417,17 @@ class TaskRecoveryService:
                 "message": f"恢复任务失败: {e}",
             }
 
-    async def release_recovery_lock(self, lock_key: str) -> None:
+    async def release_recovery_lock(self, lock_key: str, token: str) -> None:
         """Release a distributed recovery lock when immediate retry is safe."""
         try:
-            await get_redis_client().delete(lock_key)
+            lua_script = """
+            if redis.call("get", KEYS[1]) == ARGV[1] then
+                return redis.call("del", KEYS[1])
+            else
+                return 0
+            end
+            """
+            await get_redis_client().eval(lua_script, 1, lock_key, token)
         except Exception as e:
             logger.warning("Failed to release recovery lock %s: %s", lock_key, e)
 

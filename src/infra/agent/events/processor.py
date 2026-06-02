@@ -36,6 +36,7 @@ _CONTEXT_EVENT_TYPES = frozenset(
 )
 
 RUBRIC_GRADER = "rubric_grader"
+OUTPUT_TEXT_COPY_MAX_CHARS = 8_000
 
 
 class AgentEventProcessor(SubagentEventMixin, StreamEventMixin, ToolEventMixin):
@@ -59,6 +60,7 @@ class AgentEventProcessor(SubagentEventMixin, StreamEventMixin, ToolEventMixin):
         "total_cache_creation_tokens",
         "total_cache_read_tokens",
         "_token_usage_emitted",
+        "_output_buffer_chars",
         "_presenter_emit",
         "_base_url",
         "_chunk_buffer",
@@ -89,6 +91,7 @@ class AgentEventProcessor(SubagentEventMixin, StreamEventMixin, ToolEventMixin):
         self._base_url = base_url
         self.thinking_ids: dict[str | None, str | None] = {}
         self._output_buffer = StringIO()
+        self._output_buffer_chars = 0
         self.total_input_tokens = 0
         self.total_output_tokens = 0
         self.total_tokens = 0
@@ -155,6 +158,7 @@ class AgentEventProcessor(SubagentEventMixin, StreamEventMixin, ToolEventMixin):
         """Release memory held by this session while preserving token counters."""
         self._output_buffer.close()
         self._output_buffer = StringIO()
+        self._output_buffer_chars = 0
         self.checkpoint_to_agent.clear()
         self.thinking_ids.clear()
         self._agent_context_cache.clear()

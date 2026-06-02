@@ -7,13 +7,19 @@ Agent 节点共享工具函数
 from __future__ import annotations
 
 import base64
+from tempfile import SpooledTemporaryFile
+from urllib.parse import quote
 
 from langchain_core.messages import HumanMessage
 
 from src.infra.agent import AgentEventProcessor
+from src.infra.async_utils import run_blocking_io
 from src.infra.logging import get_logger
 
 logger = get_logger(__name__)
+IMAGE_DATA_URL_INLINE_MAX_BYTES = 2 * 1024 * 1024
+IMAGE_DATA_URL_SPOOL_MAX_MEMORY_BYTES = 256 * 1024
+IMAGE_DATA_URL_ENCODE_CHUNK_BYTES = 192 * 1024
 
 
 async def resolve_fallback_model(
@@ -103,18 +109,59 @@ def _is_image_attachment(attachment: dict) -> bool:
     return file_type == "image" or mime_type.startswith("image/")
 
 
-async def inline_image_attachments_as_data_urls(attachments: list[dict] | None) -> list[dict]:
-    """Return attachments with image bytes inlined as data URLs when storage keys exist."""
+def _attachment_url_from_key(key: object, base_url: str) -> str:
+    clean_base_url = base_url.rstrip("/")
+    quoted_key = quote(str(key).lstrip("/"), safe="/")
+    return f"{clean_base_url}/api/upload/file/{quoted_key}"
+
+
+def _base64_encode_file(file) -> str:
+    parts: list[str] = []
+    while True:
+        chunk = file.read(IMAGE_DATA_URL_ENCODE_CHUNK_BYTES)
+        if not chunk:
+            break
+        parts.append(base64.b64encode(chunk).decode("ascii"))
+    return "".join(parts)
+
+
+async def _download_image_as_data_url(
+    storage,
+    key: object,
+    mime_type: str,
+    *,
+    max_bytes: int,
+) -> str | None:
+    with SpooledTemporaryFile(
+        max_size=IMAGE_DATA_URL_SPOOL_MAX_MEMORY_BYTES,
+        mode="w+b",
+    ) as spooled:
+        downloaded_size = await storage.download_to_file(str(key), spooled)
+        if isinstance(downloaded_size, int) and downloaded_size > max_bytes:
+            return None
+        encoded = await run_blocking_io(_base64_encode_file, spooled)
+    return f"data:{mime_type};base64,{encoded}"
+
+
+async def inline_image_attachments_as_data_urls(
+    attachments: list[dict] | None,
+    *,
+    base_url: str = "",
+    max_inline_bytes: int = IMAGE_DATA_URL_INLINE_MAX_BYTES,
+) -> list[dict]:
+    """Return image attachments with URLs preferred over in-memory data URLs."""
     if not attachments:
         return []
 
-    from src.infra.storage.s3.service import get_or_init_storage
-
-    storage = await get_or_init_storage()
     inlined: list[dict] = []
+    storage = None
 
     for attachment in attachments:
         if not _is_image_attachment(attachment):
+            inlined.append(attachment)
+            continue
+
+        if attachment.get("url") or attachment.get("data_url"):
             inlined.append(attachment)
             continue
 
@@ -123,19 +170,44 @@ async def inline_image_attachments_as_data_urls(attachments: list[dict] | None) 
             inlined.append(attachment)
             continue
 
+        if base_url:
+            inlined.append(
+                {
+                    **attachment,
+                    "url": _attachment_url_from_key(key, base_url),
+                }
+            )
+            continue
+
+        size = attachment.get("size")
+        if isinstance(size, int) and size > max_inline_bytes:
+            inlined.append(attachment)
+            continue
+
         try:
-            raw = await storage.download_file(key)
+            if storage is None:
+                from src.infra.storage.s3.service import get_or_init_storage
+
+                storage = await get_or_init_storage()
+            mime_type = attachment.get("mime_type") or attachment.get("mimeType") or "image/jpeg"
+            data_url = await _download_image_as_data_url(
+                storage,
+                key,
+                mime_type,
+                max_bytes=max_inline_bytes,
+            )
+            if data_url is None:
+                inlined.append(attachment)
+                continue
         except Exception as e:
             logger.warning("Failed to inline image attachment %s: %s", key, e)
             inlined.append(attachment)
             continue
 
-        mime_type = attachment.get("mime_type") or attachment.get("mimeType") or "image/jpeg"
-        encoded = base64.b64encode(raw).decode("ascii")
         inlined.append(
             {
                 **attachment,
-                "data_url": f"data:{mime_type};base64,{encoded}",
+                "data_url": data_url,
             }
         )
 
@@ -209,11 +281,12 @@ def build_human_message(
     for attachment in attachments:
         url = attachment.get("url")
         data_url = attachment.get("data_url")
-        if supports_vision and _is_image_attachment(attachment) and data_url:
+        image_url = url or data_url
+        if supports_vision and _is_image_attachment(attachment) and image_url:
             multimodal_images.append(
                 {
                     "type": "image_url",
-                    "image_url": {"url": data_url},
+                    "image_url": {"url": image_url},
                 }
             )
         elif url:

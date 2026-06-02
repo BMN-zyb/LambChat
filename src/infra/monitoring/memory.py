@@ -198,13 +198,22 @@ class MemoryMonitor:
                                 _BLOCKING_SAMPLE_TIMEOUT_SECONDS,
                             )
                     self._last_alert_at = now
+                    alert_parts = [
+                        f"rss={_format_bytes_as_mb(sample['rss_bytes'])}",
+                        f"growth={_format_bytes_as_mb(self._growth_bytes())}",
+                    ]
+                    growth_summary = self._format_growth_summary(self._last_alert)
+                    if growth_summary is not None:
+                        alert_parts.append(f"top_growth={growth_summary}")
+                    allocation_summary = self._format_allocation_summary(self._last_alert)
+                    if allocation_summary is not None:
+                        alert_parts.append(f"top_allocations={allocation_summary}")
+                    object_summary = self._format_object_summary(self._last_alert)
+                    if object_summary is not None:
+                        alert_parts.append(f"top_objects={object_summary}")
                     logger.warning(
-                        "[MemoryMonitor] suspicious memory growth detected rss=%s growth=%s top_growth=%s top_allocations=%s top_objects=%s",
-                        _format_bytes_as_mb(sample["rss_bytes"]),
-                        _format_bytes_as_mb(self._growth_bytes()),
-                        self._format_growth_summary(self._last_alert),
-                        self._format_allocation_summary(self._last_alert),
-                        self._format_object_summary(self._last_alert),
+                        "[MemoryMonitor] suspicious memory growth detected %s",
+                        " ".join(alert_parts),
                     )
             distributed_snapshot = await self._build_distributed_snapshot_locked()
 
@@ -262,33 +271,33 @@ class MemoryMonitor:
 
         await self._publish_distributed_snapshot(distributed_snapshot)
 
-    def _format_growth_summary(self, diagnostics: dict[str, Any] | None) -> str:
+    def _format_growth_summary(self, diagnostics: dict[str, Any] | None) -> str | None:
         if not diagnostics:
-            return "none"
+            return None
         rows = diagnostics.get("top_growth") or []
         if not rows:
-            return "none"
+            return None
         return ", ".join(
             f"{row['location']} (+{_format_bytes_as_mb(int(row['size_diff_bytes']))})"
             for row in rows[:3]
         )
 
-    def _format_allocation_summary(self, diagnostics: dict[str, Any] | None) -> str:
+    def _format_allocation_summary(self, diagnostics: dict[str, Any] | None) -> str | None:
         if not diagnostics:
-            return "none"
+            return None
         rows = diagnostics.get("top_allocations") or []
         if not rows:
-            return "none"
+            return None
         return ", ".join(
             f"{row['location']} ({_format_bytes_as_mb(int(row['size_bytes']))})" for row in rows[:3]
         )
 
-    def _format_object_summary(self, diagnostics: dict[str, Any] | None) -> str:
+    def _format_object_summary(self, diagnostics: dict[str, Any] | None) -> str | None:
         if not diagnostics:
-            return "none"
+            return None
         rows = diagnostics.get("top_object_types") or []
         if not rows:
-            return "none"
+            return None
         return ", ".join(f"{row['type']}={int(row['count'])}" for row in rows[:3])
 
     def _build_growth_stats(self) -> list[dict[str, Any]]:
@@ -377,6 +386,12 @@ class MemoryMonitor:
             return {"available": False, "reason": "no_samples", "last_error": self._last_error}
 
         latest = self._history[-1]
+        try:
+            from src.infra.storage.checkpoint import get_checkpointer_diagnostics
+
+            checkpointer = get_checkpointer_diagnostics()
+        except Exception as exc:
+            checkpointer = {"available": False, "last_error": str(exc)}
         return {
             "available": True,
             "rss_bytes": latest["rss_bytes"],
@@ -392,6 +407,7 @@ class MemoryMonitor:
             "baseline_reset_at": self._baseline_reset_at,
             "last_sample_at": latest["timestamp"],
             "last_error": self._last_error,
+            "checkpointer": checkpointer,
         }
 
     def _build_disabled_current_snapshot_locked(

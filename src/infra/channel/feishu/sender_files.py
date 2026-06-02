@@ -3,6 +3,7 @@
 import json
 import mimetypes
 from collections import OrderedDict
+from tempfile import SpooledTemporaryFile
 from typing import Any
 
 from src.infra.async_utils import run_blocking_io
@@ -10,6 +11,14 @@ from src.infra.logging import get_logger
 from src.kernel.config import settings
 
 logger = get_logger(__name__)
+_LEGACY_BYTES_DOWNLOAD_MAX_BYTES = 2 * 1024 * 1024
+_UPLOAD_BYTES_MAX_SIZE = 20 * 1024 * 1024
+
+
+def _get_upload_bytes_max_size() -> int:
+    return max(
+        int(getattr(settings, "FEISHU_UPLOAD_BYTES_MAX_SIZE", _UPLOAD_BYTES_MAX_SIZE) or 0), 1
+    )
 
 
 class FeishuFileSenderMixin:
@@ -115,8 +124,50 @@ class FeishuFileSenderMixin:
         """Upload file bytes asynchronously and return file_key."""
         if not self._client:
             return None
+        max_size = _get_upload_bytes_max_size()
+        if len(file_data) > max_size:
+            logger.warning(
+                "[Feishu] Refusing bytes upload above limit: name=%s size=%s max=%s",
+                file_name,
+                len(file_data),
+                max_size,
+            )
+            return None
 
         return await run_blocking_io(self._upload_bytes_sync, file_data, file_name)
+
+    def _upload_image_file_sync(self, file_path: str) -> str | None:
+        """Upload image file path to Feishu media library, return image_key."""
+        from lark_oapi.api.im.v1 import CreateImageRequest, CreateImageRequestBody
+
+        try:
+            with open(file_path, "rb") as image_file:
+                request = (
+                    CreateImageRequest.builder()
+                    .request_body(
+                        CreateImageRequestBody.builder()
+                        .image_type("message")
+                        .image(image_file)
+                        .build()
+                    )
+                    .build()
+                )
+                response = self._client.im.v1.image.create(request)
+            if response.success():
+                return response.data.image_key
+            logger.warning(
+                f"Failed to upload image file to Feishu: code={response.code}, msg={response.msg}"
+            )
+        except Exception as e:
+            logger.error(f"Error uploading image file to Feishu: {e}")
+        return None
+
+    async def upload_image_file(self, file_path: str) -> str | None:
+        """Upload image from a local file asynchronously and return image_key."""
+        if not self._client:
+            return None
+
+        return await run_blocking_io(self._upload_image_file_sync, file_path)
 
     def _download_image_sync(self, image_key: str, message_id: str) -> bytes | None:
         """Download image from Feishu via GetMessageResourceRequest (sync, runs in executor)."""
@@ -126,6 +177,47 @@ class FeishuFileSenderMixin:
         self, file_key: str, message_id: str, resource_type: str
     ) -> bytes | None:
         """Download a Feishu message resource via GetMessageResourceRequest."""
+        try:
+            with SpooledTemporaryFile(max_size=2 * 1024 * 1024, mode="w+b") as spooled:
+                size = self._download_resource_to_file_sync(
+                    file_key,
+                    message_id,
+                    resource_type,
+                    spooled,
+                    max_bytes=_LEGACY_BYTES_DOWNLOAD_MAX_BYTES,
+                )
+                if size <= 0:
+                    return None
+                if size > _LEGACY_BYTES_DOWNLOAD_MAX_BYTES:
+                    logger.warning(
+                        "Feishu legacy bytes download refused: key=%s type=%s size=%s max=%s",
+                        file_key,
+                        resource_type,
+                        size,
+                        _LEGACY_BYTES_DOWNLOAD_MAX_BYTES,
+                    )
+                    return None
+                spooled.seek(0)
+                return spooled.read()
+        except Exception as e:
+            logger.error(
+                "Error downloading Feishu resource: key=%s type=%s error=%s",
+                file_key,
+                resource_type,
+                e,
+            )
+        return None
+
+    def _download_resource_to_file_sync(
+        self,
+        file_key: str,
+        message_id: str,
+        resource_type: str,
+        file: Any,
+        *,
+        max_bytes: int | None = None,
+    ) -> int:
+        """Download a Feishu message resource into a file-like object."""
         from lark_oapi.api.im.v1 import GetMessageResourceRequest
 
         try:
@@ -137,18 +229,38 @@ class FeishuFileSenderMixin:
                 .build()
             )
             response = self._client.im.v1.message_resource.get(request)
-            if response.success():
-                return response.file.read()
-            logger.warning(
-                "Failed to download Feishu resource: key=%s type=%s code=%s msg=%s",
-                file_key,
-                resource_type,
-                response.code,
-                response.msg,
-            )
+            if not response.success():
+                logger.warning(
+                    "Failed to download Feishu resource: key=%s type=%s code=%s msg=%s",
+                    file_key,
+                    resource_type,
+                    response.code,
+                    response.msg,
+                )
+                return 0
+
+            total_size = 0
+            while True:
+                chunk = response.file.read(1024 * 1024)
+                if not chunk:
+                    break
+                next_size = total_size + len(chunk)
+                if max_bytes is not None and next_size > max_bytes:
+                    logger.warning(
+                        "Feishu resource download exceeded limit: key=%s type=%s size=%s max=%s",
+                        file_key,
+                        resource_type,
+                        next_size,
+                        max_bytes,
+                    )
+                    return next_size
+                file.write(chunk)
+                total_size = next_size
+            file.seek(0)
+            return total_size
         except Exception as e:
-            logger.error(f"Error downloading Feishu resource: {e}")
-        return None
+            logger.error(f"Error streaming Feishu resource: {e}")
+            return 0
 
     async def _download_and_store_image(self, image_key: str, message_id: str) -> dict | None:
         """Download image from Feishu, upload to S3, return attachment info dict."""
@@ -172,12 +284,6 @@ class FeishuFileSenderMixin:
         content_type: str | None = None,
     ) -> dict | None:
         """Download a Feishu resource, upload it to app storage, and return attachment info."""
-        data = await run_blocking_io(
-            self._download_resource_sync, file_key, message_id, resource_type
-        )
-        if not data:
-            return None
-
         guessed_content_type = content_type or mimetypes.guess_type(file_name)[0]
         if not guessed_content_type:
             guessed_content_type = "application/octet-stream"
@@ -186,12 +292,35 @@ class FeishuFileSenderMixin:
             from src.infra.storage.s3.service import get_or_init_storage
 
             storage = await get_or_init_storage()
-            result = await storage.upload_bytes(
-                data=data,
-                folder=f"feishu_{attachment_type}",
-                filename=file_name,
-                content_type=guessed_content_type,
-            )
+            with SpooledTemporaryFile(max_size=2 * 1024 * 1024, mode="w+b") as spooled:
+                max_size = _get_upload_bytes_max_size()
+                size = await run_blocking_io(
+                    self._download_resource_to_file_sync,
+                    file_key,
+                    message_id,
+                    resource_type,
+                    spooled,
+                    max_bytes=max_size,
+                )
+                if size <= 0:
+                    return None
+                if size > max_size:
+                    logger.warning(
+                        "[Feishu] Refusing resource storage above limit: key=%s type=%s "
+                        "size=%s max=%s",
+                        file_key,
+                        resource_type,
+                        size,
+                        max_size,
+                    )
+                    return None
+                result = await storage.upload_file(
+                    file=spooled,
+                    folder=f"feishu_{attachment_type}",
+                    filename=file_name,
+                    content_type=guessed_content_type,
+                    skip_size_limit=True,
+                )
             url = result.url or storage.get_file_url(result.key)
             if not url:
                 base_url = getattr(settings, "APP_BASE_URL", "").rstrip("/")
@@ -205,7 +334,7 @@ class FeishuFileSenderMixin:
                 "name": file_name,
                 "type": attachment_type,
                 "mime_type": guessed_content_type,
-                "size": len(data),
+                "size": size,
                 "url": url,
             }
         except Exception as e:
@@ -242,6 +371,14 @@ class FeishuFileSenderMixin:
     async def upload_image(self, image_data: bytes) -> str | None:
         """Upload image to Feishu media library asynchronously, return image_key."""
         if not self._client:
+            return None
+        max_size = _get_upload_bytes_max_size()
+        if len(image_data) > max_size:
+            logger.warning(
+                "[Feishu] Refusing image upload above limit: size=%s max=%s",
+                len(image_data),
+                max_size,
+            )
             return None
 
         return await run_blocking_io(self._upload_image_sync, image_data)

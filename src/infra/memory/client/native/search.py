@@ -19,6 +19,55 @@ from src.infra.memory.client.native.models import (
 from src.infra.utils.datetime import ensure_utc, utc_now
 from src.kernel.config import settings
 
+NATIVE_MEMORY_RECALL_MAX_RESULTS = 20
+NATIVE_MEMORY_RECALL_QUERY_MAX_CHARS = 2_000
+
+
+def _clip_recall_query(query: str) -> str:
+    max_chars = max(
+        int(
+            getattr(
+                settings,
+                "NATIVE_MEMORY_RECALL_QUERY_MAX_CHARS",
+                NATIVE_MEMORY_RECALL_QUERY_MAX_CHARS,
+            )
+            or 0
+        ),
+        1,
+    )
+    normalized = str(query or "").strip()
+    if len(normalized) <= max_chars:
+        return normalized
+    return normalized[:max_chars].rstrip()
+
+
+async def _hydrate_memories_limited(
+    backend, memories: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    if not memories:
+        return []
+
+    results: list[dict[str, Any] | None] = [None] * len(memories)
+    next_index = 0
+    lock = asyncio.Lock()
+    worker_count = min(
+        max(1, int(getattr(settings, "NATIVE_MEMORY_HYDRATE_CONCURRENCY", 4) or 1)),
+        len(memories),
+    )
+
+    async def _worker() -> None:
+        nonlocal next_index
+        while True:
+            async with lock:
+                if next_index >= len(memories):
+                    return
+                index = next_index
+                next_index += 1
+            results[index] = await hydrate_formatted_memory(backend, memories[index])
+
+    await asyncio.gather(*(_worker() for _ in range(worker_count)))
+    return [memory for memory in results if memory is not None]
+
 
 def build_keyword_clauses(query: str) -> list[dict[str, Any]]:
     normalized = query.strip()
@@ -404,6 +453,8 @@ async def recall_memories(
     touch_access: bool = True,
     enable_rerank: bool = True,
 ) -> dict[str, Any]:
+    max_results = max(1, min(int(max_results or 1), NATIVE_MEMORY_RECALL_MAX_RESULTS))
+    query = _clip_recall_query(query)
     text_coro = text_search(
         backend._collection, backend._logger, user_id, query, max_results * 2, memory_types
     )
@@ -430,14 +481,10 @@ async def recall_memories(
 
     if memories:
         memories = memories[:max_results]
-        memories = list(
-            await asyncio.gather(*(hydrate_formatted_memory(backend, m) for m in memories))
-        )
-
-        # Filter out low-scoring memories
         min_score = getattr(settings, "NATIVE_MEMORY_RECALL_MIN_SCORE", 0.3)
         if min_score > 0:
             memories = [m for m in memories if m.get("score", 1.0) >= min_score]
+        memories = await _hydrate_memories_limited(backend, memories)
 
         if touch_access:
             await backend._update_access_stats([m["memory_id"] for m in memories], user_id)

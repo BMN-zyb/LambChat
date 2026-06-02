@@ -67,6 +67,29 @@ class _FakeDaytonaSandbox:
         return "/workspace"
 
 
+class _FakeDaytonaFS:
+    def __init__(self) -> None:
+        self.download_calls: list[list] = []
+        self.upload_calls: list[list] = []
+
+    def download_files(self, requests):
+        self.download_calls.append(list(requests))
+        return [SimpleNamespace(source=requests[0].source, result=b"x" * 1024)]
+
+    def upload_files(self, requests):
+        self.upload_calls.append(list(requests))
+
+
+class _FakeDaytonaSandboxWithFS:
+    def __init__(self) -> None:
+        self.id = "daytona-test"
+        self.fs = _FakeDaytonaFS()
+        self.process = _FakeDaytonaProcess(SimpleNamespace(result="9", exit_code=0))
+
+    def get_work_dir(self) -> str:
+        return "/workspace"
+
+
 class _FakeE2BCommands:
     def __init__(self, result: SimpleNamespace) -> None:
         self.result = result
@@ -81,6 +104,31 @@ class _FakeE2BSandbox:
     def __init__(self, result: SimpleNamespace) -> None:
         self.sandbox_id = "e2b-test"
         self.commands = _FakeE2BCommands(result)
+
+
+class _FakeE2BFiles:
+    def __init__(self) -> None:
+        self.list_calls: list[str] = []
+        self.read_calls: list[tuple[str, str]] = []
+        self.write_calls: list[tuple[str, bytes | str]] = []
+
+    def list(self, path: str):
+        self.list_calls.append(path)
+        return []
+
+    def read(self, path: str, format: str):
+        self.read_calls.append((path, format))
+        return b"x"
+
+    def write(self, path: str, data: bytes | str):
+        self.write_calls.append((path, data))
+
+
+class _FakeE2BSandboxWithFiles:
+    def __init__(self) -> None:
+        self.sandbox_id = "e2b-test"
+        self.files = _FakeE2BFiles()
+        self.commands = _FakeE2BCommands(SimpleNamespace(stdout="", stderr="", exit_code=0))
 
 
 def test_sandbox_grep_timeout_setting_defaults_to_30_seconds() -> None:
@@ -148,6 +196,60 @@ def test_daytona_backend_grep_uses_configured_timeout(monkeypatch: pytest.Monkey
     assert sandbox.process.calls[0][1]["timeout"] == 30
 
 
+def test_daytona_download_files_skips_large_file_before_sdk_download(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(daytona_module, "SANDBOX_DOWNLOAD_MAX_BYTES", 8)
+    sandbox = _FakeDaytonaSandboxWithFS()
+    backend = DaytonaBackend(sandbox=sandbox, timeout=180)
+
+    responses = backend.download_files(["/workspace/large.bin"])
+
+    assert responses[0].content is None
+    assert sandbox.fs.download_calls == []
+    assert any("stat -c %s" in call[0] for call in sandbox.process.calls)
+
+
+def test_daytona_download_files_rejects_too_many_paths_before_preflight() -> None:
+    sandbox = _FakeDaytonaSandboxWithFS()
+    backend = DaytonaBackend(sandbox=sandbox, timeout=180)
+
+    responses = backend.download_files([f"/workspace/file-{index}.txt" for index in range(101)])
+
+    assert len(responses) == 101
+    assert {response.error for response in responses} == {"too_many_files"}
+    assert sandbox.fs.download_calls == []
+    assert sandbox.process.calls == []
+
+
+def test_daytona_upload_files_rejects_too_many_files_before_sdk_upload() -> None:
+    sandbox = _FakeDaytonaSandboxWithFS()
+    backend = DaytonaBackend(sandbox=sandbox, timeout=180)
+
+    responses = backend.upload_files(
+        [(f"/workspace/file-{index}.txt", b"x") for index in range(101)]
+    )
+
+    assert len(responses) == 101
+    assert {response.error for response in responses} == {"too_many_files"}
+    assert sandbox.fs.upload_calls == []
+    assert sandbox.process.calls == []
+
+
+def test_daytona_upload_files_rejects_large_file_before_sdk_upload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(daytona_module, "SANDBOX_UPLOAD_MAX_BYTES", 8, raising=False)
+    sandbox = _FakeDaytonaSandboxWithFS()
+    backend = DaytonaBackend(sandbox=sandbox, timeout=180)
+
+    responses = backend.upload_files([("/workspace/large.bin", b"x" * 9)])
+
+    assert responses[0].error == "file_too_large"
+    assert sandbox.fs.upload_calls == []
+    assert sandbox.process.calls == []
+
+
 @pytest.mark.asyncio
 async def test_daytona_backend_async_grep_returns_timeout_error(
     monkeypatch: pytest.MonkeyPatch,
@@ -177,6 +279,44 @@ def test_e2b_backend_grep_uses_configured_timeout(monkeypatch: pytest.MonkeyPatc
 
     assert matches == [{"path": "/tmp/app.py", "line": 3, "text": "needle"}]
     assert sandbox.commands.calls[0]["timeout"] == 30
+
+
+def test_e2b_download_files_rejects_too_many_paths_before_preflight() -> None:
+    sandbox = _FakeE2BSandboxWithFiles()
+    backend = E2BBackend(sandbox=sandbox, timeout=180)
+
+    responses = backend.download_files([f"/home/user/file-{index}.txt" for index in range(101)])
+
+    assert len(responses) == 101
+    assert {response.error for response in responses} == {"too_many_files"}
+    assert sandbox.files.list_calls == []
+    assert sandbox.files.read_calls == []
+
+
+def test_e2b_upload_files_rejects_too_many_files_before_writing() -> None:
+    sandbox = _FakeE2BSandboxWithFiles()
+    backend = E2BBackend(sandbox=sandbox, timeout=180)
+
+    responses = backend.upload_files(
+        [(f"/home/user/file-{index}.txt", b"x") for index in range(101)]
+    )
+
+    assert len(responses) == 101
+    assert {response.error for response in responses} == {"too_many_files"}
+    assert sandbox.files.write_calls == []
+
+
+def test_e2b_upload_files_rejects_large_file_before_writing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(e2b_module, "SANDBOX_UPLOAD_MAX_BYTES", 8, raising=False)
+    sandbox = _FakeE2BSandboxWithFiles()
+    backend = E2BBackend(sandbox=sandbox, timeout=180)
+
+    responses = backend.upload_files([("/home/user/large.bin", b"x" * 9)])
+
+    assert responses[0].error == "file_too_large"
+    assert sandbox.files.write_calls == []
 
 
 @pytest.mark.asyncio

@@ -543,7 +543,10 @@ async def team_router_node(state: Dict[str, Any], config: RunnableConfig) -> Dic
 
     # 构建传入的新消息（包含附件）
     if supports_vision:
-        attachments = await inline_image_attachments_as_data_urls(attachments)
+        attachments = await inline_image_attachments_as_data_urls(
+            attachments,
+            base_url=configurable.get("base_url", ""),
+        )
     new_message = build_human_message(user_input, attachments, supports_vision=supports_vision)
 
     # 创建事件处理器

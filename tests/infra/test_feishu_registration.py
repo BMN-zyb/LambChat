@@ -27,3 +27,33 @@ def test_cleanup_keeps_completed_registration_result_for_polling_window(
 
     with registration._sessions_lock:
         assert "session-1" in registration._sessions
+
+
+def test_get_registration_restores_session_from_shared_snapshot(monkeypatch) -> None:
+    snapshot = {
+        "session_id": "session-1",
+        "status": "qr_ready",
+        "qr_url": "https://example.test/qr",
+        "expire_in": 300,
+        "app_id": None,
+        "app_secret": None,
+        "error": None,
+        "created_at": 1000.0,
+        "updated_at": 1001.0,
+    }
+
+    class FakeSharedStore:
+        def get(self, session_id: str):
+            assert session_id == "session-1"
+            return snapshot
+
+    with registration._sessions_lock:
+        registration._sessions.clear()
+    monkeypatch.setattr(registration, "_get_shared_store", lambda: FakeSharedStore())
+
+    session = registration.get_registration("session-1")
+
+    assert session is not None
+    assert session.id == "session-1"
+    assert session.status == "qr_ready"
+    assert session.qr_url == "https://example.test/qr"

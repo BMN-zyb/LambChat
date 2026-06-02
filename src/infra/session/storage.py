@@ -8,6 +8,7 @@ from typing import Any, Dict, Optional
 
 from bson import ObjectId
 
+from src.infra.async_utils import run_blocking_io
 from src.infra.session.favorites import (
     is_session_favorite,
     normalize_session_metadata,
@@ -25,6 +26,9 @@ from src.infra.utils.datetime import utc_now
 from src.kernel.config import settings
 from src.kernel.schemas.session import Session, SessionCreate, SessionUpdate
 
+SESSION_BATCH_LOOKUP_LIMIT = 100
+SESSION_LIST_LOOKUP_LIMIT = 100
+
 
 class SessionStorage:
     """
@@ -35,6 +39,8 @@ class SessionStorage:
 
     SEARCH_BACKFILL_SKIP_RECENT_SECONDS = 120
     SEARCH_UPDATE_MAX_RETRIES = 3
+    SEARCH_BACKFILL_MAX_USER_MESSAGES = 1000
+    SEARCH_BACKFILL_BATCH_MAX = 100
     _indexes_done = False
     _indexes_task: asyncio.Task | None = None
     _indexes_lock: asyncio.Lock | None = None
@@ -196,7 +202,15 @@ class SessionStorage:
         if not session_ids:
             return {}
         await self.ensure_indexes_if_needed()
-        unique_ids = list(set(session_ids))
+        unique_ids = []
+        seen_ids = set()
+        for session_id in session_ids:
+            if session_id in seen_ids:
+                continue
+            seen_ids.add(session_id)
+            unique_ids.append(session_id)
+            if len(unique_ids) >= SESSION_BATCH_LOOKUP_LIMIT:
+                break
         cursor = self.collection.find({"session_id": {"$in": unique_ids}})
         result: Dict[str, Session] = {}
         async for doc in cursor:
@@ -345,6 +359,8 @@ class SessionStorage:
             search: 搜索关键词，模糊匹配会话名称
         """
         await self.ensure_indexes_if_needed()
+        skip = max(int(skip or 0), 0)
+        limit = min(max(int(limit or 1), 1), SESSION_LIST_LOOKUP_LIMIT)
         query: dict[str, Any] = {}
         if user_id is not None:
             # 严格匹配用户ID，空字符串也会被当作过滤条件
@@ -563,6 +579,7 @@ class SessionStorage:
             session_id,
             event_types=["user:message"],
             completed_only=False,
+            max_events=self.SEARCH_BACKFILL_MAX_USER_MESSAGES,
         )
         user_messages = [
             data.get("content", "").strip()
@@ -572,7 +589,8 @@ class SessionStorage:
             and data.get("content", "").strip()
         ]
 
-        payload = build_backfilled_search_index(
+        payload = await run_blocking_io(
+            build_backfilled_search_index,
             session_name=existing_doc.get("name"),
             user_messages=user_messages,
         )
@@ -623,6 +641,7 @@ class SessionStorage:
     async def backfill_search_indexes(self, batch_size: int = 100) -> int:
         """Backfill stale session search indexes in small batches."""
         await self.ensure_indexes_if_needed()
+        batch_size = min(max(int(batch_size), 1), self.SEARCH_BACKFILL_BATCH_MAX)
         cutoff = utc_now().timestamp() - self.SEARCH_BACKFILL_SKIP_RECENT_SECONDS
         cutoff_dt = datetime.fromtimestamp(cutoff)
         stale_query = {

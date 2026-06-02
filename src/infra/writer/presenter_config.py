@@ -6,6 +6,8 @@ from typing import Any, Dict, List, Optional
 
 from src.infra.utils.datetime import utc_now
 
+ATTACHMENT_KEYS_MAX = 100
+
 
 def should_increment_unread_for_trace_status(status: str) -> bool:
     """Return whether a trace terminal status should require user attention."""
@@ -16,13 +18,27 @@ def _extract_attachment_keys(attachments: Optional[List[Dict[str, Any]]]) -> lis
     """Extract unique storage keys from attachment payloads."""
     if not attachments:
         return []
-    return sorted(
-        {
-            str(attachment.get("key", "")).strip()
-            for attachment in attachments
-            if attachment.get("key")
-        }
-    )
+    keys: list[str] = []
+    seen = set()
+    for attachment in attachments:
+        key = str(attachment.get("key", "")).strip() if attachment.get("key") else ""
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        keys.append(key)
+        if len(keys) >= ATTACHMENT_KEYS_MAX:
+            break
+    return keys
+
+
+def _bounded_attachments(
+    attachments: Optional[List[Dict[str, Any]]],
+    *,
+    limit: int = ATTACHMENT_KEYS_MAX,
+) -> list[Dict[str, Any]]:
+    if not attachments:
+        return []
+    return list(attachments[:limit])
 
 
 def _generate_trace_id() -> str:

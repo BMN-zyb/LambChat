@@ -5,13 +5,15 @@ API 入口点。
 """
 
 import asyncio
+from collections import OrderedDict
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from src.api.middleware.auth import AuthMiddleware
 from src.api.middleware.tracing import TracingMiddleware
@@ -70,7 +72,97 @@ STATIC_CACHE_CONTROL_BY_PREFIX = {
 MANIFEST_CACHE_CONTROL = "public, max-age=86400"
 SERVICE_WORKER_CACHE_CONTROL = "no-cache"
 OFFLINE_PAGE_CACHE_CONTROL = "no-cache"
-_INDEX_HTML_CACHE: dict[Path, tuple[int, int, str]] = {}
+INDEX_HTML_CACHE_MAX_ENTRIES = 4
+INDEX_HTML_MAX_BYTES = 2 * 1024 * 1024
+_INDEX_HTML_CACHE: OrderedDict[Path, tuple[int, int, str]] = OrderedDict()
+API_REQUEST_BODY_MAX_BYTES = 8 * 1024 * 1024
+API_MULTIPART_UPLOAD_PATHS = {"/api/upload/file", "/api/upload/avatar", "/upload/file"}
+_LIFESPAN_BACKGROUND_TASK_NAMES = (
+    "session_search_backfill_task",
+    "memory_monitor_startup_reset_task",
+    "agent_discovery_task",
+    "models_preload_task",
+    "stale_task_cleanup_task",
+    "startup_indexes_task",
+    "feishu_task",
+)
+
+
+def _is_body_limit_exempt(scope: Scope) -> bool:
+    path = str(scope.get("path") or "")
+
+    headers = {
+        key.decode("latin-1").lower(): value.decode("latin-1")
+        for key, value in scope.get("headers", [])
+    }
+    content_type = headers.get("content-type", "").lower()
+    if "multipart/form-data" not in content_type:
+        return False
+    return (
+        path in API_MULTIPART_UPLOAD_PATHS
+        or path.startswith("/api/skills/upload")
+        or (path.startswith("/api/skills/") and "/binary-files/" in path)
+    )
+
+
+class RequestBodyLimitMiddleware:
+    """Reject oversized non-upload request bodies before they are materialized."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http" or _is_body_limit_exempt(scope):
+            await self.app(scope, receive, send)
+            return
+
+        headers = {
+            key.decode("latin-1").lower(): value.decode("latin-1")
+            for key, value in scope.get("headers", [])
+        }
+        content_length = headers.get("content-length")
+        if content_length:
+            try:
+                if int(content_length) > API_REQUEST_BODY_MAX_BYTES:
+                    await self._send_too_large(scope, receive, send)
+                    return
+                await self.app(scope, receive, send)
+                return
+            except ValueError:
+                pass
+
+        body = bytearray()
+        while True:
+            message = await receive()
+            if message["type"] != "http.request":
+                await self.app(scope, receive, send)
+                return
+
+            body.extend(message.get("body", b""))
+            if len(body) > API_REQUEST_BODY_MAX_BYTES:
+                await self._send_too_large(scope, receive, send)
+                return
+
+            if not message.get("more_body", False):
+                break
+
+        replayed = False
+
+        async def replay_body() -> Message:
+            nonlocal replayed
+            if replayed:
+                return {"type": "http.request", "body": b"", "more_body": False}
+            replayed = True
+            return {"type": "http.request", "body": bytes(body), "more_body": False}
+
+        await self.app(scope, replay_body, send)
+
+    async def _send_too_large(self, scope: Scope, receive: Receive, send: Send) -> None:
+        response = JSONResponse(
+            status_code=413,
+            content={"detail": "Request body too large"},
+        )
+        await response(scope, receive, send)
 
 
 def _cache_control_for_static_path(path: str) -> str | None:
@@ -95,15 +187,24 @@ def _static_file_response(file_path: Path, request_path: str) -> FileResponse:
     return FileResponse(str(file_path), headers=headers)
 
 
+def _is_existing_file(file_path: Path) -> bool:
+    return file_path.exists() and file_path.is_file()
+
+
 def _read_index_html(index_file: Path) -> str:
     stat = index_file.stat()
+    if stat.st_size > INDEX_HTML_MAX_BYTES:
+        raise ValueError(f"index.html too large: {stat.st_size} bytes (max {INDEX_HTML_MAX_BYTES})")
     cache_key = index_file.resolve()
     cached = _INDEX_HTML_CACHE.get(cache_key)
     if cached and cached[0] == stat.st_mtime_ns and cached[1] == stat.st_size:
+        _INDEX_HTML_CACHE.move_to_end(cache_key)
         return cached[2]
 
     html_doc = index_file.read_text(encoding="utf-8")
     _INDEX_HTML_CACHE[cache_key] = (stat.st_mtime_ns, stat.st_size, html_doc)
+    while len(_INDEX_HTML_CACHE) > INDEX_HTML_CACHE_MAX_ENTRIES:
+        _INDEX_HTML_CACHE.popitem(last=False)
     return html_doc
 
 
@@ -116,6 +217,152 @@ async def _warm_agent_registry() -> None:
         logger.info("Agents discovered")
     except Exception as e:
         logger.warning("Agent discovery warm-up failed: %s", e, exc_info=True)
+
+
+async def _warm_models_cache() -> None:
+    """Preload model metadata without blocking application startup."""
+    try:
+        from src.infra.llm.models_service import refresh_models
+
+        await refresh_models()
+        logger.info("Models preloaded into memory cache")
+    except Exception as e:
+        logger.warning("Model cache warm-up failed: %s", e, exc_info=True)
+
+
+def _schedule_models_cache_warmup(app: FastAPI) -> asyncio.Task[None]:
+    """Schedule model cache warm-up and keep a task reference for shutdown."""
+    task = asyncio.create_task(_warm_models_cache())
+    app.state.models_preload_task = task
+    return task
+
+
+async def _cleanup_stale_tasks() -> None:
+    """Recover stale tasks in the background after runtime listeners start."""
+    try:
+        from src.infra.task.manager import get_task_manager
+
+        task_manager = get_task_manager()
+        await task_manager.cleanup_stale_tasks()
+        logger.info("Stale tasks cleaned up")
+    except Exception as e:
+        logger.warning("Stale task cleanup failed: %s", e, exc_info=True)
+
+
+def _schedule_stale_task_cleanup(app: FastAPI) -> asyncio.Task[None]:
+    """Schedule stale task reconciliation without blocking application readiness."""
+    task = asyncio.create_task(_cleanup_stale_tasks())
+    app.state.stale_task_cleanup_task = task
+    return task
+
+
+async def _cancel_background_tasks(app: FastAPI, *task_names: str) -> None:
+    tasks = []
+    for task_name in task_names:
+        task = getattr(app.state, task_name, None)
+        if task and not task.done():
+            task.cancel()
+            tasks.append(task)
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+def _startup_index_initializers():
+    async def _init_agent_config_storage() -> None:
+        from src.infra.agent.config_storage import get_agent_config_storage
+
+        await get_agent_config_storage().ensure_indexes()
+        logger.info("Agent config storage indexes initialized")
+
+    async def _init_model_storage() -> None:
+        from src.infra.agent.model_storage import get_model_storage
+
+        await get_model_storage().ensure_indexes()
+        logger.info("Model storage indexes initialized")
+
+    async def _init_channel_storage() -> None:
+        from src.infra.channel.channel_storage import ChannelStorage
+
+        await ChannelStorage().ensure_indexes_if_needed()
+        logger.info("Channel storage indexes initialized")
+
+    async def _init_skill_indexes() -> None:
+        from src.infra.skill import init_skill_indexes
+
+        await init_skill_indexes()
+        logger.info("Skill indexes initialized")
+
+    async def _init_trace_storage() -> None:
+        from src.infra.session.trace_storage import get_trace_storage
+
+        await get_trace_storage().ensure_indexes_if_needed()
+        logger.info("TraceStorage initialized")
+
+    async def _init_session_storage() -> None:
+        from src.infra.session.storage import SessionStorage
+
+        await SessionStorage().ensure_indexes_if_needed()
+        logger.info("SessionStorage indexes initialized")
+
+    async def _init_revealed_file_storage() -> None:
+        from src.infra.revealed_file.storage import get_revealed_file_storage
+
+        await get_revealed_file_storage().ensure_indexes_if_needed()
+        logger.info("RevealedFileStorage indexes initialized")
+
+    async def _init_notification_storage() -> None:
+        from src.infra.notification.storage import NotificationStorage
+
+        await NotificationStorage().create_indexes()
+        logger.info("NotificationStorage indexes initialized")
+
+    return [
+        ("agent_config_storage", _init_agent_config_storage),
+        ("model_storage", _init_model_storage),
+        ("channel_storage", _init_channel_storage),
+        ("skill_indexes", _init_skill_indexes),
+        ("trace_storage", _init_trace_storage),
+        ("session_storage", _init_session_storage),
+        ("revealed_file_storage", _init_revealed_file_storage),
+        ("notification_storage", _init_notification_storage),
+    ]
+
+
+async def _initialize_startup_indexes() -> None:
+    """Initialize independent storage indexes concurrently before serving traffic."""
+
+    async def _run_initializer(name, initializer) -> None:
+        try:
+            await initializer()
+        except Exception as e:
+            logger.error("Startup index initializer failed: %s", name, exc_info=True)
+            raise e
+
+    await asyncio.gather(
+        *(
+            _run_initializer(name, initializer)
+            for name, initializer in _startup_index_initializers()
+        )
+    )
+
+
+def _schedule_startup_indexes(app: FastAPI) -> asyncio.Task[None]:
+    """Initialize storage indexes in the background so app readiness is not blocked."""
+    task = asyncio.create_task(_initialize_startup_indexes())
+    app.state.startup_indexes_task = task
+
+    def _log_completion(done_task: asyncio.Task[None]) -> None:
+        if done_task.cancelled():
+            return
+        try:
+            done_task.result()
+        except Exception as e:
+            logger.warning("Startup storage index initialization failed: %s", e, exc_info=True)
+        else:
+            logger.info("Startup storage indexes initialized")
+
+    task.add_done_callback(_log_completion)
+    return task
 
 
 @asynccontextmanager
@@ -173,62 +420,20 @@ async def lifespan(app: FastAPI):
     # 后台预热 Agent 注册，避免阻塞服务启动；请求路径仍有懒发现兜底
     app.state.agent_discovery_task = asyncio.create_task(_warm_agent_registry())
 
-    # 初始化 Agent 配置存储索引
-    from src.infra.agent.config_storage import get_agent_config_storage
-    from src.infra.agent.model_storage import get_model_storage
-    from src.infra.channel.channel_storage import ChannelStorage
-
-    agent_config_storage = get_agent_config_storage()
-    await agent_config_storage.ensure_indexes()
-    logger.info("Agent config storage indexes initialized")
-
-    # 初始化 Model 配置存储索引（确保 value 唯一索引防止并发创建重复模型）
-    model_storage = get_model_storage()
-    await model_storage.ensure_indexes()
-    logger.info("Model storage indexes initialized")
-
-    channel_storage = ChannelStorage()
-    await channel_storage.ensure_indexes_if_needed()
-    logger.info("Channel storage indexes initialized")
-
-    # 清理残留的运行中任务（服务重启前未正常关闭的任务）
-    from src.infra.task.manager import get_task_manager
-
-    task_manager = get_task_manager()
-    await task_manager.cleanup_stale_tasks()
-    logger.info("Stale tasks cleaned up")
+    _schedule_startup_indexes(app)
 
     # 启动分布式运行时监听器（任务/设置/模型/记忆/WebSocket）
     await start_runtime_services()
     logger.info("Runtime distributed listeners started")
 
-    # 预加载模型列表到内存缓存（确保 async 上下文中也能拿到 API key）
-    try:
-        from src.infra.llm.models_service import refresh_models
+    # 后台恢复/清理残留任务；恢复逻辑自身有分布式锁与 heartbeat 判断。
+    _schedule_stale_task_cleanup(app)
 
-        await refresh_models()
-        logger.info("Models preloaded into memory cache")
-    except Exception as e:
-        logger.warning(f"Failed to preload models: {e}")
-
-    # 初始化内置 skills
-    from src.infra.skill import init_skill_indexes
-
-    await init_skill_indexes()
-
-    # 初始化 TraceStorage（创建索引 + 启动事件合并器）
-    from src.infra.session.trace_storage import get_trace_storage
-
-    trace_storage = get_trace_storage()
-    await trace_storage.ensure_indexes_if_needed()
-    logger.info("TraceStorage initialized")
+    # 后台预加载模型列表；请求路径仍有 memory -> Redis -> DB 懒加载兜底。
+    _schedule_models_cache_warmup(app)
 
     # 初始化 SessionStorage 搜索索引，并异步回填历史会话
     from src.infra.session.backfill import SessionSearchBackfillWorker
-    from src.infra.session.storage import SessionStorage
-
-    await SessionStorage().ensure_indexes_if_needed()
-    logger.info("SessionStorage indexes initialized")
 
     async def _backfill_session_search():
         worker = SessionSearchBackfillWorker()
@@ -247,19 +452,6 @@ async def lifespan(app: FastAPI):
 
     _session_search_backfill_task = asyncio.create_task(_backfill_session_search())
     app.state.session_search_backfill_task = _session_search_backfill_task
-
-    # 初始化 RevealedFile 索引
-    from src.infra.revealed_file.storage import get_revealed_file_storage
-
-    revealed_storage = get_revealed_file_storage()
-    await revealed_storage.ensure_indexes_if_needed()
-    logger.info("RevealedFileStorage indexes initialized")
-
-    # 初始化 Notification 索引
-    from src.infra.notification.storage import NotificationStorage
-
-    await NotificationStorage().create_indexes()
-    logger.info("NotificationStorage indexes initialized")
 
     # Start Feishu channels in background (don't block app startup)
     async def _start_feishu():
@@ -338,19 +530,10 @@ async def lifespan(app: FastAPI):
 
         await AgentFactory.close_all()
 
-        session_search_backfill_task = getattr(app.state, "session_search_backfill_task", None)
-        if session_search_backfill_task and not session_search_backfill_task.done():
-            session_search_backfill_task.cancel()
-
-        memory_monitor_startup_reset_task = getattr(
-            app.state, "memory_monitor_startup_reset_task", None
+        await _cancel_background_tasks(
+            app,
+            *_LIFESPAN_BACKGROUND_TASK_NAMES,
         )
-        if memory_monitor_startup_reset_task and not memory_monitor_startup_reset_task.done():
-            memory_monitor_startup_reset_task.cancel()
-
-        agent_discovery_task = getattr(app.state, "agent_discovery_task", None)
-        if agent_discovery_task and not agent_discovery_task.done():
-            agent_discovery_task.cancel()
 
         # 关闭 PostgreSQL 连接池
         from src.infra.storage.checkpoint import (
@@ -439,10 +622,11 @@ def create_app() -> FastAPI:
     )
 
     # 自定义中间件 (顺序：后添加的先执行)
-    # 执行顺序: TracingMiddleware -> AuthMiddleware -> UserContextMiddleware -> Route
+    # 执行顺序: RequestBodyLimitMiddleware -> TracingMiddleware -> AuthMiddleware -> UserContextMiddleware -> Route
     app.add_middleware(UserContextMiddleware)
     app.add_middleware(AuthMiddleware)
     app.add_middleware(TracingMiddleware)
+    app.add_middleware(RequestBodyLimitMiddleware)
 
     # 注册路由
     app.include_router(health.router, tags=["Health"])
@@ -512,7 +696,7 @@ def create_app() -> FastAPI:
         @app.get("/manifest.json")
         async def serve_manifest():
             manifest_file = static_dir / "manifest.json"
-            if manifest_file.exists():
+            if await run_blocking_io(_is_existing_file, manifest_file):
                 return _static_file_response(manifest_file, "manifest.json")
             return {"error": "manifest.json not found"}
 
@@ -520,7 +704,7 @@ def create_app() -> FastAPI:
         async def serve_shared_page(share_id: str, request: Request):
             """Serve shared pages with server-injected SEO metadata."""
             index_file = static_dir / "index.html"
-            if not index_file.exists():
+            if not await run_blocking_io(_is_existing_file, index_file):
                 return {"error": "Frontend not built. Run 'npm run build' in frontend directory."}
 
             base_url = getattr(settings, "APP_BASE_URL", "").rstrip("/") or str(
@@ -559,11 +743,11 @@ def create_app() -> FastAPI:
             """Serve SPA index.html for client-side routing."""
             # First, check if it's a static file
             static_file = static_dir / full_path
-            if static_file.exists() and static_file.is_file():
+            if await run_blocking_io(_is_existing_file, static_file):
                 return _static_file_response(static_file, full_path)
             # Otherwise, serve index.html for SPA routing
             index_file = static_dir / "index.html"
-            if index_file.exists():
+            if await run_blocking_io(_is_existing_file, index_file):
                 base_url = getattr(settings, "APP_BASE_URL", "").rstrip("/") or str(
                     request.base_url
                 ).rstrip("/")

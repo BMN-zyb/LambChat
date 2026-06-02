@@ -6,9 +6,27 @@ from src.infra.logging import get_logger
 from src.infra.utils.datetime import utc_now
 from src.kernel.config import settings
 
+REFERENCE_KEYS_MAX = 100
+
+
+def _bounded_unique_keys(keys: list[str], *, limit: int = REFERENCE_KEYS_MAX) -> list[str]:
+    unique_keys: list[str] = []
+    seen = set()
+    for key in keys:
+        clean = str(key).strip() if key else ""
+        if not clean or clean in seen:
+            continue
+        seen.add(clean)
+        unique_keys.append(clean)
+        if len(unique_keys) >= limit:
+            break
+    return unique_keys
+
 
 class FileRecordStorage:
     """Storage layer for file records, keyed by content hash."""
+
+    REFERENCE_KEYS_MAX = REFERENCE_KEYS_MAX
 
     def __init__(self):
         self._collection = None
@@ -117,7 +135,7 @@ class FileRecordStorage:
 
     async def add_references(self, keys: list[str]) -> int:
         """Increment persisted message references for the given storage keys."""
-        unique_keys = sorted({key for key in keys if key})
+        unique_keys = _bounded_unique_keys(keys)
         if not unique_keys:
             return 0
 
@@ -130,7 +148,7 @@ class FileRecordStorage:
 
     async def release_references(self, keys: list[str]) -> int:
         """Decrement persisted message references for the given storage keys."""
-        unique_keys = sorted({key for key in keys if key})
+        unique_keys = _bounded_unique_keys(keys)
         if not unique_keys:
             return 0
 

@@ -91,15 +91,14 @@ class FeishuChannelManager(UserChannelManager):
 
         self._running = True
 
-        # Load all enabled configs from ChannelStorage
-        config_dicts = await self._storage.list_enabled_configs(ChannelType.FEISHU)
-        logger.info(f"Found {len(config_dicts)} enabled Feishu configurations")
-
-        for config_dict in config_dicts:
+        started = 0
+        skipped = 0
+        async for config_dict in self._storage.iter_enabled_configs(ChannelType.FEISHU):
             try:
                 user_id = config_dict.get("user_id")
                 if not user_id:
                     logger.warning("Skipping config without user_id")
+                    skipped += 1
                     continue
 
                 # Check if required fields are present (decryption may have failed)
@@ -112,14 +111,24 @@ class FeishuChannelManager(UserChannelManager):
                         "missing app_id or app_secret (decryption may have failed). "
                         "Please re-save the channel configuration."
                     )
+                    skipped += 1
                     continue
 
                 config = self._dict_to_config(user_id, config_dict)
-                await self._start_user_client(config)
+                if await self._start_user_client(config):
+                    started += 1
+                else:
+                    skipped += 1
             except Exception as e:
                 logger.error(
                     f"Failed to start Feishu client for user {config_dict.get('user_id')}: {e}"
                 )
+                skipped += 1
+        logger.info(
+            "Feishu startup processed enabled configurations: started=%s skipped=%s",
+            started,
+            skipped,
+        )
 
     async def stop(self) -> None:
         """Stop all Feishu channels."""
@@ -131,7 +140,6 @@ class FeishuChannelManager(UserChannelManager):
             except Exception as e:
                 logger.error(f"Error stopping Feishu client for user {user_id}: {e}")
 
-        self._cancel_all_lease_tasks()
         await self._release_all_leases()
         await self._close_lease_redis()
         self._channels.clear()
@@ -212,8 +220,7 @@ class FeishuChannelManager(UserChannelManager):
             return True
 
         # Legacy behavior: reload all instances for user
-        config_list = await self._storage.list_user_configs(user_id)
-        feishu_configs = [c for c in config_list if c.get("channel_type") == "feishu"]
+        feishu_configs = await self._storage.list_user_configs_by_type(user_id, ChannelType.FEISHU)
 
         # Stop all existing clients
         for key in list(self._channels.keys()):
@@ -367,6 +374,10 @@ class FeishuChannelManager(UserChannelManager):
         task = self._lease_tasks.pop(app_id, None)
         if task and not task.done():
             task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
         try:
             redis = self._get_lease_redis()
             await redis.eval(_RELEASE_LEASE_LUA, 1, self._lease_key(app_id), self._instance_id)

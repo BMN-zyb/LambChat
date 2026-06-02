@@ -56,6 +56,99 @@ class _FakeStorage:
         return SimpleNamespace(channel_type=channel_type, enabled=True, connected=False)
 
 
+class _FakeLimitStorage(_FakeStorage):
+    def __init__(self, count: int) -> None:
+        super().__init__()
+        self.count = count
+        self.count_calls: list[str] = []
+        self.list_calls = 0
+
+    async def count_user_configs(self, user_id: str) -> int:
+        self.count_calls.append(user_id)
+        return self.count
+
+    async def list_user_configs(self, user_id: str):
+        self.list_calls += 1
+        raise AssertionError("channel limit check should count configs without loading them")
+
+
+class _FakeTypedListStorage(_FakeStorage):
+    def __init__(self) -> None:
+        super().__init__()
+        self.typed_calls: list[tuple[str, ChannelType]] = []
+        self.typed_count_calls: list[tuple[str, ChannelType]] = []
+        self.list_calls = 0
+
+    async def list_user_configs(self, user_id: str):
+        self.list_calls += 1
+        raise AssertionError("typed channel list should not load every channel config")
+
+    async def count_user_configs_by_type(self, user_id: str, channel_type: ChannelType) -> int:
+        self.typed_count_calls.append((user_id, channel_type))
+        return 1
+
+    async def list_user_configs_by_type(self, user_id: str, channel_type: ChannelType):
+        self.typed_calls.append((user_id, channel_type))
+        return [
+            {
+                "channel_type": channel_type.value,
+                "instance_id": "instance-1",
+                "name": "Feishu",
+                "enabled": True,
+                "app_id": "app-1",
+                "app_secret": "secret",
+            }
+        ]
+
+
+class _FakeListLimitStorage(_FakeStorage):
+    def __init__(self, count: int, typed_count: int | None = None) -> None:
+        super().__init__()
+        self.count = count
+        self.typed_count = count if typed_count is None else typed_count
+        self.count_calls: list[str] = []
+        self.typed_count_calls: list[tuple[str, ChannelType]] = []
+        self.list_calls = 0
+        self.typed_list_calls = 0
+
+    async def count_user_configs(self, user_id: str) -> int:
+        self.count_calls.append(user_id)
+        return self.count
+
+    async def count_user_configs_by_type(self, user_id: str, channel_type: ChannelType) -> int:
+        self.typed_count_calls.append((user_id, channel_type))
+        return self.typed_count
+
+    async def list_user_configs(self, user_id: str):
+        self.list_calls += 1
+        raise AssertionError("oversized channel list should be rejected before loading configs")
+
+    async def list_user_configs_by_type(self, user_id: str, channel_type: ChannelType):
+        self.typed_list_calls += 1
+        raise AssertionError(
+            "oversized typed channel list should be rejected before loading configs"
+        )
+
+
+class _FakeRoleStorage:
+    async def get_by_names(self, names):
+        assert names == ["limited"]
+        return [SimpleNamespace(limits=SimpleNamespace(max_channels=1))]
+
+
+class _FakeSingleAgentStorage:
+    def __init__(self, enabled: bool) -> None:
+        self.enabled = enabled
+        self.checked_ids: list[str] = []
+
+    async def is_agent_enabled(self, agent_id: str) -> bool:
+        self.checked_ids.append(agent_id)
+        return self.enabled
+
+    async def get_enabled_agent_ids(self):
+        raise AssertionError("agent validation should not load all enabled agent ids")
+
+
 class _FakeManager:
     def __init__(self) -> None:
         self.reload_calls: list[tuple[str, str]] = []
@@ -103,6 +196,21 @@ async def test_validate_persona_preset_id_detects_admin_permission(
     )
 
     assert manager.calls == [("persona-1", "admin-1", True)]
+
+
+@pytest.mark.asyncio
+async def test_validate_agent_id_checks_single_agent_without_loading_all(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent_storage = _FakeSingleAgentStorage(enabled=True)
+    monkeypatch.setattr(channels_route, "get_agent_config_storage", lambda: agent_storage)
+
+    await channels_route._validate_agent_id(
+        "agent-1",
+        SimpleNamespace(roles=[]),
+    )
+
+    assert agent_storage.checked_ids == ["agent-1"]
 
 
 @pytest.mark.asyncio
@@ -181,6 +289,84 @@ async def test_create_channel_persists_persona_preset_id(
     )
 
     assert storage.last_create_kwargs["persona_preset_id"] == "persona-1"
+
+
+@pytest.mark.asyncio
+async def test_create_channel_limit_counts_configs_without_loading_all(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = _FakeLimitStorage(count=1)
+    monkeypatch.setattr(channels_route, "RoleStorage", lambda: _FakeRoleStorage())
+    monkeypatch.setattr(channels_route, "get_registry", lambda: _FakeRegistry())
+    monkeypatch.setattr(channels_route, "publish_channel_config_changed", _async_noop)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await channels_route.create_channel_instance(
+            ChannelType.FEISHU,
+            ChannelConfigCreate(
+                channel_type=ChannelType.FEISHU,
+                name="Feishu",
+                config={},
+            ),
+            user=SimpleNamespace(sub="user-1", roles=["limited"]),
+            storage=storage,
+        )
+
+    assert exc_info.value.status_code == 400
+    assert storage.count_calls == ["user-1"]
+    assert storage.list_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_list_channel_instances_filters_in_storage() -> None:
+    storage = _FakeTypedListStorage()
+
+    response = await channels_route.list_channel_instances(
+        ChannelType.FEISHU,
+        user=SimpleNamespace(sub="user-1"),
+        storage=storage,
+    )
+
+    assert storage.typed_calls == [("user-1", ChannelType.FEISHU)]
+    assert storage.list_calls == 0
+    assert [channel.id for channel in response.channels] == ["instance-1"]
+
+
+@pytest.mark.asyncio
+async def test_list_user_channels_rejects_oversized_lists_before_loading(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(channels_route, "CHANNEL_LIST_MAX_ITEMS", 2, raising=False)
+    storage = _FakeListLimitStorage(count=3)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await channels_route.list_user_channels(
+            user=SimpleNamespace(sub="user-1"),
+            storage=storage,
+        )
+
+    assert exc_info.value.status_code == 413
+    assert storage.count_calls == ["user-1"]
+    assert storage.list_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_list_channel_instances_rejects_oversized_lists_before_loading(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(channels_route, "CHANNEL_LIST_MAX_ITEMS", 2, raising=False)
+    storage = _FakeListLimitStorage(count=0, typed_count=3)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await channels_route.list_channel_instances(
+            ChannelType.FEISHU,
+            user=SimpleNamespace(sub="user-1"),
+            storage=storage,
+        )
+
+    assert exc_info.value.status_code == 413
+    assert storage.typed_count_calls == [("user-1", ChannelType.FEISHU)]
+    assert storage.typed_list_calls == 0
 
 
 @pytest.mark.asyncio

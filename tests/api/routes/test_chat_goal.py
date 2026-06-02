@@ -3,9 +3,12 @@ from __future__ import annotations
 import pytest
 
 from src.api.routes.chat import (
+    CHAT_SSE_DATA_MAX_BYTES,
     _execute_agent_stream,
+    _format_sse_event,
     build_conversation_config,
     resolve_goal_for_request,
+    session_stream,
 )
 from src.kernel.schemas.agent import AgentRequest, GoalSpec
 
@@ -59,6 +62,80 @@ def test_resolve_goal_for_request_does_not_restore_session_goal_for_follow_up() 
     assert active_goal is None
     assert agent_message == "keep going"
     assert request.goal is None
+
+
+def test_format_sse_event_adds_timestamp_without_mutating_event_data() -> None:
+    event = {
+        "event_type": "message:chunk",
+        "data": {"content": "hello"},
+        "timestamp": "2026-06-02T00:00:00Z",
+        "id": "1-0",
+    }
+
+    line = _format_sse_event(event)
+
+    assert line == (
+        "event: message:chunk\n"
+        'data: {"content": "hello", "_timestamp": "2026-06-02T00:00:00Z"}\n'
+        "id: 1-0\n\n"
+    )
+    assert event["data"] == {"content": "hello"}
+
+
+def test_format_sse_event_drops_oversized_payload() -> None:
+    event = {
+        "event_type": "message:chunk",
+        "data": {"content": "x" * (CHAT_SSE_DATA_MAX_BYTES + 1)},
+        "timestamp": "2026-06-02T00:00:00Z",
+        "id": "1-0",
+    }
+
+    line = _format_sse_event(event)
+
+    assert "event: error" in line
+    assert "event_payload_too_large" in line
+    assert len(line.encode("utf-8")) < 1024
+
+
+@pytest.mark.asyncio
+async def test_session_stream_offloads_sse_event_formatting(monkeypatch: pytest.MonkeyPatch):
+    calls: list[str] = []
+
+    class _SessionManager:
+        async def get_session(self, session_id):
+            return type("Session", (), {"user_id": "user-1"})()
+
+    class _DualWriter:
+        async def read_from_redis(self, session_id, *, run_id):
+            yield {
+                "event_type": "message:chunk",
+                "data": {"content": "hello"},
+                "timestamp": "2026-06-02T00:00:00Z",
+                "id": "1-0",
+            }
+
+    async def fake_run_blocking_io(func, *args, **kwargs):
+        calls.append(func.__name__)
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr("src.api.routes.chat.SessionManager", lambda: _SessionManager())
+    monkeypatch.setattr("src.api.routes.chat.verify_session_ownership", lambda session, user: None)
+    monkeypatch.setattr("src.api.routes.chat.run_blocking_io", fake_run_blocking_io)
+    monkeypatch.setattr(
+        "src.infra.session.dual_writer.get_dual_writer",
+        lambda: _DualWriter(),
+    )
+
+    response = await session_stream(
+        "session-1",
+        run_id="run-1",
+        user=type("User", (), {"sub": "user-1"})(),
+    )
+    body_iterator = response.body_iterator
+    chunk = await body_iterator.__anext__()
+
+    assert "event: message:chunk" in chunk
+    assert calls == ["_format_sse_event"]
 
 
 @pytest.mark.asyncio

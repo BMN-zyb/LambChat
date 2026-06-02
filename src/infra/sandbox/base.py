@@ -11,6 +11,7 @@ import asyncio
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from src.infra.async_utils import run_blocking_io
 from src.infra.logging import get_logger
 from src.kernel.config import settings
 
@@ -198,17 +199,21 @@ class SandboxFactory:
         last_error = None
         for attempt in range(max_retries):
             try:
-                # 根据模块名判断类型并关闭
-                module_name = type(provider_obj).__module__
 
-                if "daytona" in module_name:
-                    # Daytona: sandbox.delete()
-                    provider_obj.delete()
-                elif "e2b" in module_name:
-                    # E2B: sandbox.kill()
-                    provider_obj.kill()
-                else:
-                    logger.warning(f"Unknown provider type: {module_name}")
+                def _sync_close_provider() -> None:
+                    # 根据模块名判断类型并关闭
+                    module_name = type(provider_obj).__module__
+
+                    if "daytona" in module_name:
+                        # Daytona: sandbox.delete()
+                        provider_obj.delete()
+                    elif "e2b" in module_name:
+                        # E2B: sandbox.kill()
+                        provider_obj.kill()
+                    else:
+                        logger.warning(f"Unknown provider type: {module_name}")
+
+                await run_blocking_io(_sync_close_provider)
 
                 # 成功关闭后才从 registry 移除
                 cls._sandbox_registry.pop(sandbox_id, None)

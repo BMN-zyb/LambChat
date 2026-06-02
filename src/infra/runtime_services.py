@@ -7,16 +7,10 @@ coordinate through shared Redis/Mongo infrastructure.
 
 from __future__ import annotations
 
+from src.agents.core.recommendations import drain_recommend_background_tasks
 from src.infra.async_utils import shutdown_blocking_io_executor
 from src.infra.channel.pubsub import get_channel_config_pubsub
 from src.infra.llm.pubsub import get_model_config_pubsub
-from src.infra.memory.distributed import get_memory_pubsub
-from src.infra.memory.tools import (
-    shutdown as memory_shutdown,
-)
-from src.infra.memory.tools import (
-    start_memory_compaction_agent,
-)
 from src.infra.monitoring.event_loop import (
     start_event_loop_lag_monitor,
     stop_event_loop_lag_monitor,
@@ -33,6 +27,55 @@ from src.infra.tool.mcp_global import (
 from src.infra.tool.mcp_global import get_mcp_cache_pubsub
 from src.infra.tool.mcp_pool import close_all_connections as close_mcp_pool_connections
 from src.infra.websocket import get_connection_manager
+from src.kernel.config import settings
+
+
+def get_memory_pubsub():
+    from src.infra.memory.distributed import get_memory_pubsub
+
+    return get_memory_pubsub()
+
+
+async def memory_shutdown() -> None:
+    from src.infra.memory.tools import shutdown
+
+    await shutdown()
+
+
+async def drain_dual_writer_event_buffer() -> None:
+    from src.infra.session.dual_writer import get_dual_writer
+
+    await get_dual_writer().flush_mongo_buffer()
+
+
+async def drain_upload_delete_tasks() -> None:
+    from src.api.routes.upload import drain_upload_delete_tasks as _drain_upload_delete_tasks
+
+    await _drain_upload_delete_tasks()
+
+
+async def drain_user_s3_cleanup_tasks() -> None:
+    from src.infra.user.manager import drain_s3_cleanup_tasks
+
+    await drain_s3_cleanup_tasks()
+
+
+async def drain_project_cleanup_tasks() -> None:
+    from src.infra.tool.reveal_project_tool import drain_project_cleanup_tasks as _drain
+
+    await _drain()
+
+
+async def drain_llm_client_close_tasks() -> None:
+    from src.infra.llm.client import LLMClient
+
+    await LLMClient.drain_close_tasks()
+
+
+def start_memory_compaction_agent() -> None:
+    from src.infra.memory.tools import start_memory_compaction_agent
+
+    start_memory_compaction_agent()
 
 
 async def start_runtime_services() -> None:
@@ -48,23 +91,28 @@ async def start_runtime_services() -> None:
     # Launch all pub/sub listeners concurrently to reduce startup wall-clock time.
     settings_pubsub = get_settings_pubsub()
     model_config_pubsub = get_model_config_pubsub()
-    memory_pubsub = get_memory_pubsub()
     channel_pubsub = get_channel_config_pubsub()
     tool_cache_pubsub = get_tool_cache_pubsub()
     mcp_cache_pubsub = get_mcp_cache_pubsub()
     websocket_manager = get_connection_manager()
 
-    await asyncio.gather(
+    listeners = [
         settings_pubsub.start_listener(),
         model_config_pubsub.start_listener(),
-        memory_pubsub.start_listener(),
         channel_pubsub.start_listener(),
         tool_cache_pubsub.start_listener(),
         mcp_cache_pubsub.start_listener(),
         websocket_manager.start_pubsub_listener(),
+    ]
+    if settings.ENABLE_MEMORY:
+        listeners.append(get_memory_pubsub().start_listener())
+
+    await asyncio.gather(
+        *listeners,
     )
 
-    start_memory_compaction_agent()
+    if settings.ENABLE_MEMORY:
+        start_memory_compaction_agent()
     get_runtime_scheduler().start()
 
 
@@ -87,6 +135,7 @@ async def stop_runtime_services() -> None:
     await mcp_cache_pubsub.stop_listener()
     await drain_mcp_cache_background_tasks()
     await drain_mcp_global_background_tasks()
+    await drain_recommend_background_tasks()
     await close_mcp_pool_connections()
 
     tool_cache_pubsub = get_tool_cache_pubsub()
@@ -97,9 +146,10 @@ async def stop_runtime_services() -> None:
 
     await get_runtime_scheduler().stop()
 
-    memory_pubsub = get_memory_pubsub()
-    await memory_pubsub.stop_listener()
-    await memory_shutdown()
+    if settings.ENABLE_MEMORY:
+        memory_pubsub = get_memory_pubsub()
+        await memory_pubsub.stop_listener()
+        await memory_shutdown()
 
     model_config_pubsub = get_model_config_pubsub()
     await model_config_pubsub.stop_listener()
@@ -110,4 +160,9 @@ async def stop_runtime_services() -> None:
     task_manager = get_task_manager()
     await stop_arq_runtime()
     await task_manager.stop_pubsub_listener()
+    await drain_upload_delete_tasks()
+    await drain_user_s3_cleanup_tasks()
+    await drain_project_cleanup_tasks()
+    await drain_llm_client_close_tasks()
+    await drain_dual_writer_event_buffer()
     shutdown_blocking_io_executor()

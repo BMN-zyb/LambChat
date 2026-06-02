@@ -11,6 +11,7 @@
 import asyncio
 from typing import Any, Optional
 
+from src.infra.async_utils import run_blocking_io
 from src.infra.logging import get_logger
 from src.infra.mcp.encryption import decrypt_value, encrypt_value
 from src.infra.utils.datetime import utc_now_iso
@@ -24,6 +25,29 @@ COLLECTION_NAME = "user_env_vars"
 
 # 每用户最大环境变量数量
 MAX_ENV_VARS_PER_USER = 50
+ENV_VAR_MAX_VALUE_CHARS = 16_000
+ENV_VAR_MAX_TOTAL_VALUE_CHARS = 64_000
+
+
+def _validate_env_var_value_size(value: str) -> None:
+    if len(str(value)) > ENV_VAR_MAX_VALUE_CHARS:
+        raise ValueError(f"Environment variable value too large (max {ENV_VAR_MAX_VALUE_CHARS})")
+
+
+def _validate_env_var_bulk_value_size(variables: dict[str, str]) -> None:
+    total_chars = 0
+    for value in variables.values():
+        text = str(value)
+        if len(text) > ENV_VAR_MAX_VALUE_CHARS:
+            raise ValueError(
+                f"Environment variable value too large (max {ENV_VAR_MAX_VALUE_CHARS})"
+            )
+        total_chars += len(text)
+        if total_chars > ENV_VAR_MAX_TOTAL_VALUE_CHARS:
+            raise ValueError(
+                "Environment variable values too large "
+                f"(max {ENV_VAR_MAX_TOTAL_VALUE_CHARS} total characters)"
+            )
 
 
 class EnvVarStorage:
@@ -62,14 +86,14 @@ class EnvVarStorage:
     # ── 加密辅助 ──────────────────────────────────────────────────
 
     @staticmethod
-    def _encrypt_value(value: str) -> dict:
+    async def _encrypt_value(value: str) -> dict:
         """加密单个值（包装为 dict 后加密）"""
-        return encrypt_value({"v": value})
+        return await run_blocking_io(encrypt_value, {"v": value})
 
     @staticmethod
-    def _decrypt_value(encrypted: Any) -> str:
+    async def _decrypt_value(encrypted: Any) -> str:
         """解密单个值"""
-        result = decrypt_value(encrypted)
+        result = await run_blocking_io(decrypt_value, encrypted)
         if isinstance(result, dict):
             return result.get("v", "")
         return str(result) if result else ""
@@ -78,10 +102,14 @@ class EnvVarStorage:
 
     async def list_vars(self, user_id: str) -> list[EnvVarResponse]:
         """列出用户所有环境变量（value 掩码）"""
-        cursor = self._coll.find(
-            {"user_id": user_id},
-            {"_id": 0, "user_id": 0},
-        ).sort("key", 1)
+        cursor = (
+            self._coll.find(
+                {"user_id": user_id},
+                {"_id": 0, "user_id": 0},
+            )
+            .sort("key", 1)
+            .limit(MAX_ENV_VARS_PER_USER)
+        )
         results = []
         async for doc in cursor:
             results.append(
@@ -104,7 +132,7 @@ class EnvVarStorage:
             return None
         return EnvVarResponse(
             key=doc["key"],
-            value=self._decrypt_value(doc.get("value")),
+            value=await self._decrypt_value(doc.get("value")),
             created_at=doc.get("created_at"),
             updated_at=doc.get("updated_at"),
         )
@@ -114,17 +142,18 @@ class EnvVarStorage:
         cursor = self._coll.find(
             {"user_id": user_id},
             {"_id": 0, "key": 1, "value": 1},
-        )
+        ).limit(MAX_ENV_VARS_PER_USER)
         result = {}
         async for doc in cursor:
             try:
-                result[doc["key"]] = self._decrypt_value(doc.get("value"))
+                result[doc["key"]] = await self._decrypt_value(doc.get("value"))
             except Exception as e:
                 logger.warning(f"Failed to decrypt env var '{doc['key']}' for user {user_id}: {e}")
         return result
 
     async def set_var(self, user_id: str, key: str, value: str) -> EnvVarResponse:
         """设置（upsert）单个环境变量"""
+        _validate_env_var_value_size(value)
         now = utc_now_iso()
 
         # 检查数量上限（仅 insert 时）
@@ -134,7 +163,7 @@ class EnvVarStorage:
             if count >= MAX_ENV_VARS_PER_USER:
                 raise ValueError(f"Maximum {MAX_ENV_VARS_PER_USER} environment variables per user")
 
-        encrypted = self._encrypt_value(value)
+        encrypted = await self._encrypt_value(value)
         await self._coll.update_one(
             {"user_id": user_id, "key": key},
             {
@@ -158,13 +187,22 @@ class EnvVarStorage:
 
     async def set_vars_bulk(self, user_id: str, variables: dict[str, str]) -> int:
         """批量设置环境变量"""
+        if len({key for key in variables if key}) > MAX_ENV_VARS_PER_USER:
+            raise ValueError(
+                f"Would exceed maximum {MAX_ENV_VARS_PER_USER} environment variables per user"
+            )
+        _validate_env_var_bulk_value_size(variables)
+
         now = utc_now_iso()
         count = 0
 
         # 检查数量上限
         current_count = await self._coll.count_documents({"user_id": user_id})
         existing_keys = set()
-        async for doc in self._coll.find({"user_id": user_id}, {"key": 1}):
+        existing_cursor = self._coll.find({"user_id": user_id}, {"key": 1}).limit(
+            MAX_ENV_VARS_PER_USER
+        )
+        async for doc in existing_cursor:
             existing_keys.add(doc["key"])
 
         new_keys = set(variables.keys()) - existing_keys
@@ -174,7 +212,7 @@ class EnvVarStorage:
             )
 
         for key, value in variables.items():
-            encrypted = self._encrypt_value(value)
+            encrypted = await self._encrypt_value(value)
             await self._coll.update_one(
                 {"user_id": user_id, "key": key},
                 {

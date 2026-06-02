@@ -10,10 +10,15 @@ from typing import Any, Dict, List, Optional, Type
 from langchain_core.tools import BaseTool
 
 from src.api.routes.human import create_approval, wait_for_response
+from src.infra.async_utils import run_blocking_io
 from src.infra.logging import get_logger
 from src.infra.tool.human_tool.models import AskHumanInput, FieldType, FormField
 
 logger = get_logger(__name__)
+
+
+async def _json_dumps_result(data: dict[str, Any]) -> str:
+    return await run_blocking_io(json.dumps, data, ensure_ascii=False)
 
 
 class AskHumanTool(BaseTool):
@@ -125,7 +130,7 @@ class AskHumanTool(BaseTool):
             fields = []
 
         # 解析字段并设置默认值
-        parsed_fields = self._parse_fields(fields)
+        parsed_fields = await run_blocking_io(self._parse_fields, fields)
 
         # 如果启用了 allow_other，追加一个独立的「其他意见」文本字段
         # 使用 _ 前缀命名空间，避免与用户字段冲突
@@ -178,7 +183,7 @@ class AskHumanTool(BaseTool):
                 "message": f"等待用户响应超时（{timeout}秒）",
                 "values": self._get_default_values(parsed_fields),
             }
-            return json.dumps(result, ensure_ascii=False)
+            return await _json_dumps_result(result)
 
         if not response.approved:
             # 用户拒绝
@@ -187,7 +192,7 @@ class AskHumanTool(BaseTool):
                 "message": "用户拒绝了此请求",
                 "values": {},
             }
-            return json.dumps(result, ensure_ascii=False)
+            return await _json_dumps_result(result)
 
         # 成功：解析用户响应
         # response.response 现在是 dict 类型
@@ -201,7 +206,7 @@ class AskHumanTool(BaseTool):
             "message": "用户已响应",
             "values": values,
         }
-        return json.dumps(result, ensure_ascii=False)
+        return await _json_dumps_result(result)
 
     def _parse_fields(self, fields: Any) -> List[FormField]:
         """

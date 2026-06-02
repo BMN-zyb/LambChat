@@ -38,6 +38,14 @@ class _FakeGraph:
             await asyncio.sleep(60)
 
 
+class _BurstGraph:
+    async def astream_events(self, *_args, **_kwargs):
+        index = 0
+        while True:
+            yield {"event": "on_chain_stream", "data": {"chunk": index}}
+            index += 1
+
+
 class _TestAgent(base_module.BaseGraphAgent):
     def build_graph(self, builder) -> None:
         return None
@@ -221,3 +229,52 @@ async def test_interrupted_inner_done_raises_after_persisting_terminal_events(
     with pytest.raises(TaskInterruptedError):
         await next_event
     assert [event["event"] for event in presenter.emitted_events] == ["token:usage", "done"]
+
+
+@pytest.mark.asyncio
+async def test_cancelled_full_event_queue_does_not_deadlock(monkeypatch) -> None:
+    processor_started = asyncio.Event()
+
+    class BlockingProcessor:
+        def __init__(self, presenter, base_url: str = "") -> None:
+            self.presenter = presenter
+
+        async def process_event(self, event: dict[str, Any]) -> None:
+            processor_started.set()
+            await asyncio.sleep(60)
+
+        async def finalize(self) -> None:
+            return None
+
+        async def emit_token_usage(self, **kwargs) -> bool:
+            return True
+
+    async def no_interrupt(_run_id: str) -> None:
+        return None
+
+    monkeypatch.setattr(base_module, "AgentEventProcessor", BlockingProcessor)
+    monkeypatch.setattr(
+        "src.infra.task.manager.BackgroundTaskManager.check_interrupt",
+        no_interrupt,
+    )
+    monkeypatch.setattr(
+        "src.infra.task.manager.BackgroundTaskManager.check_interrupt_fast",
+        lambda _run_id: False,
+    )
+
+    agent = _TestAgent()
+    agent._initialized = True
+    agent._graph = _BurstGraph()
+
+    presenter = _FakePresenter()
+    stream = agent._stream("hello", "session-1", "user-1", presenter=presenter)
+
+    assert await stream.__anext__() == {"event": "metadata", "data": {"run_id": "run-usage-cancel"}}
+
+    next_event = asyncio.create_task(stream.__anext__())
+    await asyncio.wait_for(processor_started.wait(), timeout=1)
+    await asyncio.sleep(0)
+
+    next_event.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(next_event, timeout=1)

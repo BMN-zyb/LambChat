@@ -9,12 +9,13 @@ are identical regardless of which memory provider is active.
 import asyncio
 import json
 import uuid
-from typing import Annotated, Optional
+from typing import Annotated, Any, Optional
 
 from langchain.tools import ToolRuntime, tool
 from langchain_core.tools import BaseTool
 from langsmith.run_helpers import tracing_context
 
+from src.infra.async_utils import run_blocking_io
 from src.infra.logging import get_logger
 from src.infra.memory.client.base import (
     MemoryBackend,
@@ -30,13 +31,21 @@ from src.kernel.config import settings
 
 logger = get_logger(__name__)
 
+
+async def _json_dumps_result(data: dict[str, Any]) -> str:
+    return await run_blocking_io(json.dumps, data, ensure_ascii=False)
+
+
 # Module-level cached backend (initialized lazily)
 _backend: Optional[MemoryBackend] = None
 _backend_lock: Optional[asyncio.Lock] = None
 _backend_lock_loop: Optional[asyncio.AbstractEventLoop] = None
 _background_tasks: set[asyncio.Task] = set()
+_auto_capture_tasks_by_user: dict[str, asyncio.Task] = {}
 _auto_capture_user_locks: dict[str, asyncio.Lock] = {}
 _AUTO_CAPTURE_LOCKS_MAX = 500  # Prevent unbounded lock accumulation
+_AUTO_CAPTURE_INPUT_MAX_CHARS = 8000
+_AUTO_CAPTURE_MAX_TASKS = 8
 
 
 def _get_auto_capture_lock_fns():
@@ -78,6 +87,40 @@ def _get_backend_lock() -> asyncio.Lock:
         _backend_lock = asyncio.Lock()
         _backend_lock_loop = current_loop
     return _backend_lock
+
+
+def _clip_auto_capture_input(user_input: str) -> str:
+    max_chars = max(
+        int(
+            getattr(
+                settings,
+                "NATIVE_MEMORY_AUTO_CAPTURE_INPUT_MAX_CHARS",
+                _AUTO_CAPTURE_INPUT_MAX_CHARS,
+            )
+            or 0
+        ),
+        1,
+    )
+    if len(user_input) <= max_chars:
+        return user_input
+    return (
+        user_input[:max_chars].rstrip()
+        + f"\n\n[truncated from {len(user_input)} chars for auto memory capture]"
+    )
+
+
+def _get_auto_capture_max_tasks() -> int:
+    return max(
+        int(
+            getattr(
+                settings,
+                "NATIVE_MEMORY_AUTO_CAPTURE_MAX_TASKS",
+                _AUTO_CAPTURE_MAX_TASKS,
+            )
+            or 0
+        ),
+        1,
+    )
 
 
 async def _get_backend() -> Optional[MemoryBackend]:
@@ -140,14 +183,11 @@ async def memory_retain(
     """
     user_id = get_user_id_from_runtime(runtime)
     if not user_id:
-        return json.dumps({"success": False, "error": "User not authenticated"}, ensure_ascii=False)
+        return await _json_dumps_result({"success": False, "error": "User not authenticated"})
 
     backend = await _get_backend()
     if not backend:
-        return json.dumps(
-            {"success": False, "error": "Memory service not available"},
-            ensure_ascii=False,
-        )
+        return await _json_dumps_result({"success": False, "error": "Memory service not available"})
 
     try:
         result = await backend.retain(
@@ -159,10 +199,10 @@ async def memory_retain(
             tags=tags,
             existing_memory_id=existing_memory_id,
         )
-        return json.dumps(result, ensure_ascii=False)
+        return await _json_dumps_result(result)
     except Exception as e:
         logger.error(f"[Memory] Failed to retain memory: {e}")
-        return json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
+        return await _json_dumps_result({"success": False, "error": str(e)})
 
 
 @tool
@@ -183,21 +223,18 @@ async def memory_recall(
     """
     user_id = get_user_id_from_runtime(runtime)
     if not user_id:
-        return json.dumps({"success": False, "error": "User not authenticated"}, ensure_ascii=False)
+        return await _json_dumps_result({"success": False, "error": "User not authenticated"})
 
     backend = await _get_backend()
     if not backend:
-        return json.dumps(
-            {"success": False, "error": "Memory service not available"},
-            ensure_ascii=False,
-        )
+        return await _json_dumps_result({"success": False, "error": "Memory service not available"})
 
     try:
         result = await backend.recall(user_id, query, max_results, memory_types)
-        return json.dumps(result, ensure_ascii=False)
+        return await _json_dumps_result(result)
     except Exception as e:
         logger.error(f"[Memory] Failed to recall memories: {e}")
-        return json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
+        return await _json_dumps_result({"success": False, "error": str(e)})
 
 
 @tool
@@ -213,21 +250,18 @@ async def memory_delete(
     """
     user_id = get_user_id_from_runtime(runtime)
     if not user_id:
-        return json.dumps({"success": False, "error": "User not authenticated"}, ensure_ascii=False)
+        return await _json_dumps_result({"success": False, "error": "User not authenticated"})
 
     backend = await _get_backend()
     if not backend:
-        return json.dumps(
-            {"success": False, "error": "Memory service not available"},
-            ensure_ascii=False,
-        )
+        return await _json_dumps_result({"success": False, "error": "Memory service not available"})
 
     try:
         result = await backend.delete(user_id, memory_id)
-        return json.dumps(result, ensure_ascii=False)
+        return await _json_dumps_result(result)
     except Exception as e:
         logger.error(f"[Memory] Failed to delete memory: {e}")
-        return json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
+        return await _json_dumps_result({"success": False, "error": str(e)})
 
 
 # ============================================================================
@@ -260,6 +294,14 @@ def _background_task_error(task: asyncio.Task) -> None:
             logger.warning(f"[Memory] Background task failed: {exc}")
     except asyncio.CancelledError:
         pass
+
+
+def _auto_capture_task_done(user_id: str, task: asyncio.Task) -> None:
+    current = _auto_capture_tasks_by_user.get(user_id)
+    if current is task:
+        _auto_capture_tasks_by_user.pop(user_id, None)
+    _background_tasks.discard(task)
+    _background_task_error(task)
 
 
 async def _auto_retain_user_memory(user_id: str, user_input: str) -> None:
@@ -327,11 +369,27 @@ def schedule_auto_memory_capture(user_id: str, user_input: str) -> None:
     except RuntimeError:
         return
 
+    existing = _auto_capture_tasks_by_user.get(user_id)
+    if existing is not None and not existing.done():
+        logger.debug("[Memory] Auto-retain already running for user %s, skipping", user_id)
+        return
+    active_auto_capture_tasks = sum(
+        1 for task in _auto_capture_tasks_by_user.values() if not task.done()
+    )
+    if active_auto_capture_tasks >= _get_auto_capture_max_tasks():
+        logger.warning(
+            "[Memory] Auto-retain skipped for user %s: active task limit reached (%s)",
+            user_id,
+            active_auto_capture_tasks,
+        )
+        return
+
+    clipped_input = _clip_auto_capture_input(user_input)
     logger.info("[Memory] Scheduling auto-retain for user %s", user_id)
-    task = loop.create_task(_auto_retain_user_memory_detached(user_id, user_input))
+    task = loop.create_task(_auto_retain_user_memory_detached(user_id, clipped_input))
+    _auto_capture_tasks_by_user[user_id] = task
     _background_tasks.add(task)
-    task.add_done_callback(_background_task_error)
-    task.add_done_callback(_background_tasks.discard)
+    task.add_done_callback(lambda done: _auto_capture_task_done(user_id, done))
 
 
 async def run_scheduled_memory_compaction() -> dict:
@@ -428,6 +486,7 @@ async def shutdown() -> None:
     _backend = None
     _backend_lock = None
     _backend_lock_loop = None
+    _auto_capture_tasks_by_user.clear()
     _auto_capture_user_locks.clear()
     if backend is not None:
         try:

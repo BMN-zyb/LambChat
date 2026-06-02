@@ -250,12 +250,34 @@ SETTING_DEFINITIONS: dict[str, dict] = {
         "description": "settingDesc.SESSION_EVENT_MONGO_BUFFER_MAX",
         "default": 10000,
     },
+    "SESSION_EVENT_READ_DEFAULT_LIMIT": {
+        "type": SettingType.NUMBER,
+        "category": SettingCategory.SESSION,
+        "subcategory": "events",
+        "description": "settingDesc.SESSION_EVENT_READ_DEFAULT_LIMIT",
+        "default": 1000,
+    },
     "SESSION_EVENT_TTL_CACHE_MAX": {
         "type": SettingType.NUMBER,
         "category": SettingCategory.SESSION,
         "subcategory": "events",
         "description": "settingDesc.SESSION_EVENT_TTL_CACHE_MAX",
         "default": 5000,
+    },
+    "SESSION_EVENT_REDIS_REPLAY_BATCH_SIZE": {
+        "type": SettingType.NUMBER,
+        "category": SettingCategory.SESSION,
+        "subcategory": "events",
+        "description": "settingDesc.SESSION_EVENT_REDIS_REPLAY_BATCH_SIZE",
+        "default": 500,
+    },
+    "FEISHU_UPLOAD_BYTES_MAX_SIZE": {
+        "type": SettingType.NUMBER,
+        "category": SettingCategory.FILE_UPLOAD,
+        "subcategory": "feishu",
+        "description": "settingDesc.FEISHU_UPLOAD_BYTES_MAX_SIZE",
+        "default": 20971520,
+        "frontend_visible": False,
     },
     "SESSION_SEARCH_BACKFILL_STARTUP_DELAY_SECONDS": {
         "type": SettingType.NUMBER,
@@ -300,6 +322,13 @@ SETTING_DEFINITIONS: dict[str, dict] = {
         "description": "settingDesc.ENABLE_RECOMMEND_QUESTIONS",
         "default": True,
     },
+    "RECOMMEND_QUESTIONS_MAX_BACKGROUND_TASKS": {
+        "type": SettingType.NUMBER,
+        "category": SettingCategory.SESSION,
+        "subcategory": "recommendations",
+        "description": "settingDesc.RECOMMEND_QUESTIONS_MAX_BACKGROUND_TASKS",
+        "default": 8,
+    },
     # ============================================
     # Event Merger Settings
     # ============================================
@@ -341,6 +370,14 @@ SETTING_DEFINITIONS: dict[str, dict] = {
         "subcategory": "events",
         "description": "settingDesc.EVENT_MERGE_TIMEOUT_SECONDS",
         "default": 120.0,
+        "depends_on": "ENABLE_EVENT_MERGER",
+    },
+    "EVENT_MERGE_MAX_EVENTS_PER_TRACE": {
+        "type": SettingType.NUMBER,
+        "category": SettingCategory.SESSION,
+        "subcategory": "events",
+        "description": "settingDesc.EVENT_MERGE_MAX_EVENTS_PER_TRACE",
+        "default": 5000,
         "depends_on": "ENABLE_EVENT_MERGER",
     },
     # ============================================
@@ -394,6 +431,14 @@ SETTING_DEFINITIONS: dict[str, dict] = {
         "subcategory": "general",
         "description": "settingDesc.SANDBOX_GREP_TIMEOUT",
         "default": 30,
+        "depends_on": "ENABLE_SANDBOX",
+    },
+    "SANDBOX_MCP_REBUILD_CONCURRENCY": {
+        "type": SettingType.NUMBER,
+        "category": SettingCategory.SANDBOX,
+        "subcategory": "general",
+        "description": "settingDesc.SANDBOX_MCP_REBUILD_CONCURRENCY",
+        "default": 4,
         "depends_on": "ENABLE_SANDBOX",
     },
     "DAYTONA_IMAGE": {
@@ -520,6 +565,33 @@ SETTING_DEFINITIONS: dict[str, dict] = {
         "depends_on": "ENABLE_MCP",
         "frontend_visible": True,
     },
+    "MCP_GLOBAL_INIT_WAIT_SECONDS": {
+        "type": SettingType.NUMBER,
+        "category": SettingCategory.TOOLS,
+        "subcategory": "mcp",
+        "description": "settingDesc.MCP_GLOBAL_INIT_WAIT_SECONDS",
+        "default": 5,
+        "depends_on": "ENABLE_MCP",
+        "frontend_visible": False,
+    },
+    "MCP_GLOBAL_WARMUP_CONCURRENCY": {
+        "type": SettingType.NUMBER,
+        "category": SettingCategory.TOOLS,
+        "subcategory": "mcp",
+        "description": "settingDesc.MCP_GLOBAL_WARMUP_CONCURRENCY",
+        "default": 5,
+        "depends_on": "ENABLE_MCP",
+        "frontend_visible": False,
+    },
+    "MCP_GLOBAL_WARMUP_MAX_USERS": {
+        "type": SettingType.NUMBER,
+        "category": SettingCategory.TOOLS,
+        "subcategory": "mcp",
+        "description": "settingDesc.MCP_GLOBAL_WARMUP_MAX_USERS",
+        "default": 100,
+        "depends_on": "ENABLE_MCP",
+        "frontend_visible": False,
+    },
     "MCP_USER_CACHE_TTL_SECONDS": {
         "type": SettingType.NUMBER,
         "category": SettingCategory.TOOLS,
@@ -555,6 +627,33 @@ SETTING_DEFINITIONS: dict[str, dict] = {
         "default": 100,
         "depends_on": "ENABLE_MCP",
         "frontend_visible": True,
+    },
+    "MCP_SERVER_LOAD_CONCURRENCY": {
+        "type": SettingType.NUMBER,
+        "category": SettingCategory.TOOLS,
+        "subcategory": "mcp",
+        "description": "settingDesc.MCP_SERVER_LOAD_CONCURRENCY",
+        "default": 4,
+        "depends_on": "ENABLE_MCP",
+        "frontend_visible": False,
+    },
+    "MCP_EFFECTIVE_CONFIG_MAX_SERVERS": {
+        "type": SettingType.NUMBER,
+        "category": SettingCategory.TOOLS,
+        "subcategory": "mcp",
+        "description": "settingDesc.MCP_EFFECTIVE_CONFIG_MAX_SERVERS",
+        "default": 100,
+        "depends_on": "ENABLE_MCP",
+        "frontend_visible": False,
+    },
+    "MCP_EFFECTIVE_CONFIG_MAX_TOOLS": {
+        "type": SettingType.NUMBER,
+        "category": SettingCategory.TOOLS,
+        "subcategory": "mcp",
+        "description": "settingDesc.MCP_EFFECTIVE_CONFIG_MAX_TOOLS",
+        "default": 200,
+        "depends_on": "ENABLE_MCP",
+        "frontend_visible": False,
     },
     "ENABLE_DEFERRED_TOOL_LOADING": {
         "type": SettingType.BOOLEAN,
@@ -610,6 +709,13 @@ SETTING_DEFINITIONS: dict[str, dict] = {
         "category": SettingCategory.AUDIO_TRANSCRIPTION,
         "description": "settingDesc.AUDIO_TRANSCRIPTION_MODEL",
         "default": "gpt-4o-mini-transcribe",
+        "depends_on": "ENABLE_AUDIO_TRANSCRIPTION",
+    },
+    "AUDIO_TRANSCRIPTION_MAX_DOWNLOAD_BYTES": {
+        "type": SettingType.NUMBER,
+        "category": SettingCategory.AUDIO_TRANSCRIPTION,
+        "description": "settingDesc.AUDIO_TRANSCRIPTION_MAX_DOWNLOAD_BYTES",
+        "default": 52428800,
         "depends_on": "ENABLE_AUDIO_TRANSCRIPTION",
     },
     # ============================================
@@ -696,6 +802,14 @@ SETTING_DEFINITIONS: dict[str, dict] = {
         "description": "settingDesc.MONGODB_AUTH_SOURCE",
         "default": "admin",
     },
+    "MONGODB_STORE_BATCH_CONCURRENCY": {
+        "type": SettingType.NUMBER,
+        "category": SettingCategory.MONGODB,
+        "subcategory": "performance",
+        "description": "settingDesc.MONGODB_STORE_BATCH_CONCURRENCY",
+        "default": 16,
+        "frontend_visible": False,
+    },
     # ============================================
     # Redis Settings
     # ============================================
@@ -744,7 +858,7 @@ SETTING_DEFINITIONS: dict[str, dict] = {
         "category": SettingCategory.REDIS,
         "subcategory": "task",
         "description": "settingDesc.ARQ_WORKER_MAX_JOBS",
-        "default": 64,
+        "default": 2,
         "depends_on": "TASK_BACKEND",
     },
     "ARQ_JOB_TIMEOUT_SECONDS": {
@@ -754,6 +868,15 @@ SETTING_DEFINITIONS: dict[str, dict] = {
         "description": "settingDesc.ARQ_JOB_TIMEOUT_SECONDS",
         "default": 86400,
         "depends_on": "TASK_BACKEND",
+    },
+    "TASK_STARTUP_CLEANUP_CONCURRENCY": {
+        "type": SettingType.NUMBER,
+        "category": SettingCategory.REDIS,
+        "subcategory": "task",
+        "description": "settingDesc.TASK_STARTUP_CLEANUP_CONCURRENCY",
+        "default": 16,
+        "depends_on": "TASK_BACKEND",
+        "frontend_visible": False,
     },
     # ============================================
     # LangSmith Tracing Settings

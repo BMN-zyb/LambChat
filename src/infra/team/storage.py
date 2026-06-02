@@ -1,5 +1,6 @@
 """Team storage."""
 
+import re
 import uuid
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -8,10 +9,23 @@ from bson import ObjectId
 from src.infra.utils.datetime import utc_now
 from src.kernel.config import settings
 from src.kernel.schemas.persona_preset import PersonaStarterPrompt
-from src.kernel.schemas.team import TeamMemberResponse, TeamResponse, TeamVisibility
+from src.kernel.schemas.team import (
+    TEAM_MEMBERS_MAX,
+    TEAM_STARTER_PROMPTS_MAX,
+    TEAM_TAGS_MAX,
+    TeamMemberResponse,
+    TeamResponse,
+    TeamVisibility,
+)
 
 if TYPE_CHECKING:
     from motor.motor_asyncio import AsyncIOMotorCollection
+
+TEAM_LIST_LIMIT_MAX = 200
+
+
+def _bounded_list_limit(limit: int) -> int:
+    return min(max(int(limit), 1), TEAM_LIST_LIMIT_MAX)
 
 
 class TeamStorage:
@@ -44,6 +58,7 @@ class TeamStorage:
         return self._user_collection
 
     MAX_PINNED = 10
+    MAX_FAVORITES = 100
 
     @staticmethod
     def _user_query_id(user_id: str) -> ObjectId | str:
@@ -51,6 +66,22 @@ class TeamStorage:
             return ObjectId(user_id)
         except Exception:
             return user_id
+
+    @staticmethod
+    def _bounded_unique_ids(values: Any, limit: int) -> list[str]:
+        result: list[str] = []
+        seen: set[str] = set()
+        if not isinstance(values, list):
+            return result
+        for value in values:
+            clean = str(value).strip()
+            if not clean or clean in seen:
+                continue
+            seen.add(clean)
+            result.append(clean)
+            if len(result) >= limit:
+                break
+        return result
 
     # ── Document conversion ──
 
@@ -72,7 +103,7 @@ class TeamStorage:
     def _starter_prompt_docs(prompts: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
         """Normalize team starter prompts before persistence."""
         result: list[dict[str, Any]] = []
-        for prompt in prompts or []:
+        for prompt in (prompts or [])[:TEAM_STARTER_PROMPTS_MAX]:
             result.append(PersonaStarterPrompt(**prompt).model_dump(mode="json"))
         return result
 
@@ -87,7 +118,14 @@ class TeamStorage:
                 continue
             seen.add(item)
             result.append(item)
+            if len(result) >= TEAM_TAGS_MAX:
+                break
         return result
+
+    @staticmethod
+    def _member_docs(members: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+        """Normalize team members before persistence."""
+        return [TeamStorage._member_doc(member) for member in (members or [])[:TEAM_MEMBERS_MAX]]
 
     @staticmethod
     def _resolve_default_member_id(
@@ -147,8 +185,14 @@ class TeamStorage:
         )
         metadata = (doc or {}).get("metadata") or {}
         return {
-            "pinned": metadata.get("pinned_team_ids") or [],
-            "favorite": metadata.get("favorite_team_ids") or [],
+            "pinned": self._bounded_unique_ids(
+                metadata.get("pinned_team_ids"),
+                self.MAX_PINNED,
+            ),
+            "favorite": self._bounded_unique_ids(
+                metadata.get("favorite_team_ids"),
+                self.MAX_FAVORITES,
+            ),
         }
 
     async def _set_user_team_preference(
@@ -193,6 +237,12 @@ class TeamStorage:
 
         if update.get("is_favorite") is not None:
             if update["is_favorite"] and team_id not in favorite:
+                if len(favorite) >= self.MAX_FAVORITES:
+                    return {
+                        "is_favorite": False,
+                        "is_pinned": team_id in pinned,
+                        "last_used_at": None,
+                    }
                 favorite.append(team_id)
             elif not update["is_favorite"] and team_id in favorite:
                 favorite.remove(team_id)
@@ -265,7 +315,7 @@ class TeamStorage:
     ) -> TeamResponse:
         """Create a new team."""
         now = utc_now()
-        members_docs = [self._member_doc(m) for m in members or []]
+        members_docs = self._member_docs(members)
         doc: dict[str, Any] = {
             "owner_user_id": owner_user_id,
             "name": name,
@@ -315,6 +365,7 @@ class TeamStorage:
         tag: str | None = None,
     ) -> tuple[list[TeamResponse], int]:
         """List teams for an owner, paginated. Returns (teams, total)."""
+        limit = _bounded_list_limit(limit)
         query: dict[str, Any] = {"owner_user_id": owner_user_id}
         if favorite is True or pinned is True:
             pref = await self._get_user_team_preference(owner_user_id)
@@ -330,32 +381,50 @@ class TeamStorage:
             except Exception:
                 return [], 0
 
-        cursor = self.collection.find(query)
-        docs = [doc async for doc in cursor]
-        teams = [self._doc_to_response(doc) for doc in docs]
         if q:
             needle = q.strip().lower()
             if needle:
-                teams = [
-                    team
-                    for team in teams
-                    if needle in team.name.lower()
-                    or needle in team.description.lower()
-                    or any(needle in item.lower() for item in team.tags)
-                    or any(
-                        needle in member.role_name.lower()
-                        or any(needle in item.lower() for item in member.role_tags)
-                        for member in team.members
-                    )
+                pattern = re.escape(needle)
+                query["$or"] = [
+                    {"name": {"$regex": pattern, "$options": "i"}},
+                    {"description": {"$regex": pattern, "$options": "i"}},
+                    {"tags": {"$elemMatch": {"$regex": pattern, "$options": "i"}}},
+                    {"members.role_name": {"$regex": pattern, "$options": "i"}},
+                    {"members.role_tags": {"$elemMatch": {"$regex": pattern, "$options": "i"}}},
                 ]
         if tag:
             tag_filter = tag.strip()
             if tag_filter:
-                teams = [team for team in teams if tag_filter in team.tags]
-        teams = await self._apply_user_preferences(owner_user_id, teams)
-        teams.sort(key=self._preference_sort_key)
-        total = len(teams)
-        teams = teams[skip : skip + limit]
+                query["tags"] = tag_filter
+
+        total = await self.collection.count_documents(query)
+        if total == 0:
+            return [], 0
+
+        pref = await self._get_user_team_preference(owner_user_id)
+        pinned_ids = pref["pinned"]
+        favorite_ids = pref["favorite"]
+        pipeline: list[dict[str, Any]] = [
+            {"$match": query},
+            {
+                "$addFields": {
+                    "is_pinned": {"$in": [{"$toString": "$_id"}, pinned_ids]},
+                    "is_favorite": {"$in": [{"$toString": "$_id"}, favorite_ids]},
+                }
+            },
+            {
+                "$sort": {
+                    "is_pinned": -1,
+                    "is_favorite": -1,
+                    "updated_at": -1,
+                    "created_at": -1,
+                }
+            },
+            {"$skip": skip},
+            {"$limit": limit},
+        ]
+        docs = [doc async for doc in self.collection.aggregate(pipeline)]
+        teams = [self._doc_to_response(doc) for doc in docs]
         return teams, total
 
     async def update_team(
@@ -376,7 +445,7 @@ class TeamStorage:
 
         # Full replacement semantics for members: regenerate member_ids
         if "members" in update:
-            new_members = [self._member_doc(m) for m in update["members"]]
+            new_members = self._member_docs(update["members"])
             update["members"] = new_members
             update["default_member_id"] = self._resolve_default_member_id(
                 new_members,

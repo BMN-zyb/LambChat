@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import re
+from datetime import datetime
 from unittest.mock import MagicMock
 
 import pytest
 from bson import ObjectId
 
 from src.infra.team.storage import TeamStorage
+from src.kernel.schemas.team import TEAM_MEMBERS_MAX, TEAM_STARTER_PROMPTS_MAX, TEAM_TAGS_MAX
 
 
 def _make_fake_collection():
@@ -44,9 +47,45 @@ def _make_fake_collection():
             return dict(doc)
         return None
 
+    def _matches_regex(value, regex: str) -> bool:
+        if isinstance(value, list):
+            return any(_matches_regex(item, regex) for item in value)
+        return re.search(regex, str(value or ""), re.IGNORECASE) is not None
+
+    def _matches_path(doc: dict, path: str, condition) -> bool:
+        current = doc
+        parts = path.split(".")
+        for index, part in enumerate(parts):
+            if isinstance(current, list):
+                return any(
+                    _matches_path(item, ".".join(parts[index:]), condition) for item in current
+                )
+            if not isinstance(current, dict):
+                return False
+            current = current.get(part)
+        if isinstance(condition, dict):
+            if "$regex" in condition:
+                return _matches_regex(current, condition["$regex"])
+            if "$elemMatch" in condition:
+                return _matches_regex(current, condition["$elemMatch"]["$regex"])
+            if "$in" in condition:
+                return current in set(condition["$in"])
+        if isinstance(current, list):
+            return condition in current
+        return current == condition
+
+    def _matches_query(doc: dict, query: dict) -> bool:
+        for key, value in query.items():
+            if key == "$or":
+                if not any(_matches_query(doc, clause) for clause in value):
+                    return False
+                continue
+            if not _matches_path(doc, key, value):
+                return False
+        return True
+
     async def count_documents(query: dict):
-        owner = query.get("owner_user_id")
-        return sum(1 for d in store if d.get("owner_user_id") == owner)
+        return sum(1 for d in store if _matches_query(d, query))
 
     class _Cursor:
         def __init__(self, docs):
@@ -68,14 +107,36 @@ def _make_fake_collection():
                 yield doc
 
     def find(query: dict):
-        owner = query.get("owner_user_id")
-        allowed_ids = set(query.get("_id", {}).get("$in", []))
-        matches = [
-            dict(d)
-            for d in store
-            if d.get("owner_user_id") == owner and (not allowed_ids or d.get("_id") in allowed_ids)
-        ]
+        matches = [dict(d) for d in store if _matches_query(d, query)]
         return _Cursor(matches)
+
+    def aggregate(pipeline: list[dict]):
+        docs = [dict(d) for d in store]
+        for stage in pipeline:
+            if "$match" in stage:
+                docs = [doc for doc in docs if _matches_query(doc, stage["$match"])]
+            elif "$addFields" in stage:
+                pinned_ids = stage["$addFields"]["is_pinned"]["$in"][1]
+                favorite_ids = stage["$addFields"]["is_favorite"]["$in"][1]
+                for doc in docs:
+                    doc["is_pinned"] = str(doc["_id"]) in pinned_ids
+                    doc["is_favorite"] = str(doc["_id"]) in favorite_ids
+            elif "$sort" in stage:
+
+                def _sort_key(doc):
+                    return (
+                        int(bool(doc.get("is_pinned"))),
+                        int(bool(doc.get("is_favorite"))),
+                        doc.get("updated_at"),
+                        doc.get("created_at"),
+                    )
+
+                docs.sort(key=_sort_key, reverse=True)
+            elif "$skip" in stage:
+                docs = docs[stage["$skip"] :]
+            elif "$limit" in stage:
+                docs = docs[: stage["$limit"]]
+        return _Cursor(docs)
 
     async def delete_one(query: dict):
         filter_id = query.get("_id")
@@ -119,6 +180,7 @@ def _make_fake_collection():
     coll.insert_one = insert_one
     coll.find_one = find_one
     coll.find = find
+    coll.aggregate = aggregate
     coll.count_documents = count_documents
     coll.delete_one = delete_one
     coll.find_one_and_update = find_one_and_update
@@ -234,6 +296,31 @@ async def test_create_team_preserves_tags(storage):
 
 
 @pytest.mark.asyncio
+async def test_create_team_caps_members_tags_and_starter_prompts_at_storage_layer(storage):
+    s, store, users = storage
+
+    team = await s.create_team(
+        owner_user_id="user-1",
+        name="Bounded Team",
+        tags=[f"tag-{index}" for index in range(TEAM_TAGS_MAX + 5)],
+        members=[
+            {"persona_preset_id": f"preset-{index}", "position": index}
+            for index in range(TEAM_MEMBERS_MAX + 5)
+        ],
+        starter_prompts=[
+            {"icon": "", "text": f"prompt-{index}"} for index in range(TEAM_STARTER_PROMPTS_MAX + 5)
+        ],
+    )
+
+    assert len(team.tags) == TEAM_TAGS_MAX
+    assert len(team.members) == TEAM_MEMBERS_MAX
+    assert len(team.starter_prompts) == TEAM_STARTER_PROMPTS_MAX
+    assert team.tags[-1] == f"tag-{TEAM_TAGS_MAX - 1}"
+    assert team.members[-1].persona_preset_id == f"preset-{TEAM_MEMBERS_MAX - 1}"
+    assert team.starter_prompts[-1].text == f"prompt-{TEAM_STARTER_PROMPTS_MAX - 1}"
+
+
+@pytest.mark.asyncio
 async def test_create_team_uses_created_first_member_as_default(storage):
     s, store, users = storage
 
@@ -272,6 +359,142 @@ async def test_list_teams_paginated(storage):
 
 
 @pytest.mark.asyncio
+async def test_list_teams_uses_bounded_aggregation_instead_of_materializing_find():
+    owner_user_id = str(ObjectId())
+    team_id = ObjectId()
+    pipelines: list[list[dict]] = []
+
+    class _Cursor:
+        def __init__(self, docs):
+            self._docs = list(docs)
+
+        def __aiter__(self):
+            self._iter = iter(self._docs)
+            return self
+
+        async def __anext__(self):
+            try:
+                return next(self._iter)
+            except StopIteration:
+                raise StopAsyncIteration
+
+    class _Collection:
+        def find(self, _query):
+            raise AssertionError("list_teams should not materialize an unbounded find cursor")
+
+        async def count_documents(self, query):
+            assert query == {"owner_user_id": owner_user_id}
+            return 1
+
+        def aggregate(self, pipeline):
+            pipelines.append(pipeline)
+            return _Cursor(
+                [
+                    {
+                        "_id": team_id,
+                        "owner_user_id": owner_user_id,
+                        "name": "Bounded",
+                        "description": "",
+                        "tags": [],
+                        "members": [],
+                        "created_at": datetime(2026, 1, 1),
+                        "updated_at": datetime(2026, 1, 1),
+                    }
+                ]
+            )
+
+    s = TeamStorage()
+    s._collection = _Collection()
+    user_coll, _users = _make_fake_user_collection()
+    s._user_collection = user_coll
+
+    teams, total = await s.list_teams(owner_user_id=owner_user_id, skip=20, limit=10)
+
+    assert total == 1
+    assert [team.name for team in teams] == ["Bounded"]
+    assert {"$skip": 20} in pipelines[0]
+    assert {"$limit": 10} in pipelines[0]
+
+
+@pytest.mark.asyncio
+async def test_list_teams_clamps_storage_limit():
+    owner_user_id = str(ObjectId())
+    pipelines: list[list[dict]] = []
+
+    class _Cursor:
+        def __aiter__(self):
+            self._iter = iter([])
+            return self
+
+        async def __anext__(self):
+            raise StopAsyncIteration
+
+    class _Collection:
+        async def count_documents(self, query):
+            assert query == {"owner_user_id": owner_user_id}
+            return 500
+
+        def aggregate(self, pipeline):
+            pipelines.append(pipeline)
+            return _Cursor()
+
+    s = TeamStorage()
+    s._collection = _Collection()
+    user_coll, _users = _make_fake_user_collection()
+    s._user_collection = user_coll
+
+    teams, total = await s.list_teams(owner_user_id=owner_user_id, skip=0, limit=10_000)
+
+    assert teams == []
+    assert total == 500
+    assert {"$limit": 200} in pipelines[0]
+
+
+@pytest.mark.asyncio
+async def test_list_teams_bounds_large_user_preference_arrays():
+    owner_user_id = str(ObjectId())
+    pipelines: list[list[dict]] = []
+
+    class _Cursor:
+        def __aiter__(self):
+            self._iter = iter([])
+            return self
+
+        async def __anext__(self):
+            raise StopAsyncIteration
+
+    class _Collection:
+        async def count_documents(self, query):
+            assert query == {"owner_user_id": owner_user_id}
+            return 1
+
+        def aggregate(self, pipeline):
+            pipelines.append(pipeline)
+            return _Cursor()
+
+    class _UserCollection:
+        async def find_one(self, _query, _projection=None):
+            return {
+                "metadata": {
+                    "pinned_team_ids": [f"pin-{index}" for index in range(30)],
+                    "favorite_team_ids": [f"fav-{index}" for index in range(500)],
+                }
+            }
+
+    s = TeamStorage()
+    s._collection = _Collection()
+    s._user_collection = _UserCollection()
+
+    teams, total = await s.list_teams(owner_user_id=owner_user_id, skip=0, limit=10)
+
+    assert teams == []
+    assert total == 1
+    add_fields = pipelines[0][1]["$addFields"]
+    assert len(add_fields["is_pinned"]["$in"][1]) == s.MAX_PINNED
+    assert len(add_fields["is_favorite"]["$in"][1]) == s.MAX_FAVORITES
+
+
+@pytest.mark.asyncio
 async def test_list_teams_filters_by_query_and_tag(storage):
     s, store, users = storage
     await s.create_team(
@@ -297,6 +520,31 @@ async def test_list_teams_filters_by_query_and_tag(storage):
 
     assert total == 1
     assert [team.name for team in teams] == ["Research Team"]
+
+
+@pytest.mark.asyncio
+async def test_list_teams_search_treats_query_as_literal_text(storage):
+    s, store, users = storage
+    await s.create_team(
+        owner_user_id="user-1",
+        name="A.B Team",
+        description="literal punctuation",
+    )
+    await s.create_team(
+        owner_user_id="user-1",
+        name="AXB Team",
+        description="regex-looking neighbor",
+    )
+
+    teams, total = await s.list_teams(
+        owner_user_id="user-1",
+        q="A.B",
+        skip=0,
+        limit=10,
+    )
+
+    assert total == 1
+    assert [team.name for team in teams] == ["A.B Team"]
 
 
 @pytest.mark.asyncio
@@ -386,6 +634,33 @@ async def test_update_team_preserves_starter_prompts(storage):
     assert [prompt.model_dump(mode="json") for prompt in updated.starter_prompts] == [
         {"icon": "💬", "text": "让团队给我三个方案"},
     ]
+
+
+@pytest.mark.asyncio
+async def test_update_team_caps_members_tags_and_starter_prompts_at_storage_layer(storage):
+    s, store, users = storage
+    original = await s.create_team(owner_user_id="user-1", name="Original")
+
+    updated = await s.update_team(
+        original.id,
+        owner_user_id="user-1",
+        update={
+            "tags": [f"tag-{index}" for index in range(TEAM_TAGS_MAX + 5)],
+            "members": [
+                {"persona_preset_id": f"preset-{index}", "position": index}
+                for index in range(TEAM_MEMBERS_MAX + 5)
+            ],
+            "starter_prompts": [
+                {"icon": "", "text": f"prompt-{index}"}
+                for index in range(TEAM_STARTER_PROMPTS_MAX + 5)
+            ],
+        },
+    )
+
+    assert updated is not None
+    assert len(updated.tags) == TEAM_TAGS_MAX
+    assert len(updated.members) == TEAM_MEMBERS_MAX
+    assert len(updated.starter_prompts) == TEAM_STARTER_PROMPTS_MAX
 
 
 @pytest.mark.asyncio
@@ -489,6 +764,31 @@ async def test_list_teams_filters_favorites(storage):
 
     assert total == 1
     assert [team.id for team in teams] == [favorite.id]
+
+
+@pytest.mark.asyncio
+async def test_update_team_preference_rejects_favorite_overflow(storage):
+    s, store, users = storage
+    owner_user_id = str(ObjectId())
+    team_id = str(ObjectId())
+    users[ObjectId(owner_user_id)] = {
+        "_id": ObjectId(owner_user_id),
+        "metadata": {
+            "pinned_team_ids": [],
+            "favorite_team_ids": [str(ObjectId()) for _ in range(s.MAX_FAVORITES)],
+        },
+    }
+
+    result = await s.update_user_preference(
+        user_id=owner_user_id,
+        team_id=team_id,
+        update={"is_favorite": True},
+    )
+
+    metadata = users[ObjectId(owner_user_id)]["metadata"]
+    assert result["is_favorite"] is False
+    assert team_id not in metadata["favorite_team_ids"]
+    assert len(metadata["favorite_team_ids"]) == s.MAX_FAVORITES
 
 
 @pytest.mark.asyncio

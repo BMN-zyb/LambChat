@@ -18,18 +18,45 @@ from typing import Any
 from redis.exceptions import ConnectionError as RedisConnectionError
 
 from src.infra.logging import get_logger
-from src.infra.storage.redis import create_redis_client
 
 logger = get_logger(__name__)
 
 PubSubHandler = Callable[[dict[str, Any]], Awaitable[None] | None]
 _MAX_RECONNECT_DELAY = 30
+_DEFAULT_MAX_HANDLER_TASKS = 128
+_DEFAULT_MAX_MESSAGE_BYTES = 256 * 1024
+
+
+def create_redis_client(*, isolated_pool: bool = False, socket_timeout: Any = None) -> Any:
+    """Create Redis client lazily to avoid import cycles at module import time."""
+    from src.infra.storage.redis import create_redis_client as _create_redis_client
+
+    return _create_redis_client(
+        isolated_pool=isolated_pool,
+        socket_timeout=socket_timeout,
+    )
+
+
+def _message_data_size(data: Any) -> int:
+    if isinstance(data, bytes):
+        return len(data)
+    if isinstance(data, str):
+        return len(data.encode("utf-8"))
+    try:
+        return len(data)
+    except TypeError:
+        return 0
 
 
 class RedisPubSubHub:
     """Multiplex Redis pub/sub channels over a single shared listener."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        max_handler_tasks: int = _DEFAULT_MAX_HANDLER_TASKS,
+        max_message_bytes: int = _DEFAULT_MAX_MESSAGE_BYTES,
+    ) -> None:
         self._subscriptions: dict[str, dict[str, PubSubHandler]] = defaultdict(dict)
         self._lock = asyncio.Lock()
         self._listener_task: asyncio.Task | None = None
@@ -37,6 +64,10 @@ class RedisPubSubHub:
         self._running = False
         self._ready_event: asyncio.Event | None = None
         self._expected_disconnects: set[int] = set()
+        self._handler_tasks: set[asyncio.Task[None]] = set()
+        self._resubscribe_task: asyncio.Task[None] | None = None
+        self._handler_semaphore = asyncio.Semaphore(max(1, max_handler_tasks))
+        self._max_message_bytes = max(1, int(max_message_bytes))
 
     def subscribe(self, channel: str, handler: PubSubHandler) -> str:
         """Register a handler for a Redis channel."""
@@ -85,6 +116,9 @@ class RedisPubSubHub:
                 await self._listener_task
             except asyncio.CancelledError:
                 pass
+
+        await self._cancel_resubscribe_task()
+        await self._cancel_handler_tasks()
 
         self._listener_task = None
         self._ready_event = None
@@ -176,27 +210,88 @@ class RedisPubSubHub:
         channel = message.get("channel")
         if not isinstance(channel, str):
             return
+        data_size = _message_data_size(message.get("data"))
+        if data_size > self._max_message_bytes:
+            logger.warning(
+                "Dropping oversized pub/sub message on channel %s: %s bytes > %s",
+                channel,
+                data_size,
+                self._max_message_bytes,
+            )
+            return
 
         handlers = list(self._subscriptions.get(channel, {}).values())
         for handler in handlers:
-            try:
-                result = handler(message)
-                if inspect.isawaitable(result):
-                    await result
-            except Exception as e:
-                logger.error("Pub/sub hub handler failed for channel %s: %s", channel, e)
+            await self._handler_semaphore.acquire()
+            task = asyncio.create_task(
+                self._run_handler(channel, handler, dict(message)),
+                name=f"pubsub-handler:{channel}",
+            )
+            self._handler_tasks.add(task)
+            task.add_done_callback(self._on_handler_task_done)
+
+    def _on_handler_task_done(self, task: asyncio.Task[None]) -> None:
+        self._handler_tasks.discard(task)
+        self._handler_semaphore.release()
+
+    async def _run_handler(
+        self,
+        channel: str,
+        handler: PubSubHandler,
+        message: dict[str, Any],
+    ) -> None:
+        try:
+            result = handler(message)
+            if inspect.isawaitable(result):
+                await result
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error("Pub/sub hub handler failed for channel %s: %s", channel, e)
+
+    async def _cancel_handler_tasks(self) -> None:
+        tasks = list(self._handler_tasks)
+        if not tasks:
+            return
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        self._handler_tasks.clear()
 
     def _schedule_resubscribe(self) -> None:
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return
-        loop.create_task(self._poke_listener())
+        if self._resubscribe_task is not None and not self._resubscribe_task.done():
+            return
+        self._resubscribe_task = loop.create_task(self._poke_listener())
+        self._resubscribe_task.add_done_callback(self._on_resubscribe_task_done)
+
+    def _on_resubscribe_task_done(self, task: asyncio.Task[None]) -> None:
+        if self._resubscribe_task is task:
+            self._resubscribe_task = None
+        if task.cancelled():
+            return
+        try:
+            task.result()
+        except Exception as e:
+            logger.warning("Pub/sub hub resubscribe poke failed: %s", e)
 
     async def _poke_listener(self) -> None:
         pubsub = self._pubsub
         if pubsub is not None:
             await self._close_pubsub(pubsub)
+
+    async def _cancel_resubscribe_task(self) -> None:
+        task = self._resubscribe_task
+        if task is None:
+            return
+        self._resubscribe_task = None
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
     async def _detach_pubsub(self, pubsub: Any | None) -> None:
         if pubsub is None:

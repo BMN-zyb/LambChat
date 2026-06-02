@@ -1,6 +1,7 @@
 """Normalize LangGraph and MCP tool outputs for presenter events."""
 
 import json
+from itertools import islice
 from typing import Any
 
 from src.infra.agent.events.types import TOOL_ERROR_INDICATORS
@@ -8,6 +9,57 @@ from src.infra.agent.events.types import TOOL_ERROR_INDICATORS
 MCP_MEDIA_TYPES = frozenset(("image", "file"))
 MCP_SKIP_KEYS = frozenset(("id",))
 TOOL_ERROR_PREFIXES = tuple(TOOL_ERROR_INDICATORS)
+TOOL_OUTPUT_SERIALIZE_MAX_STRING_CHARS = 2_000
+TOOL_OUTPUT_SERIALIZE_MAX_LIST_ITEMS = 100
+TOOL_OUTPUT_SERIALIZE_MAX_DICT_ITEMS = 100
+TOOL_OUTPUT_SERIALIZE_MAX_DEPTH = 8
+
+
+def _compact_serializable_value(value: Any, *, depth: int = 0) -> Any:
+    if depth >= TOOL_OUTPUT_SERIALIZE_MAX_DEPTH:
+        return "[truncated: max depth exceeded]"
+
+    if isinstance(value, str):
+        if len(value) <= TOOL_OUTPUT_SERIALIZE_MAX_STRING_CHARS:
+            return value
+        return (
+            value[:TOOL_OUTPUT_SERIALIZE_MAX_STRING_CHARS].rstrip()
+            + f"\n[truncated from {len(value)} chars]"
+        )
+
+    if isinstance(value, list):
+        items = [
+            _compact_serializable_value(item, depth=depth + 1)
+            for item in value[:TOOL_OUTPUT_SERIALIZE_MAX_LIST_ITEMS]
+        ]
+        omitted = len(value) - TOOL_OUTPUT_SERIALIZE_MAX_LIST_ITEMS
+        if omitted > 0:
+            items.append({"_truncated_items": omitted})
+        return items
+
+    if isinstance(value, dict):
+        compacted: dict[Any, Any] = {}
+        key_limit = TOOL_OUTPUT_SERIALIZE_MAX_DICT_ITEMS
+        for key in islice(value, key_limit):
+            compacted[key] = _compact_serializable_value(value[key], depth=depth + 1)
+        omitted = len(value) - key_limit
+        if omitted > 0:
+            compacted["_truncated_keys"] = omitted
+        return compacted
+
+    return value
+
+
+def _json_dumps_compacted(value: Any) -> str:
+    return json.dumps(
+        _compact_serializable_value(value),
+        ensure_ascii=False,
+        default=str,
+    )
+
+
+def _compact_text(value: str) -> str:
+    return _compact_serializable_value(value)
 
 
 def extract_tool_output(out: Any) -> Any:
@@ -140,7 +192,7 @@ def collect_blocks(content: list, text_parts: list[str], media_blocks: list[dict
         block_type = block.get("type", "")
         if block_type == "text":
             text = block.get("text")
-            text_parts.append(str(text) if text is not None else "")
+            text_parts.append(_compact_text(str(text)) if text is not None else "")
         elif block_type in MCP_MEDIA_TYPES:
             media_blocks.append(
                 {key: value for key, value in block.items() if key not in MCP_SKIP_KEYS}
@@ -149,7 +201,7 @@ def collect_blocks(content: list, text_parts: list[str], media_blocks: list[dict
             )
             has_media = True
         elif "text" in block:
-            text_parts.append(str(block["text"]))
+            text_parts.append(_compact_text(str(block["text"])))
         else:
             media_blocks.append(
                 {key: value for key, value in block.items() if key not in MCP_SKIP_KEYS}
@@ -197,21 +249,21 @@ def process_messages(messages: list) -> Any:
 
         # Prefer content (human-readable) over artifact (structured metadata)
         if isinstance(content, str) and content:
-            text_parts.append(content)
+            text_parts.append(_compact_text(content))
             continue
         if isinstance(content, list):
             if collect_blocks(content, text_parts, media_blocks):
                 has_media = True
             continue
         if artifact is not None:
-            text_parts.append(json.dumps(artifact, ensure_ascii=False))
+            text_parts.append(_json_dumps_compacted(artifact))
             continue
 
         # Fallback: stringify whatever content is
         if isinstance(content, dict):
-            text_parts.append(json.dumps(content, ensure_ascii=False))
+            text_parts.append(_json_dumps_compacted(content))
         elif content is not None:
-            text_parts.append(str(content))
+            text_parts.append(_compact_text(str(content)))
 
     text_result = "\n".join(text_parts)
     if has_media:

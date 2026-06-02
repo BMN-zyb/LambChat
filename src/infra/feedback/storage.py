@@ -24,6 +24,12 @@ from src.kernel.schemas.feedback import (
 
 logger = get_logger(__name__)
 
+FEEDBACK_LIST_LIMIT_MAX = 100
+
+
+def _bounded_limit(limit: int) -> int:
+    return min(max(int(limit), 1), FEEDBACK_LIST_LIMIT_MAX)
+
 
 class FeedbackStorage:
     """用户反馈存储"""
@@ -194,6 +200,7 @@ class FeedbackStorage:
         Returns:
             反馈列表
         """
+        limit = _bounded_limit(limit)
         query: dict[str, Any] = {}
         if rating is not None:
             query["rating"] = rating

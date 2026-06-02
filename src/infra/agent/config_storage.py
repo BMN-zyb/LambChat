@@ -9,6 +9,7 @@ Agent 配置存储层
 
 from typing import Any, Optional
 
+from src.infra.agent.model_access import ROLE_MODEL_ACCESS_LIMIT
 from src.infra.utils.datetime import utc_now, utc_now_iso
 from src.kernel.config import settings
 from src.kernel.schemas.agent import AgentCatalogConfig, AgentConfig, UserAgentPreference
@@ -19,6 +20,23 @@ _COLL_AGENT_CATALOG_CONFIG = "agent_catalog_config"
 _COLL_ROLE_AGENTS = "role_agents"
 _COLL_ROLE_MODELS = "role_models"
 _COLL_USER_PREFERENCES = "user_agent_preferences"
+ROLE_AGENT_ACCESS_LIMIT = 100
+AGENT_CATALOG_LIST_LIMIT = 100
+ROLE_AGENT_MAPPING_LIST_LIMIT = 500
+ROLE_MODEL_MAPPING_LIST_LIMIT = 500
+
+
+def _bounded_unique(values: list[str], limit: int) -> list[str]:
+    bounded = []
+    seen = set()
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        bounded.append(value)
+        if len(bounded) >= limit:
+            break
+    return bounded
 
 
 class AgentConfigStorage:
@@ -86,13 +104,46 @@ class AgentConfigStorage:
         agents = await self.get_global_config()
         return [a.id for a in agents if a.enabled]
 
+    async def is_agent_enabled(self, agent_id: str) -> bool:
+        """Check whether one agent is globally enabled without loading the whole catalog."""
+        catalog_collection = self._get_collection(_COLL_AGENT_CATALOG_CONFIG)
+        catalog_doc = await catalog_collection.find_one(
+            {
+                "$or": [{"agent_id": agent_id}, {"id": agent_id}],
+                "enabled": {"$ne": False},
+            },
+            {"_id": 1},
+        )
+        if catalog_doc:
+            return True
+
+        catalog_exists = await catalog_collection.find_one({}, {"_id": 1})
+        if catalog_exists:
+            return False
+
+        global_doc = await self._get_collection(_COLL_AGENT_CONFIG).find_one(
+            {
+                "type": "global",
+                "agents": {
+                    "$elemMatch": {
+                        "id": agent_id,
+                        "enabled": True,
+                    }
+                },
+            },
+            {"_id": 1},
+        )
+        return bool(global_doc)
+
     # ============================================
     # Agent 展示目录配置
     # ============================================
 
     async def get_catalog_config(self) -> list[AgentCatalogConfig]:
         """获取可配置 Agent 展示目录。"""
-        cursor = self._get_collection(_COLL_AGENT_CATALOG_CONFIG).find()
+        cursor = (
+            self._get_collection(_COLL_AGENT_CATALOG_CONFIG).find().limit(AGENT_CATALOG_LIST_LIMIT)
+        )
         docs = [doc async for doc in cursor]
         docs.sort(key=lambda doc: (doc.get("sort_order", 100), doc.get("agent_id", "")))
         return [
@@ -149,28 +200,35 @@ class AgentConfigStorage:
         Returns:
             可用的 Agent ID 列表，None 表示未配置
         """
-        doc = await self._get_collection(_COLL_ROLE_AGENTS).find_one({"role_id": role_id})
+        doc = await self._get_collection(_COLL_ROLE_AGENTS).find_one(
+            {"role_id": role_id},
+            {"allowed_agents": {"$slice": ROLE_AGENT_ACCESS_LIMIT}},
+        )
         if not doc:
             return None
-        return doc.get("allowed_agents") or None
+        allowed_agents = doc.get("allowed_agents")
+        if not allowed_agents:
+            return None
+        return allowed_agents[:ROLE_AGENT_ACCESS_LIMIT]
 
     async def set_role_agents(
         self, role_id: str, role_name: str, agent_ids: list[str]
     ) -> list[str]:
         """设置角色的可用 Agents"""
         now = utc_now()
+        bounded_agent_ids = _bounded_unique(agent_ids, ROLE_AGENT_ACCESS_LIMIT)
         await self._get_collection(_COLL_ROLE_AGENTS).update_one(
             {"role_id": role_id},
             {
                 "$set": {
                     "role_name": role_name,
-                    "allowed_agents": agent_ids,
+                    "allowed_agents": bounded_agent_ids,
                     "updated_at": now.isoformat(),
                 }
             },
             upsert=True,
         )
-        return agent_ids
+        return bounded_agent_ids
 
     async def delete_role_agents(self, role_id: str) -> bool:
         """删除角色的 Agents 配置"""
@@ -179,12 +237,15 @@ class AgentConfigStorage:
 
     async def get_all_role_agents(self) -> list[dict]:
         """获取所有角色的 Agents 配置"""
-        cursor = self._get_collection(_COLL_ROLE_AGENTS).find()
+        cursor = self._get_collection(_COLL_ROLE_AGENTS).find().limit(ROLE_AGENT_MAPPING_LIST_LIMIT)
         return [
             {
                 "role_id": doc["role_id"],
                 "role_name": doc.get("role_name", ""),
-                "allowed_agents": doc.get("allowed_agents", []),
+                "allowed_agents": _bounded_unique(
+                    doc.get("allowed_agents", []),
+                    ROLE_AGENT_ACCESS_LIMIT,
+                ),
             }
             async for doc in cursor
         ]
@@ -200,31 +261,35 @@ class AgentConfigStorage:
         Returns:
             可用的 Model value 列表，None 表示未配置（不限制）
         """
-        doc = await self._get_collection(_COLL_ROLE_MODELS).find_one({"role_id": role_id})
+        doc = await self._get_collection(_COLL_ROLE_MODELS).find_one(
+            {"role_id": role_id},
+            {"allowed_models": {"$slice": ROLE_MODEL_ACCESS_LIMIT}},
+        )
         if not doc:
             return None
         allowed_models = doc.get("allowed_models")
         if allowed_models is None:
             return None
-        return allowed_models
+        return allowed_models[:ROLE_MODEL_ACCESS_LIMIT]
 
     async def set_role_models(
         self, role_id: str, role_name: str, model_values: list[str]
     ) -> list[str]:
         """设置角色的可用 Models"""
         now = utc_now()
+        bounded_model_values = _bounded_unique(model_values, ROLE_MODEL_ACCESS_LIMIT)
         await self._get_collection(_COLL_ROLE_MODELS).update_one(
             {"role_id": role_id},
             {
                 "$set": {
                     "role_name": role_name,
-                    "allowed_models": model_values,
+                    "allowed_models": bounded_model_values,
                     "updated_at": now.isoformat(),
                 }
             },
             upsert=True,
         )
-        return model_values
+        return bounded_model_values
 
     async def delete_role_models(self, role_id: str) -> bool:
         """删除角色的 Models 配置"""
@@ -233,12 +298,15 @@ class AgentConfigStorage:
 
     async def get_all_role_models(self) -> list[dict]:
         """获取所有角色的 Models 配置"""
-        cursor = self._get_collection(_COLL_ROLE_MODELS).find()
+        cursor = self._get_collection(_COLL_ROLE_MODELS).find().limit(ROLE_MODEL_MAPPING_LIST_LIMIT)
         return [
             {
                 "role_id": doc["role_id"],
                 "role_name": doc.get("role_name", ""),
-                "allowed_models": doc.get("allowed_models", []),
+                "allowed_models": _bounded_unique(
+                    doc.get("allowed_models", []),
+                    ROLE_MODEL_ACCESS_LIMIT,
+                ),
             }
             async for doc in cursor
         ]

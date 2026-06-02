@@ -8,6 +8,7 @@ import uuid
 from datetime import datetime
 from typing import Any, Awaitable, Callable
 
+from src.infra.async_utils import run_blocking_io
 from src.infra.logging import get_logger
 from src.infra.memory.client.native.content import (
     build_content_fields,
@@ -23,6 +24,37 @@ from src.infra.utils.datetime import ensure_utc, utc_now
 from src.kernel.config import settings
 
 logger = get_logger(__name__)
+
+_CONSOLIDATION_MEMORY_SCAN_LIMIT = 500
+_CONSOLIDATION_BATCH_SIZE = 30
+_CONSOLIDATION_CAP_PRUNE_BATCH_SIZE = 100
+_CONSOLIDATION_INPUT_CONTENT_MAX_CHARS = 4000
+
+
+def _consolidation_input_content_max_chars() -> int:
+    try:
+        value = int(
+            getattr(
+                settings,
+                "NATIVE_MEMORY_CONSOLIDATION_INPUT_MAX_CHARS",
+                _CONSOLIDATION_INPUT_CONTENT_MAX_CHARS,
+            )
+            or _CONSOLIDATION_INPUT_CONTENT_MAX_CHARS
+        )
+    except (TypeError, ValueError):
+        value = _CONSOLIDATION_INPUT_CONTENT_MAX_CHARS
+    return max(value, 1)
+
+
+def _clip_consolidation_input_content(content: Any) -> str:
+    text = str(content or "")
+    max_chars = _consolidation_input_content_max_chars()
+    if len(text) <= max_chars:
+        return text
+    return (
+        text[:max_chars].rstrip()
+        + f"\n\n[truncated from {len(text)} chars for memory consolidation]"
+    )
 
 
 async def consolidate_memories(
@@ -51,21 +83,51 @@ async def consolidate_memories(
 
 
 async def do_consolidate(backend, user_id: str) -> dict[str, Any]:
-    all_memories = await backend._collection.find(
+    cursor = backend._collection.find(
         {"user_id": user_id},
         {"embedding": 0},
         sort=[("created_at", 1)],
-    ).to_list(length=500)
+    ).limit(_CONSOLIDATION_MEMORY_SCAN_LIMIT)
 
-    if len(all_memories) < 5:
-        return {"merged": 0, "pruned": 0, "total_before": len(all_memories)}
-
-    total_before = len(all_memories)
     now = utc_now()
     prune_threshold = int(getattr(settings, "NATIVE_MEMORY_PRUNE_THRESHOLD", 90))
+    total_before = 0
     pruned_ids: set[str] = set()
+    buffers: dict[str, list[dict[str, Any]]] = {mtype.value: [] for mtype in MemoryType}
+    reduced = 0
 
-    for m in all_memories:
+    async def flush_type(memory_type: str, *, force: bool = False) -> None:
+        nonlocal reduced
+        batch = buffers[memory_type]
+        while len(batch) >= _CONSOLIDATION_BATCH_SIZE or (force and len(batch) >= 3):
+            if force:
+                current_batch = batch[:_CONSOLIDATION_BATCH_SIZE]
+                del batch[: len(current_batch)]
+            else:
+                current_batch = batch[:_CONSOLIDATION_BATCH_SIZE]
+                del batch[:_CONSOLIDATION_BATCH_SIZE]
+
+            consolidated = await _llm_batch_consolidate(backend, current_batch, memory_type)
+            if consolidated is None:
+                continue
+            old_store_keys = [
+                m.get("content_store_key")
+                for m in current_batch
+                if m.get("content_storage_mode") == "store" and m.get("content_store_key")
+            ]
+            old_ids = [m["memory_id"] for m in current_batch]
+            # Delete store content first to avoid orphaned files on crash
+            if old_store_keys:
+                await _delete_memory_contents_limited(backend, user_id, old_store_keys)
+            await backend._collection.delete_many(
+                {"user_id": user_id, "memory_id": {"$in": old_ids}}
+            )
+            if consolidated:
+                await backend._collection.insert_many(consolidated)
+            reduced += len(current_batch) - len(consolidated)
+
+    async for m in cursor:
+        total_before += 1
         source = m.get("source", "")
         updated = ensure_utc(m.get("updated_at", now))
         age_days = (now - updated).days
@@ -79,53 +141,37 @@ async def do_consolidate(backend, user_id: str) -> dict[str, Any]:
         if source == "auto_retained":
             if age_days > 180:
                 pruned_ids.add(m["memory_id"])
+                continue
             elif age_days > prune_threshold and access_count <= 1:
                 pruned_ids.add(m["memory_id"])
+                continue
             elif age_days > 30 and access_count == 0:
                 pruned_ids.add(m["memory_id"])
+                continue
+
+        memory_type = m.get("memory_type")
+        if memory_type in buffers:
+            buffers[memory_type].append(m)
+            await flush_type(memory_type)
+
+    if total_before < 5:
+        return {"merged": 0, "pruned": 0, "total_before": total_before}
 
     if pruned_ids:
         await backend._collection.delete_many(
             {"user_id": user_id, "memory_id": {"$in": list(pruned_ids)}}
         )
 
-    remaining = [m for m in all_memories if m["memory_id"] not in pruned_ids]
-    auto_memories = [m for m in remaining if m.get("source") != "manual"]
-
-    reduced = 0
     for mtype in MemoryType:
-        type_memories = [m for m in auto_memories if m.get("memory_type") == mtype.value]
-        if len(type_memories) < 3:
-            continue
-        for batch in _split_batches(type_memories, max_size=30):
-            consolidated = await _llm_batch_consolidate(backend, batch, mtype.value)
-            if consolidated is None:
-                continue
-            old_store_keys = [
-                m.get("content_store_key")
-                for m in batch
-                if m.get("content_storage_mode") == "store" and m.get("content_store_key")
-            ]
-            old_ids = [m["memory_id"] for m in batch]
-            # Delete store content first to avoid orphaned files on crash
-            if old_store_keys:
-                await asyncio.gather(
-                    *(delete_memory_content(backend, user_id, key) for key in old_store_keys)
-                )
-            await backend._collection.delete_many(
-                {"user_id": user_id, "memory_id": {"$in": old_ids}}
-            )
-            if consolidated:
-                await backend._collection.insert_many(consolidated)
-            reduced += len(batch) - len(consolidated)
+        await flush_type(mtype.value, force=True)
 
     await backend._invalidate_cache(user_id)
 
     max_per_user = 200
     current_count = await backend._collection.count_documents({"user_id": user_id})
     cap_pruned = 0
-    if current_count > max_per_user:
-        excess = current_count - max_per_user
+    while current_count > max_per_user:
+        excess = min(current_count - max_per_user, _CONSOLIDATION_CAP_PRUNE_BATCH_SIZE)
         oldest_auto = (
             backend._collection.find(
                 {"user_id": user_id, "source": {"$ne": "manual"}},
@@ -143,15 +189,19 @@ async def do_consolidate(backend, user_id: str) -> dict[str, Any]:
                 if d.get("content_storage_mode") == "store" and d.get("content_store_key")
             ]
             if store_keys:
-                await asyncio.gather(
-                    *(delete_memory_content(backend, user_id, key) for key in store_keys)
-                )
+                await _delete_memory_contents_limited(backend, user_id, store_keys)
             cap_ids = [d["memory_id"] for d in oldest_docs]
             result = await backend._collection.delete_many(
                 {"user_id": user_id, "memory_id": {"$in": cap_ids}}
             )
-            cap_pruned = result.deleted_count
+            deleted_count = int(result.deleted_count)
+            cap_pruned += deleted_count
+            if deleted_count <= 0:
+                break
             await backend._invalidate_cache(user_id)
+            current_count -= deleted_count
+            continue
+        break
 
     final_count = await backend._collection.count_documents({"user_id": user_id})
 
@@ -165,6 +215,40 @@ async def do_consolidate(backend, user_id: str) -> dict[str, Any]:
 
 def _split_batches(items: list[dict], max_size: int = 30) -> list[list[dict]]:
     return [items[i : i + max_size] for i in range(0, len(items), max_size)]
+
+
+async def _delete_memory_contents_limited(
+    backend,
+    user_id: str,
+    content_store_keys: list[str],
+) -> None:
+    if not content_store_keys:
+        return
+
+    next_index = 0
+    concurrency = min(
+        max(
+            1,
+            int(
+                getattr(
+                    settings,
+                    "NATIVE_MEMORY_CONTENT_DELETE_CONCURRENCY",
+                    4,
+                )
+                or 1
+            ),
+        ),
+        len(content_store_keys),
+    )
+
+    async def _worker() -> None:
+        nonlocal next_index
+        while next_index < len(content_store_keys):
+            index = next_index
+            next_index += 1
+            await delete_memory_content(backend, user_id, content_store_keys[index])
+
+    await asyncio.gather(*(_worker() for _ in range(concurrency)))
 
 
 async def _enrich_item(
@@ -193,7 +277,8 @@ async def _llm_batch_consolidate(backend, memories: list[dict], expected_type: s
 
         model = await maybe_await(backend._get_memory_model())
         items_text = "\n".join(
-            f"[{i + 1}] ({m.get('created_at', '').strftime('%Y-%m-%d') if isinstance(m.get('created_at'), datetime) else 'unknown'}) {m['content']}"
+            f"[{i + 1}] ({m.get('created_at', '').strftime('%Y-%m-%d') if isinstance(m.get('created_at'), datetime) else 'unknown'}) "
+            f"{_clip_consolidation_input_content(m.get('content', ''))}"
             for i, m in enumerate(memories)
         )
         prompt = (
@@ -240,23 +325,12 @@ async def _llm_batch_consolidate(backend, memories: list[dict], expected_type: s
             text = text.split("\n", 1)[1] if "\n" in text else text[3:]
         if text.endswith("```"):
             text = text[:-3]
-        parsed = json.loads(text.strip())
+        parsed = await run_blocking_io(json.loads, text.strip())
         if not isinstance(parsed, list) or (not parsed and len(memories) >= 3):
             return None
 
         now = utc_now()
-        # Enrich items concurrently
-        enrich_coros = [
-            _enrich_item(
-                backend,
-                item.get("content", "").strip(),
-                item.get("summary", "").strip(),
-                item.get("title", "").strip(),
-                item.get("tags") or [],
-            )
-            for item in parsed
-        ]
-        enrich_results = await asyncio.gather(*enrich_coros)
+        enrich_results = await _enrich_items_limited(backend, parsed)
 
         docs = []
         for item, meta in zip(parsed, enrich_results):
@@ -297,3 +371,46 @@ async def _llm_batch_consolidate(backend, memories: list[dict], expected_type: s
 
 
 llm_batch_consolidate = _llm_batch_consolidate
+
+
+async def _enrich_items_limited(backend, parsed: list[dict]) -> list[dict[str, Any] | None]:
+    if not parsed:
+        return []
+
+    results: list[dict[str, Any] | None] = [None] * len(parsed)
+    next_index = 0
+    lock = asyncio.Lock()
+    concurrency = min(
+        max(
+            1,
+            int(
+                getattr(
+                    settings,
+                    "NATIVE_MEMORY_CONSOLIDATION_ENRICH_CONCURRENCY",
+                    4,
+                )
+                or 1
+            ),
+        ),
+        len(parsed),
+    )
+
+    async def _worker() -> None:
+        nonlocal next_index
+        while True:
+            async with lock:
+                if next_index >= len(parsed):
+                    return
+                index = next_index
+                next_index += 1
+            item = parsed[index]
+            results[index] = await _enrich_item(
+                backend,
+                item.get("content", "").strip(),
+                item.get("summary", "").strip(),
+                item.get("title", "").strip(),
+                item.get("tags") or [],
+            )
+
+    await asyncio.gather(*(_worker() for _ in range(concurrency)))
+    return results

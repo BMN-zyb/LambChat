@@ -11,6 +11,7 @@ from datetime import date, datetime, timezone
 from hashlib import sha1
 from typing import Any, Mapping
 
+from src.infra.async_utils.blocking import run_blocking_io
 from src.infra.logging import get_logger
 from src.infra.storage.redis import get_redis_client
 from src.infra.utils.datetime import utc_now
@@ -19,6 +20,7 @@ logger = get_logger(__name__)
 _INSTANCE_KEY_PREFIX = "health:memory:instance:"
 _PROCESS_SEED = f"{socket.gethostname()}:{os.getpid()}:{time.time_ns()}"
 _INSTANCE_ID = sha1(_PROCESS_SEED.encode("utf-8")).hexdigest()[:12]
+CLUSTER_SNAPSHOT_SCAN_LIMIT = 100
 
 
 def _to_redis_safe(value: Any) -> Any:
@@ -73,6 +75,14 @@ def _normalize_snapshot_payload(snapshot: Mapping[str, Any]) -> dict[str, Any]:
         "instance_id": _normalize_instance_id(snapshot.get("instance_id")),
         "summary": _normalize_summary(snapshot.get("summary")),
     }
+
+
+async def _json_dumps_snapshot(snapshot: Mapping[str, Any]) -> str:
+    return await run_blocking_io(json.dumps, snapshot)
+
+
+async def _json_loads_snapshot(raw_value: str) -> Any:
+    return await run_blocking_io(json.loads, raw_value)
 
 
 def _captured_at_order_key(snapshot: Mapping[str, Any]) -> tuple[int, float, str]:
@@ -273,7 +283,7 @@ async def publish_instance_snapshot(
         _normalize_instance_id(serialized_snapshot.get("instance_id")) or get_instance_id()
     )
     serialized_snapshot["instance_id"] = instance_id
-    payload = json.dumps(serialized_snapshot)
+    payload = await _json_dumps_snapshot(serialized_snapshot)
     await client.set(
         build_instance_key(instance_id),
         payload,
@@ -282,13 +292,26 @@ async def publish_instance_snapshot(
     return serialized_snapshot
 
 
-async def _scan_keys(client: Any, pattern: str, *, count: int = 100) -> list[str]:
+async def _scan_keys(
+    client: Any,
+    pattern: str,
+    *,
+    count: int = 100,
+    limit: int = CLUSTER_SNAPSHOT_SCAN_LIMIT,
+) -> list[str]:
     """Collect matching Redis keys with SCAN to avoid blocking Redis."""
     cursor: int | str = 0
     keys: list[str] = []
     while True:
         cursor, batch = await client.scan(cursor=cursor, match=pattern, count=count)
-        keys.extend(str(key) for key in batch)
+        for key in batch:
+            keys.append(str(key))
+            if len(keys) >= limit:
+                logger.warning(
+                    "[DistributedMemoryHealth] reached cluster snapshot scan limit: %d",
+                    limit,
+                )
+                return keys
         if int(cursor) == 0:
             return keys
 
@@ -314,7 +337,7 @@ async def load_cluster_snapshots(*, redis_client: Any | None = None) -> list[dic
             try:
                 if isinstance(raw_value, bytes):
                     raw_value = raw_value.decode("utf-8", errors="replace")
-                payload = json.loads(raw_value)
+                payload = await _json_loads_snapshot(raw_value)
             except (TypeError, json.JSONDecodeError) as exc:
                 logger.warning(
                     "[DistributedMemoryHealth] skipping malformed cluster snapshot key=%s: %s",

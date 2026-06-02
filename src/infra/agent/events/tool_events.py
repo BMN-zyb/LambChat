@@ -15,6 +15,38 @@ from src.infra.agent.events.tool_outputs import (
     normalize_content,
 )
 from src.infra.agent.events.types import StreamEvent
+from src.infra.async_utils import run_blocking_io
+
+_TOOL_RESULT_DISPLAY_MAX_CHARS = 8_000
+_TOOL_RESULT_JSON_PARSE_MAX_CHARS = _TOOL_RESULT_DISPLAY_MAX_CHARS
+
+
+def _clip_tool_result_text(text: str) -> str:
+    if len(text) <= _TOOL_RESULT_DISPLAY_MAX_CHARS:
+        return text
+    return (
+        text[:_TOOL_RESULT_DISPLAY_MAX_CHARS].rstrip()
+        + f"\n\n[truncated from {len(text)} chars for display]"
+    )
+
+
+def _parse_tool_result_json(raw: str) -> Any | None:
+    try:
+        parsed = orjson.loads(raw)
+    except orjson.JSONDecodeError:
+        try:
+            parsed = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return None
+    except TypeError:
+        return None
+
+    if isinstance(parsed, dict):
+        return parsed
+    if isinstance(parsed, list):
+        normalized = normalize_content(parsed)
+        return normalized if isinstance(normalized, dict) else str(normalized)
+    return None
 
 
 class ToolEventMixin:
@@ -93,29 +125,25 @@ class ToolEventMixin:
         out = data.get("output", "")
         tool_call_id = self._get_tool_call_id(event)
 
-        raw = extract_tool_output(out)
-        is_error, error_message = detect_tool_error(out, raw)
+        raw = await run_blocking_io(extract_tool_output, out)
+        is_error, error_message = await run_blocking_io(detect_tool_error, out, raw)
 
         result: Any = raw
-        if isinstance(raw, str) and raw and raw[0] in ("{", "["):
-            try:
-                parsed = orjson.loads(raw)
-            except orjson.JSONDecodeError:
-                try:
-                    parsed = json.loads(raw)
-                except (json.JSONDecodeError, TypeError):
-                    parsed = None
-            except TypeError:
-                parsed = None
-
-            if isinstance(parsed, dict):
-                result = parsed
-            elif isinstance(parsed, list):
-                normalized = normalize_content(parsed)
-                result = normalized if isinstance(normalized, dict) else str(normalized)
+        if (
+            isinstance(raw, str)
+            and raw
+            and raw[0] in ("{", "[")
+            and len(raw) <= _TOOL_RESULT_JSON_PARSE_MAX_CHARS
+        ):
+            parsed_result = await run_blocking_io(_parse_tool_result_json, raw)
+            if parsed_result is not None:
+                result = parsed_result
 
         if isinstance(result, dict) and "blocks" in result:
             await upload_binary_blocks(result, self._base_url)
+
+        if isinstance(result, str):
+            result = _clip_tool_result_text(result)
 
         await self._presenter_emit(
             self.presenter.present_tool_result(

@@ -58,6 +58,19 @@ async def test_memory_saver_fallback_bounds_cached_threads() -> None:
 
 
 @pytest.mark.asyncio
+async def test_checkpointer_diagnostics_reports_memory_saver_cache() -> None:
+    await checkpoint_mod.get_async_checkpointer(thread_id="session-1")
+
+    diagnostics = checkpoint_mod.get_checkpointer_diagnostics()
+
+    assert diagnostics["configured_backend"] == "mongodb"
+    assert diagnostics["memory_saver_cache_active"] is True
+    assert diagnostics["memory_saver_cache_size"] == 1
+    assert diagnostics["mongo_checkpointer_active"] is False
+    assert diagnostics["postgres_checkpointer_active"] is False
+
+
+@pytest.mark.asyncio
 async def test_pg_checkpointer_initializes_once_under_concurrency(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -9,6 +9,19 @@ import pytest
 
 import src.infra.monitoring.distributed_memory_health as distributed_memory_health
 
+_CHECKPOINTER_SUMMARY = {
+    "configured_backend": "mongodb",
+    "backend_enabled": True,
+    "mongo_checkpointer_active": False,
+    "postgres_checkpointer_active": False,
+    "postgres_pool_active": False,
+    "memory_saver_singleton_active": False,
+    "memory_saver_cache_active": False,
+    "memory_saver_cache_size": 0,
+    "memory_saver_cache_limit": 200,
+    "memory_saver_ttl_seconds": 3600,
+}
+
 
 @pytest.fixture(autouse=True)
 def _enable_memory_monitor(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -16,6 +29,10 @@ def _enable_memory_monitor(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "src.infra.monitoring.memory.psutil",
         SimpleNamespace(Process=lambda _pid: object()),
+    )
+    monkeypatch.setattr(
+        "src.infra.storage.checkpoint.get_checkpointer_diagnostics",
+        lambda: _CHECKPOINTER_SUMMARY,
     )
 
     async def _noop_publish_instance_snapshot(
@@ -127,6 +144,53 @@ async def test_monitor_logs_hotspot_summary_when_alert_fires(
     assert "src/leaky.py:88" in caplog.text
     assert "src/cache.py:21" in caplog.text
     assert "dict=4200" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_monitor_omits_empty_hotspot_fields_from_alert_log(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from src.infra.monitoring.memory import MemoryMonitor
+
+    rss_values = iter([100 * 1024 * 1024, 150 * 1024 * 1024, 230 * 1024 * 1024])
+
+    monitor = MemoryMonitor(
+        interval_seconds=60.0,
+        history_limit=10,
+        leak_threshold_bytes=64 * 1024 * 1024,
+        min_samples_for_alert=3,
+        alert_cooldown_seconds=0.0,
+        heavy_diagnostics_enabled=True,
+    )
+
+    def _fake_process_sample() -> dict[str, int]:
+        return {
+            "rss_bytes": next(rss_values),
+            "vms_bytes": 400 * 1024 * 1024,
+            "thread_count": 12,
+            "open_file_count": 3,
+        }
+
+    def _fake_capture_diagnostics() -> dict[str, object]:
+        return {
+            "top_growth": [],
+            "top_allocations": [],
+            "top_object_types": [],
+        }
+
+    monitor._collect_process_sample = _fake_process_sample  # type: ignore[method-assign]
+    monitor._capture_diagnostics_snapshot = _fake_capture_diagnostics  # type: ignore[method-assign]
+    monitor._build_distributed_snapshot_locked = lambda: asyncio.sleep(0, result=None)  # type: ignore[method-assign]
+
+    with caplog.at_level("WARNING", logger="src.infra.monitoring.memory"):
+        await monitor._sample_once()
+        await monitor._sample_once()
+        await monitor._sample_once()
+
+    assert "[MemoryMonitor] suspicious memory growth detected rss=" in caplog.text
+    assert "top_growth=" not in caplog.text
+    assert "top_allocations=" not in caplog.text
+    assert "top_objects=" not in caplog.text
 
 
 @pytest.mark.asyncio
@@ -300,6 +364,7 @@ async def test_reset_baseline_publishes_fresh_instance_snapshot(
         "baseline_reset_at": reset_timestamp,
         "last_sample_at": reset_timestamp,
         "last_error": None,
+        "checkpointer": _CHECKPOINTER_SUMMARY,
     }
     assert built_snapshots[0]["details"] == {
         "captured_at": "2026-04-30T03:25:00+00:00",
@@ -399,6 +464,7 @@ async def test_sample_once_publishes_current_snapshot_when_no_alert(
         "baseline_reset_at": None,
         "last_sample_at": sample_timestamp,
         "last_error": None,
+        "checkpointer": _CHECKPOINTER_SUMMARY,
     }
     assert built_snapshots[0]["details"] == {
         "captured_at": "2026-04-30T03:25:00+00:00",
@@ -521,6 +587,7 @@ async def test_sample_once_publishes_last_alert_snapshot_when_alert_fires(
         "baseline_reset_at": None,
         "last_sample_at": second_timestamp,
         "last_error": None,
+        "checkpointer": _CHECKPOINTER_SUMMARY,
     }
     assert built_snapshots[-1]["details"] == alert_snapshot
     assert published_calls[-1] == (built_snapshots[-1], 60.0)

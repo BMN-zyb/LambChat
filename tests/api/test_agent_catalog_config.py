@@ -8,6 +8,8 @@ from src.kernel.schemas.agent import (
     AgentCatalogConfigUpdate,
     AgentCatalogLocale,
     AgentConfig,
+    RoleAgentAssignmentUpdate,
+    RoleModelAssignmentUpdate,
 )
 from src.kernel.schemas.user import TokenPayload
 
@@ -35,6 +37,35 @@ class _CatalogStorage:
         self.saved = agents
         self.catalog = agents
         return agents
+
+
+class _RoleAssignmentStorage:
+    def __init__(self) -> None:
+        self.agent_calls: list[list[str]] = []
+        self.model_calls: list[list[str]] = []
+
+    async def set_role_agents(
+        self,
+        role_id: str,
+        role_name: str,
+        allowed_agents: list[str],
+    ) -> list[str]:
+        self.agent_calls.append(allowed_agents)
+        return allowed_agents[:2]
+
+    async def set_role_models(
+        self,
+        role_id: str,
+        role_name: str,
+        allowed_models: list[str],
+    ) -> list[str]:
+        self.model_calls.append(allowed_models)
+        return allowed_models[:2]
+
+
+class _RoleManager:
+    async def get_role(self, role_id: str):
+        return type("Role", (), {"id": role_id, "name": "Role"})()
 
 
 def _admin() -> TokenPayload:
@@ -145,3 +176,39 @@ async def test_update_catalog_config_persists_multilingual_display_metadata(
     assert storage.saved[0].labels["zh"].name == "搜索助手"
     assert response.agents[0].icon == "Search"
     assert response.available_agents == ["search"]
+
+
+@pytest.mark.asyncio
+async def test_update_role_agents_returns_bounded_storage_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = _RoleAssignmentStorage()
+    monkeypatch.setattr(config_routes, "get_agent_config_storage", lambda: storage)
+    monkeypatch.setattr(config_routes, "get_role_manager", lambda: _RoleManager())
+
+    response = await config_routes.update_role_agents(
+        "role-1",
+        RoleAgentAssignmentUpdate(allowed_agents=["agent-1", "agent-2", "agent-3"]),
+        _admin(),
+    )
+
+    assert storage.agent_calls == [["agent-1", "agent-2", "agent-3"]]
+    assert response.allowed_agents == ["agent-1", "agent-2"]
+
+
+@pytest.mark.asyncio
+async def test_update_role_models_returns_bounded_storage_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = _RoleAssignmentStorage()
+    monkeypatch.setattr(config_routes, "get_agent_config_storage", lambda: storage)
+    monkeypatch.setattr(config_routes, "get_role_manager", lambda: _RoleManager())
+
+    response = await config_routes.update_role_models(
+        "role-1",
+        RoleModelAssignmentUpdate(allowed_models=["model-1", "model-2", "model-3"]),
+        _admin(),
+    )
+
+    assert storage.model_calls == [["model-1", "model-2", "model-3"]]
+    assert response.allowed_models == ["model-1", "model-2"]

@@ -43,8 +43,17 @@ class SettingsStorage:
                            If False, return actual values (for internal use).
         """
         collection = self._get_collection()
-        cursor = collection.find({})
-        db_settings = {doc["_id"]: doc for doc in await cursor.to_list(length=None)}
+        setting_keys = list(SETTING_DEFINITIONS.keys())
+        cursor = collection.find(
+            {"_id": {"$in": setting_keys}},
+            {
+                "_id": 1,
+                "value": 1,
+                "updated_at": 1,
+                "updated_by": 1,
+            },
+        )
+        db_settings = {doc["_id"]: doc for doc in await cursor.to_list(length=len(setting_keys))}
 
         result: dict[str, list[SettingItem]] = {}
 

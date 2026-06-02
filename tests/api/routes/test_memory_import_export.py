@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from fastapi import HTTPException
+from starlette.responses import StreamingResponse
 
 from src.api.routes import memory as memory_routes
 from src.kernel.schemas.user import TokenPayload
@@ -12,6 +15,17 @@ from src.kernel.schemas.user import TokenPayload
 
 def _user() -> TokenPayload:
     return TokenPayload(sub="user-1", username="tester", roles=["user"])
+
+
+def test_memory_import_total_content_limit_setting_default() -> None:
+    from src.kernel.config._definitions_extra import EXTRA_SETTING_DEFINITIONS
+    from src.kernel.config.base import Settings
+
+    definition = EXTRA_SETTING_DEFINITIONS["NATIVE_MEMORY_IMPORT_TOTAL_CONTENT_MAX_CHARS"]
+
+    assert Settings(_env_file=None).NATIVE_MEMORY_IMPORT_TOTAL_CONTENT_MAX_CHARS == 2_000_000
+    assert definition["default"] == 2_000_000
+    assert definition.get("frontend_visible", False) is False
 
 
 class _AsyncCursor:
@@ -90,6 +104,53 @@ class _FakeBackend:
         self.invalidated_users.append(user_id)
 
 
+class _ListCursor(_AsyncCursor):
+    def sort(self, *args, **kwargs):
+        return self
+
+    def skip(self, *args, **kwargs):
+        return self
+
+    def limit(self, *args, **kwargs):
+        return self
+
+
+class _ListCollection:
+    def __init__(self) -> None:
+        self.find_query: dict[str, Any] | None = None
+
+    async def count_documents(self, query: dict[str, Any]) -> int:
+        return 0
+
+    def find(self, query: dict[str, Any], projection: dict[str, int]) -> _ListCursor:
+        self.find_query = query
+        return _ListCursor([])
+
+
+@pytest.mark.asyncio
+async def test_list_memories_escapes_search_regex(monkeypatch: pytest.MonkeyPatch):
+    collection = _ListCollection()
+    backend = SimpleNamespace(_collection=collection)
+
+    async def fake_get_backend():
+        return backend
+
+    monkeypatch.setattr(memory_routes, "_get_backend", fake_get_backend)
+
+    result = await memory_routes.list_memories(
+        memory_type=None,
+        search="a+b(c)",
+        limit=50,
+        offset=0,
+        user=_user(),
+    )
+
+    assert result == {"memories": [], "total": 0}
+    assert collection.find_query is not None
+    regex = collection.find_query["$or"][0]["title"]["$regex"]
+    assert regex == r"a\+b\(c\)"
+
+
 @pytest.mark.asyncio
 async def test_export_memories_includes_hydrated_full_content(monkeypatch: pytest.MonkeyPatch):
     store = _FakeStore(
@@ -136,13 +197,124 @@ async def test_export_memories_includes_hydrated_full_content(monkeypatch: pytes
 
     monkeypatch.setattr(memory_routes, "_get_backend", fake_get_backend)
 
-    result = await memory_routes.export_memories(user=_user())
+    response = await memory_routes.export_memories(user=_user())
+    assert isinstance(response, StreamingResponse)
+    chunks = [
+        chunk if isinstance(chunk, bytes) else chunk.encode("utf-8")
+        async for chunk in response.body_iterator
+    ]
+    result = json.loads(b"".join(chunks))
 
     assert result["version"] == 1
     assert len(result["memories"]) == 1
     assert result["memories"][0]["memory_id"] == "stored-1"
     assert result["memories"][0]["content"] == "full stored memory text"
     assert "user_id" not in result["memories"][0]
+
+
+@pytest.mark.asyncio
+async def test_export_memories_offloads_per_memory_json_encoding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    large_content = "x" * (memory_routes._DEFAULT_MEMORY_EXPORT_CONTENT_MAX_CHARS - 1)
+    store = _FakeStore(
+        {
+            (("memories", "user-1", "content"), "memory:stored-large"): {
+                "text": large_content,
+                "memory_id": "stored-large",
+            }
+        }
+    )
+    backend = _FakeBackend(
+        [
+            {
+                "memory_id": "stored-large",
+                "user_id": "user-1",
+                "title": "Stored large",
+                "summary": "Stored summary",
+                "memory_type": "user",
+                "tags": ["alpha"],
+                "content": "full stored...",
+                "content_storage_mode": "store",
+                "content_store_key": "memory:stored-large",
+                "context": "ctx",
+                "source": "manual",
+            }
+        ],
+        store,
+    )
+    encoded_values: list[Any] = []
+
+    async def fake_get_backend() -> _FakeBackend:
+        return backend
+
+    async def fake_run_blocking_io(func, *args, **kwargs):
+        if len(args) >= 2 and isinstance(args[1], dict):
+            encoded_values.append(args[1])
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(memory_routes, "_get_backend", fake_get_backend)
+    monkeypatch.setattr(memory_routes, "run_blocking_io", fake_run_blocking_io, raising=False)
+
+    response = await memory_routes.export_memories(user=_user())
+    chunks = [
+        chunk if isinstance(chunk, bytes) else chunk.encode("utf-8")
+        async for chunk in response.body_iterator
+    ]
+    result = json.loads(b"".join(chunks))
+
+    assert result["memories"][0]["content"] == large_content
+    assert [value["memory_id"] for value in encoded_values] == ["stored-large"]
+
+
+@pytest.mark.asyncio
+async def test_export_memories_truncates_oversized_content_before_encoding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    max_chars = memory_routes._DEFAULT_MEMORY_EXPORT_CONTENT_MAX_CHARS
+    oversized_content = "x" * (max_chars + 1)
+    backend = _FakeBackend(
+        [
+            {
+                "memory_id": "oversized",
+                "user_id": "user-1",
+                "title": "Oversized",
+                "summary": "Stored summary",
+                "memory_type": "user",
+                "tags": ["alpha"],
+                "content": oversized_content,
+                "content_storage_mode": "inline",
+                "content_store_key": None,
+                "context": "ctx",
+                "source": "manual",
+            }
+        ]
+    )
+    encoded_values: list[Any] = []
+
+    async def fake_get_backend() -> _FakeBackend:
+        return backend
+
+    async def fake_run_blocking_io(func, *args, **kwargs):
+        if len(args) >= 2 and isinstance(args[1], dict):
+            encoded_values.append(args[1])
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(memory_routes, "_get_backend", fake_get_backend)
+    monkeypatch.setattr(memory_routes, "run_blocking_io", fake_run_blocking_io, raising=False)
+
+    response = await memory_routes.export_memories(user=_user())
+    chunks = [
+        chunk if isinstance(chunk, bytes) else chunk.encode("utf-8")
+        async for chunk in response.body_iterator
+    ]
+    result = json.loads(b"".join(chunks))
+
+    memory = result["memories"][0]
+    assert len(memory["content"]) == max_chars
+    assert memory["content_truncated"] is True
+    assert memory["content_original_chars"] == max_chars + 1
+    assert encoded_values[0]["content"] == "x" * max_chars
 
 
 @pytest.mark.asyncio
@@ -207,3 +379,85 @@ async def test_import_memories_overwrites_matching_memory_id(monkeypatch: pytest
     assert docs["same-id"]["content"] == "new content"
     assert docs["fresh-id"]["user_id"] == "user-1"
     assert backend.invalidated_users == ["user-1"]
+
+
+@pytest.mark.asyncio
+async def test_import_memories_rejects_oversized_single_content(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = _FakeBackend([])
+
+    async def fake_get_backend() -> _FakeBackend:
+        return backend
+
+    monkeypatch.setattr(memory_routes, "_get_backend", fake_get_backend)
+    monkeypatch.setattr(
+        memory_routes,
+        "_get_memory_import_content_max_chars",
+        lambda: 8,
+        raising=False,
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        await memory_routes.import_memories(
+            {
+                "version": 1,
+                "memories": [
+                    {
+                        "memory_id": "huge",
+                        "title": "Huge",
+                        "memory_type": "user",
+                        "content": "x" * 9,
+                    }
+                ],
+            },
+            user=_user(),
+        )
+
+    assert exc.value.status_code == 400
+    assert "Memory content too large" in exc.value.detail
+    assert backend._collection.docs == []
+
+
+@pytest.mark.asyncio
+async def test_import_memories_rejects_oversized_total_content_before_writes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = _FakeBackend([])
+
+    async def fake_get_backend() -> _FakeBackend:
+        return backend
+
+    monkeypatch.setattr(memory_routes, "_get_backend", fake_get_backend)
+    monkeypatch.setattr(
+        memory_routes,
+        "_get_memory_import_total_content_max_chars",
+        lambda: 20,
+        raising=False,
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        await memory_routes.import_memories(
+            {
+                "version": 1,
+                "memories": [
+                    {
+                        "memory_id": "one",
+                        "title": "One",
+                        "memory_type": "user",
+                        "content": "first memory content",
+                    },
+                    {
+                        "memory_id": "two",
+                        "title": "Two",
+                        "memory_type": "user",
+                        "content": "second memory content",
+                    },
+                ],
+            },
+            user=_user(),
+        )
+
+    assert exc.value.status_code == 400
+    assert "Memory import content too large" in exc.value.detail
+    assert backend._collection.docs == []

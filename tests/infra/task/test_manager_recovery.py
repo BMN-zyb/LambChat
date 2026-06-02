@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -41,6 +42,7 @@ class _FakeRedis:
         self.acquired = acquired
         self.set_calls: list[tuple[str, str, int, bool]] = []
         self.deleted_keys: list[str] = []
+        self.eval_calls: list[tuple[str, int, str, str]] = []
 
     async def set(self, key: str, value: str, ex: int | None = None, nx: bool = False):
         self.set_calls.append((key, value, ex or 0, nx))
@@ -48,6 +50,10 @@ class _FakeRedis:
 
     async def delete(self, key: str):
         self.deleted_keys.append(key)
+        return 1
+
+    async def eval(self, script: str, numkeys: int, key: str, token: str):
+        self.eval_calls.append((script, numkeys, key, token))
         return 1
 
 
@@ -120,6 +126,7 @@ async def test_resume_session_submits_localized_recovery_message(
     monkeypatch.setattr(recovery_module, "get_redis_client", lambda: redis)
     monkeypatch.setattr(recovery_module, "UserStorage", _FakeUserStorage)
     monkeypatch.setattr(recovery_module, "get_registered_executor", lambda key: _fake_executor)
+    monkeypatch.setattr("src.kernel.config.settings.TASK_BACKEND", "local")
     monkeypatch.setattr(manager, "submit", _fake_submit)
     monkeypatch.setattr(manager, "_mark_run_failed", _fake_mark_failed)
 
@@ -414,7 +421,13 @@ async def test_resume_interrupted_run_releases_lock_after_failed_recovery(
     result = await manager._resume_interrupted_run(session, "run-old", "manual_resume")
 
     assert result["success"] is False
-    assert redis.deleted_keys == ["task:recovery:session-1:run-old"]
+    assert redis.deleted_keys == []
+    assert redis.eval_calls
+    assert redis.eval_calls[0][1:] == (
+        1,
+        "task:recovery:session-1:run-old",
+        redis.set_calls[0][1],
+    )
 
 
 @pytest.mark.asyncio
@@ -530,7 +543,29 @@ async def test_resume_interrupted_run_skips_when_session_already_points_to_new_r
     assert result["success"] is False
     assert "已由其他恢复流程接管" in result["message"]
     assert mark_failed_calls == []
-    assert redis.deleted_keys == ["task:recovery:session-1:run-old"]
+    assert redis.deleted_keys == []
+    assert redis.eval_calls
+    assert redis.eval_calls[0][1:] == (
+        1,
+        "task:recovery:session-1:run-old",
+        redis.set_calls[0][1],
+    )
+
+
+@pytest.mark.asyncio
+async def test_manager_release_recovery_lock_forwards_lock_token() -> None:
+    manager = BackgroundTaskManager()
+    calls: list[tuple[str, str]] = []
+
+    class _FakeRecoveryService:
+        async def release_recovery_lock(self, lock_key: str, token: str) -> None:
+            calls.append((lock_key, token))
+
+    manager._recovery_service = lambda: _FakeRecoveryService()  # type: ignore[method-assign]
+
+    await manager._release_recovery_lock("task:recovery:session-1:run-old", "token-1")
+
+    assert calls == [("task:recovery:session-1:run-old", "token-1")]
 
 
 @pytest.mark.asyncio
@@ -576,6 +611,137 @@ async def test_shutdown_releases_active_slot_without_dequeuing(
 
     assert mark_calls == [("session-1", "run-old", "Server shutdown")]
     assert fake_limiter.release_calls == [("user-1", "run-old", False)]
+
+
+@pytest.mark.asyncio
+async def test_shutdown_limits_parallel_task_recovery_and_release(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = BackgroundTaskManager()
+    manager._tasks = {
+        f"run-{index}": SimpleNamespace(done=lambda: False, cancel=lambda: None)
+        for index in range(5)
+    }
+    manager._run_info = {
+        f"run-{index}": {
+            "session_id": f"session-{index}",
+            "user_id": "user-1",
+        }
+        for index in range(5)
+    }
+    active = 0
+    max_active = 0
+    release_calls: list[tuple[str, str, bool]] = []
+    mark_calls: list[tuple[str, str, str]] = []
+
+    async def _track_work() -> None:
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        await asyncio.sleep(0.01)
+        active -= 1
+
+    async def _fake_stop_all() -> None:
+        return None
+
+    async def _fake_mark_run_recoverable_failure(
+        session_id: str,
+        run_id: str,
+        error_message: str,
+    ) -> None:
+        await _track_work()
+        mark_calls.append((session_id, run_id, error_message))
+
+    class _FakeLimiter:
+        async def release(self, user_id: str, run_id: str, dequeue: bool = True) -> None:
+            await _track_work()
+            release_calls.append((user_id, run_id, dequeue))
+
+    monkeypatch.setattr(manager._heartbeat, "stop_all", _fake_stop_all)
+    monkeypatch.setattr(
+        manager, "_mark_run_recoverable_failure", _fake_mark_run_recoverable_failure
+    )
+    monkeypatch.setattr(
+        "src.infra.task.concurrency.get_concurrency_limiter",
+        lambda: _FakeLimiter(),
+    )
+    monkeypatch.setattr(
+        "src.infra.task.startup_cleanup.settings.TASK_STARTUP_CLEANUP_CONCURRENCY", 2
+    )
+
+    await manager.shutdown()
+
+    assert max_active == 2
+    assert len(mark_calls) == 5
+    assert len(release_calls) == 5
+    assert manager._tasks == {}
+    assert manager._run_info == {}
+
+
+@pytest.mark.asyncio
+async def test_shutdown_awaits_cancelled_tasks_to_finish_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = BackgroundTaskManager()
+    cleanup_started = asyncio.Event()
+    allow_cleanup = asyncio.Event()
+    cleanup_finished = False
+    started = asyncio.Event()
+
+    async def _long_running_task() -> None:
+        nonlocal cleanup_finished
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cleanup_started.set()
+            await allow_cleanup.wait()
+            cleanup_finished = True
+
+    task = asyncio.create_task(_long_running_task())
+    await started.wait()
+    manager._tasks = {"run-old": task}
+    manager._run_info = {
+        "run-old": {
+            "session_id": "session-1",
+            "user_id": "user-1",
+        }
+    }
+
+    async def _fake_stop_all() -> None:
+        return None
+
+    async def _fake_mark_run_recoverable_failure(
+        session_id: str,
+        run_id: str,
+        error_message: str,
+    ) -> None:
+        del session_id, run_id, error_message
+
+    class _FakeLimiter:
+        async def release(self, user_id: str, run_id: str, dequeue: bool = True) -> None:
+            del user_id, run_id, dequeue
+
+    monkeypatch.setattr(manager._heartbeat, "stop_all", _fake_stop_all)
+    monkeypatch.setattr(
+        manager, "_mark_run_recoverable_failure", _fake_mark_run_recoverable_failure
+    )
+    monkeypatch.setattr(
+        "src.infra.task.concurrency.get_concurrency_limiter",
+        lambda: _FakeLimiter(),
+    )
+
+    shutdown_task = asyncio.create_task(manager.shutdown())
+    await cleanup_started.wait()
+    await asyncio.sleep(0)
+
+    assert shutdown_task.done() is False
+    assert cleanup_finished is False
+
+    allow_cleanup.set()
+    await shutdown_task
+    assert task.done()
+    assert cleanup_finished is True
 
 
 @pytest.mark.asyncio

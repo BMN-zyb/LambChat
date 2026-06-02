@@ -1,6 +1,8 @@
 """Persona preset routes."""
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from typing import Annotated
+
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
 
 from src.api.deps import require_permissions
 from src.infra.persona_preset.manager import PersonaPresetManager
@@ -34,8 +36,8 @@ async def list_persona_presets(
     q: str | None = None,
     favorite: bool | None = None,
     pinned: bool | None = None,
-    skip: int = 0,
-    limit: int = Query(default=100, le=200),
+    skip: int = Query(default=0, ge=0),
+    limit: int = Query(default=100, ge=1, le=200),
     user: TokenPayload = Depends(require_permissions("persona_preset:read")),
 ):
     """List visible persona presets."""
@@ -89,7 +91,7 @@ async def create_persona_preset(
 
 @router.post("/batch", response_model=list[PersonaPreset])
 async def batch_create_persona_presets(
-    items: list[PersonaPresetCreate],
+    items: Annotated[list[PersonaPresetCreate], Body(max_length=100)],
     user: TokenPayload = Depends(require_permissions("persona_preset:write")),
 ):
     """Batch create persona presets."""

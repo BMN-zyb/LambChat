@@ -44,6 +44,22 @@ async def test_mcp_pool_eviction_closes_oldest_connection(
 
 
 @pytest.mark.asyncio
+async def test_mcp_pool_closes_discarded_duplicate_connection() -> None:
+    existing = _FakeClient()
+    duplicate = _FakeClient()
+
+    await mcp_pool.add_pooled_connection("server", {"url": "1"}, existing, ["tool-1"])
+    await mcp_pool.add_pooled_connection("server", {"url": "1"}, duplicate, ["tool-2"])
+
+    pooled_client, tools = await mcp_pool.get_pooled_connection("server", {"url": "1"})
+
+    assert pooled_client is existing
+    assert tools == ["tool-1"]
+    assert existing.close_calls == 0
+    assert duplicate.close_calls == 1
+
+
+@pytest.mark.asyncio
 async def test_mcp_pool_close_all_connections_closes_and_clears_pool() -> None:
     first = _FakeClient()
     second = _FakeClient()
@@ -56,3 +72,25 @@ async def test_mcp_pool_close_all_connections_closes_and_clears_pool() -> None:
     assert first.close_calls == 1
     assert second.close_calls == 1
     assert (await mcp_pool.get_pool_stats())["total_connections"] == 0
+
+
+@pytest.mark.asyncio
+async def test_mcp_pool_offloads_server_hash_computation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = []
+    client = _FakeClient()
+    config = {"url": "https://example.test", "headers": {"token": "secret"}}
+
+    async def fake_run_blocking_io(func, *args, **kwargs):
+        calls.append(func)
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(mcp_pool, "run_blocking_io", fake_run_blocking_io)
+
+    await mcp_pool.add_pooled_connection("server-1", config, client, ["tool-1"])
+    pooled_client, tools = await mcp_pool.get_pooled_connection("server-1", config)
+
+    assert pooled_client is client
+    assert tools == ["tool-1"]
+    assert calls == [mcp_pool._compute_server_hash, mcp_pool._compute_server_hash]

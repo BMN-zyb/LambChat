@@ -9,6 +9,10 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from src.infra.utils.datetime import utc_now
 from src.kernel.schemas.persona_preset import PersonaStarterPrompt
 
+TEAM_TAGS_MAX = 20
+TEAM_MEMBERS_MAX = 20
+TEAM_STARTER_PROMPTS_MAX = 20
+
 
 class TeamVisibility(str, Enum):
     PRIVATE = "private"
@@ -21,7 +25,7 @@ class TeamMemberCreate(BaseModel):
     persona_preset_id: str = Field(..., min_length=1)
     role_name: str = Field(default="", max_length=80)
     role_avatar: Optional[str] = None
-    role_tags: list[str] = Field(default_factory=list)
+    role_tags: list[str] = Field(default_factory=list, max_length=TEAM_TAGS_MAX)
     role_instructions: str = Field(default="", max_length=2000)
     position: int = Field(default=0, ge=0)
     enabled: bool = True
@@ -33,7 +37,7 @@ class TeamMemberUpdate(BaseModel):
     persona_preset_id: Optional[str] = Field(None, min_length=1)
     role_name: Optional[str] = Field(None, max_length=80)
     role_avatar: Optional[str] = None
-    role_tags: Optional[list[str]] = None
+    role_tags: Optional[list[str]] = Field(None, max_length=TEAM_TAGS_MAX)
     role_instructions: Optional[str] = Field(None, max_length=2000)
     position: Optional[int] = Field(None, ge=0)
     enabled: Optional[bool] = None
@@ -58,11 +62,14 @@ class TeamCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=80)
     description: str = Field(default="", max_length=500)
     avatar: Optional[str] = None
-    tags: list[str] = Field(default_factory=list)
-    members: list[TeamMemberCreate] = Field(default_factory=list)
+    tags: list[str] = Field(default_factory=list, max_length=TEAM_TAGS_MAX)
+    members: list[TeamMemberCreate] = Field(default_factory=list, max_length=TEAM_MEMBERS_MAX)
     default_member_id: Optional[str] = None
     team_instructions: str = Field(default="", max_length=4000)
-    starter_prompts: list[PersonaStarterPrompt] = Field(default_factory=list)
+    starter_prompts: list[PersonaStarterPrompt] = Field(
+        default_factory=list,
+        max_length=TEAM_STARTER_PROMPTS_MAX,
+    )
 
     @field_validator("tags")
     @classmethod
@@ -84,11 +91,14 @@ class TeamUpdate(BaseModel):
     name: Optional[str] = Field(None, min_length=1, max_length=80)
     description: Optional[str] = Field(None, max_length=500)
     avatar: Optional[str] = None
-    tags: Optional[list[str]] = None
-    members: Optional[list[TeamMemberCreate]] = None
+    tags: Optional[list[str]] = Field(None, max_length=TEAM_TAGS_MAX)
+    members: Optional[list[TeamMemberCreate]] = Field(None, max_length=TEAM_MEMBERS_MAX)
     default_member_id: Optional[str] = None
     team_instructions: Optional[str] = Field(None, max_length=4000)
-    starter_prompts: Optional[list[PersonaStarterPrompt]] = None
+    starter_prompts: Optional[list[PersonaStarterPrompt]] = Field(
+        None,
+        max_length=TEAM_STARTER_PROMPTS_MAX,
+    )
 
     @field_validator("tags")
     @classmethod
@@ -115,11 +125,14 @@ class TeamResponse(BaseModel):
     name: str
     description: str = ""
     avatar: Optional[str] = None
-    tags: list[str] = Field(default_factory=list)
-    members: list[TeamMemberResponse] = Field(default_factory=list)
+    tags: list[str] = Field(default_factory=list, max_length=TEAM_TAGS_MAX)
+    members: list[TeamMemberResponse] = Field(default_factory=list, max_length=TEAM_MEMBERS_MAX)
     default_member_id: Optional[str] = None
     team_instructions: str = ""
-    starter_prompts: list[PersonaStarterPrompt] = Field(default_factory=list)
+    starter_prompts: list[PersonaStarterPrompt] = Field(
+        default_factory=list,
+        max_length=TEAM_STARTER_PROMPTS_MAX,
+    )
     visibility: TeamVisibility = TeamVisibility.PRIVATE
     is_favorite: bool = False
     is_pinned: bool = False

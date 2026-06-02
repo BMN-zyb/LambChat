@@ -7,9 +7,11 @@ Redis-based distributed cancellation, and agent cleanup.
 """
 
 import asyncio
+import json
 import time
 from typing import Any, Dict, Optional
 
+from src.infra.async_utils.blocking import run_blocking_io
 from src.infra.logging import get_logger
 from src.infra.session.storage import SessionStorage
 from src.infra.session.trace_storage import get_trace_storage
@@ -31,6 +33,10 @@ _INTERRUPT_MAX_AGE = 600  # 10 分钟
 _INTERRUPT_CLEANUP_INTERVAL = 1000  # 每 1000 次检查触发一次清理
 _GRACEFUL_CANCEL_TIMEOUT = 2.0
 _interrupt_check_counter = 0
+
+
+async def _cancel_payload_json_dumps(payload: dict[str, Any]) -> str:
+    return await run_blocking_io(json.dumps, payload)
 
 
 class TaskCancellation:
@@ -197,19 +203,19 @@ class TaskCancellation:
                 agent_id = run_info.get("agent_id") if run_info else None
                 session_id = run_info.get("session_id") if run_info else None
                 trace_id = run_info.get("trace_id") if run_info else None
-                import json
+                payload = await _cancel_payload_json_dumps(
+                    {
+                        "run_id": run_id,
+                        "agent_id": agent_id,
+                        "session_id": session_id,
+                        "trace_id": trace_id,
+                        "timestamp": utc_now_iso(),
+                    }
+                )
 
                 await redis_client.publish(
                     CANCEL_CHANNEL,
-                    json.dumps(
-                        {
-                            "run_id": run_id,
-                            "agent_id": agent_id,
-                            "session_id": session_id,
-                            "trace_id": trace_id,
-                            "timestamp": utc_now_iso(),
-                        }
-                    ),
+                    payload,
                 )
                 logger.info(
                     f"Published cancel signal for run_id={run_id}, agent_id={agent_id}, session_id={session_id}"

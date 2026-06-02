@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import inspect
-import io
 import json
 import sys
+from tempfile import SpooledTemporaryFile
 from typing import TYPE_CHECKING, Annotated, Any
 from urllib.parse import urlparse
 
@@ -13,6 +13,7 @@ import httpx
 from langchain_core.tools import BaseTool, InjectedToolArg
 from openai import AsyncOpenAI
 
+from src.infra.async_utils import run_blocking_io
 from src.infra.logging import get_logger
 from src.infra.tool.backend_utils import get_base_url_from_runtime
 from src.kernel.config import settings
@@ -32,9 +33,18 @@ from langchain.tools import tool  # noqa: E402
 
 logger = get_logger(__name__)
 
+_SPOOL_MAX_MEMORY_BYTES = 2 * 1024 * 1024
+
+# Bound remote audio downloads before forwarding them to the transcription API.
+_MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024
+
 
 def _json(data: dict[str, Any]) -> str:
     return json.dumps(data, ensure_ascii=False)
+
+
+async def _json_dumps_result(data: dict[str, Any]) -> str:
+    return await run_blocking_io(json.dumps, data, ensure_ascii=False)
 
 
 async def _maybe_await(value: Any) -> Any:
@@ -58,6 +68,20 @@ def _guess_filename(url: str) -> str:
     return path.split("/")[-1] if path else "audio"
 
 
+def _known_download_size(headers: Any) -> int | None:
+    try:
+        raw_size = headers.get("content-length")
+    except Exception:
+        return None
+    if raw_size is None:
+        return None
+    try:
+        size = int(raw_size)
+    except (TypeError, ValueError):
+        return None
+    return size if size >= 0 else None
+
+
 def _build_client() -> AsyncOpenAI | None:
     api_key = getattr(settings, "AUDIO_TRANSCRIPTION_API_KEY", "") or ""
     if not api_key:
@@ -68,6 +92,16 @@ def _build_client() -> AsyncOpenAI | None:
     if base_url:
         client_kwargs["base_url"] = base_url
     return AsyncOpenAI(**client_kwargs)
+
+
+async def _close_client(client: Any) -> None:
+    close = getattr(client, "aclose", None)
+    if close is None:
+        return
+    try:
+        await _maybe_await(close())
+    except Exception as exc:
+        logger.debug("[audio_transcribe] failed to close OpenAI client: %s", exc)
 
 
 @tool
@@ -89,54 +123,86 @@ async def audio_transcribe(
 
     client = _build_client()
     if client is None:
-        return _json({"error": "AUDIO_TRANSCRIPTION_API_KEY is not configured"})
+        return await _json_dumps_result({"error": "AUDIO_TRANSCRIPTION_API_KEY is not configured"})
 
     resolved_model = (
         model or getattr(settings, "AUDIO_TRANSCRIPTION_MODEL", "") or "gpt-4o-mini-transcribe"
     )
 
     try:
-        async with httpx.AsyncClient(follow_redirects=True, timeout=60) as http_client:
-            response = await _maybe_await(http_client.get(resolved_url))
-            response.raise_for_status()
-        file_bytes = response.content
+        try:
+            filename = _guess_filename(resolved_url)
+            with SpooledTemporaryFile(max_size=_SPOOL_MAX_MEMORY_BYTES, mode="w+b") as file_obj:
+                max_download_bytes = max(
+                    int(
+                        getattr(
+                            settings,
+                            "AUDIO_TRANSCRIPTION_MAX_DOWNLOAD_BYTES",
+                            _MAX_DOWNLOAD_BYTES,
+                        )
+                        or 0
+                    ),
+                    1,
+                )
+                total_size = 0
+                async with httpx.AsyncClient(follow_redirects=True, timeout=60) as http_client:
+                    async with http_client.stream("GET", resolved_url) as response:
+                        response.raise_for_status()
+                        known_size = _known_download_size(getattr(response, "headers", {}))
+                        if known_size is not None and known_size > max_download_bytes:
+                            return await _json_dumps_result(
+                                {"error": f"Audio download exceeds {max_download_bytes} bytes"}
+                            )
+                        async for chunk in response.aiter_bytes():
+                            if not chunk:
+                                continue
+                            total_size += len(chunk)
+                            if total_size > max_download_bytes:
+                                return await _json_dumps_result(
+                                    {
+                                        "error": (
+                                            f"Audio download exceeds {max_download_bytes} bytes"
+                                        )
+                                    }
+                                )
+                            await run_blocking_io(file_obj.write, chunk)
+                await run_blocking_io(file_obj.seek, 0)
 
-        file_obj = io.BytesIO(file_bytes)
-        file_obj.name = _guess_filename(resolved_url)  # type: ignore[attr-defined]
+                request: dict[str, Any] = {
+                    "file": (filename, file_obj),
+                    "model": resolved_model,
+                }
+                if language:
+                    request["language"] = language
+                if prompt:
+                    request["prompt"] = prompt
 
-        request: dict[str, Any] = {
-            "file": file_obj,
+                result = await client.audio.transcriptions.create(**request)
+        except Exception as exc:
+            logger.warning("[audio_transcribe] transcription failed for %s: %s", resolved_url, exc)
+            return await _json_dumps_result({"error": f"Audio transcription failed: {exc}"})
+
+        text = getattr(result, "text", None)
+        if text is None and isinstance(result, str):
+            text = result
+
+        payload = {
+            "success": True,
+            "text": text or "",
+            "url": resolved_url,
+            "filename": filename,
             "model": resolved_model,
         }
-        if language:
-            request["language"] = language
-        if prompt:
-            request["prompt"] = prompt
+        response_language = getattr(result, "language", None)
+        if response_language:
+            payload["language"] = response_language
+        response_duration = getattr(result, "duration", None)
+        if response_duration is not None:
+            payload["duration"] = response_duration
 
-        result = await client.audio.transcriptions.create(**request)
-    except Exception as exc:
-        logger.warning("[audio_transcribe] transcription failed for %s: %s", resolved_url, exc)
-        return _json({"error": f"Audio transcription failed: {exc}"})
-
-    text = getattr(result, "text", None)
-    if text is None and isinstance(result, str):
-        text = result
-
-    payload = {
-        "success": True,
-        "text": text or "",
-        "url": resolved_url,
-        "filename": file_obj.name,
-        "model": resolved_model,
-    }
-    response_language = getattr(result, "language", None)
-    if response_language:
-        payload["language"] = response_language
-    response_duration = getattr(result, "duration", None)
-    if response_duration is not None:
-        payload["duration"] = response_duration
-
-    return _json(payload)
+        return await _json_dumps_result(payload)
+    finally:
+        await _close_client(client)
 
 
 def get_audio_transcribe_tool() -> BaseTool:

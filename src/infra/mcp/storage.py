@@ -8,11 +8,22 @@ import copy
 import inspect
 from typing import TYPE_CHECKING, Any, Mapping, Optional
 
+from src.infra.async_utils import run_blocking_io
 from src.infra.logging import get_logger
 from src.infra.mcp.encryption import (
     decrypt_server_secrets,
     encrypt_server_secrets,
     encrypt_value,
+)
+from src.infra.mcp.storage_helpers import (
+    MCP_DISCOVER_TOOL_LIMIT,
+    MCP_DISCOVER_TOOL_PARAMETER_LIMIT,
+    MCP_PREFERENCE_LIST_LIMIT,
+    MCP_SERVER_LIST_LIMIT,
+    MCP_TOOL_POLICY_LIST_LIMIT,
+    SENSITIVE_ENV_PATTERNS,
+    _apply_disabled_tool_update,
+    _normalize_disabled_tools,
 )
 from src.infra.mcp.storage_operations import StorageOperations, _can_access_system_server
 from src.infra.storage.mongodb import get_mongo_client
@@ -29,18 +40,9 @@ from src.kernel.schemas.mcp import (
 
 logger = get_logger(__name__)
 
+
 if TYPE_CHECKING:
     from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorCollection
-
-# Sensitive fields that should be masked in responses
-SENSITIVE_FIELDS = [
-    "headers.Authorization",
-    "headers.X-Api-Key",
-    "headers.Api-Key",
-]
-
-# Patterns for sensitive env variables
-SENSITIVE_ENV_PATTERNS = ["_API_KEY", "_SECRET", "_PASSWORD", "_TOKEN"]
 
 
 class MCPStorage(StorageOperations):
@@ -126,8 +128,8 @@ class MCPStorage(StorageOperations):
         """List all system MCP servers"""
         collection = self._get_system_collection()
         servers = []
-        async for doc in collection.find({}):
-            servers.append(self._doc_to_system_server(doc))
+        async for doc in collection.find({}).limit(MCP_SERVER_LIST_LIMIT):
+            servers.append(await self._doc_to_system_server_async(doc))
         return servers
 
     async def get_system_server(self, name: str) -> Optional[SystemMCPServer]:
@@ -135,7 +137,7 @@ class MCPStorage(StorageOperations):
         collection = self._get_system_collection()
         doc = await collection.find_one({"name": name})
         if doc:
-            return self._doc_to_system_server(doc)
+            return await self._doc_to_system_server_async(doc)
         return None
 
     async def create_system_server(self, server, admin_user_id: str) -> SystemMCPServer:
@@ -164,14 +166,14 @@ class MCPStorage(StorageOperations):
         }
 
         # 加密敏感字段
-        doc = encrypt_server_secrets(doc)
+        doc = await run_blocking_io(encrypt_server_secrets, doc)
 
         await collection.insert_one(doc)
 
         # Invalidate all caches since system server affects all users
         await self._invalidate_all_cache()
 
-        return self._doc_to_system_server(doc)
+        return await self._doc_to_system_server_async(doc)
 
     async def update_system_server(
         self, name: str, updates, admin_user_id: str
@@ -196,7 +198,9 @@ class MCPStorage(StorageOperations):
             update_data["url"] = updates.url
         if updates.headers is not None:
             update_data["headers"] = (
-                encrypt_value(updates.headers) if updates.headers else updates.headers
+                await run_blocking_io(encrypt_value, updates.headers)
+                if updates.headers
+                else updates.headers
             )
         if updates.command is not None:
             update_data["command"] = updates.command
@@ -215,7 +219,7 @@ class MCPStorage(StorageOperations):
         await self._invalidate_all_cache()
 
         updated_doc = await collection.find_one({"name": name})
-        return self._doc_to_system_server(updated_doc) if updated_doc else None
+        return await self._doc_to_system_server_async(updated_doc) if updated_doc else None
 
     async def delete_system_server(self, name: str) -> bool:
         """Delete a system MCP server (admin only)"""
@@ -236,8 +240,8 @@ class MCPStorage(StorageOperations):
         """List all MCP servers for a specific user"""
         collection = self._get_user_collection()
         servers = []
-        async for doc in collection.find({"user_id": user_id}):
-            servers.append(self._doc_to_user_server(doc))
+        async for doc in collection.find({"user_id": user_id}).limit(MCP_SERVER_LIST_LIMIT):
+            servers.append(await self._doc_to_user_server_async(doc))
         return servers
 
     async def get_user_server(self, name: str, user_id: str) -> Optional[UserMCPServer]:
@@ -245,7 +249,7 @@ class MCPStorage(StorageOperations):
         collection = self._get_user_collection()
         doc = await collection.find_one({"name": name, "user_id": user_id})
         if doc:
-            return self._doc_to_user_server(doc)
+            return await self._doc_to_user_server_async(doc)
         return None
 
     async def create_user_server(self, server, user_id: str) -> UserMCPServer:
@@ -268,14 +272,14 @@ class MCPStorage(StorageOperations):
         }
 
         # 加密敏感字段
-        doc = encrypt_server_secrets(doc)
+        doc = await run_blocking_io(encrypt_server_secrets, doc)
 
         await collection.insert_one(doc)
 
         # Invalidate cache for this user
         await self._invalidate_user_cache(user_id)
 
-        return self._doc_to_user_server(doc)
+        return await self._doc_to_user_server_async(doc)
 
     async def update_user_server(self, name: str, updates, user_id: str) -> Optional[UserMCPServer]:
         """Update a user MCP server"""
@@ -295,7 +299,9 @@ class MCPStorage(StorageOperations):
             update_data["url"] = updates.url
         if updates.headers is not None:
             update_data["headers"] = (
-                encrypt_value(updates.headers) if updates.headers else updates.headers
+                await run_blocking_io(encrypt_value, updates.headers)
+                if updates.headers
+                else updates.headers
             )
         if updates.command is not None:
             update_data["command"] = updates.command
@@ -308,7 +314,7 @@ class MCPStorage(StorageOperations):
         await self._invalidate_user_cache(user_id)
 
         updated_doc = await collection.find_one({"name": name, "user_id": user_id})
-        return self._doc_to_user_server(updated_doc) if updated_doc else None
+        return await self._doc_to_user_server_async(updated_doc) if updated_doc else None
 
     async def delete_user_server(self, name: str, user_id: str) -> bool:
         """Delete a user MCP server"""
@@ -329,7 +335,7 @@ class MCPStorage(StorageOperations):
         """Get user's enabled preferences for system servers"""
         collection = self._get_preferences_collection()
         preferences = {}
-        async for doc in collection.find({"user_id": user_id}):
+        async for doc in collection.find({"user_id": user_id}).limit(MCP_PREFERENCE_LIST_LIMIT):
             preferences[doc["server_name"]] = doc.get("enabled", True)
         logger.info(f"[MCP] Retrieved preferences for user {user_id}: {preferences}")
         return preferences
@@ -415,7 +421,9 @@ class MCPStorage(StorageOperations):
             tools = manager._tools
 
             result = []
-            for tool in tools:
+            for index, tool in enumerate(tools):
+                if index >= MCP_DISCOVER_TOOL_LIMIT:
+                    break
                 # langchain-mcp-adapters may prefix with "server_name:"
                 # Strip it so the frontend can construct the qualified name itself
                 tool_name = tool.name
@@ -449,7 +457,9 @@ class MCPStorage(StorageOperations):
                             schema = tool.args_schema.schema()
                         properties = schema.get("properties", {})
                         required = set(schema.get("required", []))
-                        for param_name, param_info in properties.items():
+                        for index, (param_name, param_info) in enumerate(properties.items()):
+                            if index >= MCP_DISCOVER_TOOL_PARAMETER_LIMIT:
+                                break
                             if isinstance(param_info, dict):
                                 tool_info["parameters"].append(
                                     {
@@ -495,7 +505,7 @@ class MCPStorage(StorageOperations):
         """
         collection = self._get_tool_preferences_collection()
         preferences: dict[str, bool] = {}
-        async for doc in collection.find({"user_id": user_id}):
+        async for doc in collection.find({"user_id": user_id}).limit(MCP_PREFERENCE_LIST_LIMIT):
             tool_key = doc["tool_name"]
             enabled = doc.get("enabled", True)
             if not enabled:
@@ -594,11 +604,32 @@ class MCPStorage(StorageOperations):
         """List explicit tool policies for a server, keyed by tool name."""
         collection = self._get_tool_policies_collection()
         policies: dict[str, MCPToolPolicy] = {}
-        async for doc in collection.find({"server_name": server_name}):
+        async for doc in collection.find({"server_name": server_name}).limit(
+            MCP_TOOL_POLICY_LIST_LIMIT
+        ):
             policy = self._doc_to_tool_policy(doc)
             if policy.tool_name:
                 policies[policy.tool_name] = policy
         return policies
+
+    async def list_tool_policies_for_servers(
+        self,
+        server_names: list[str],
+    ) -> dict[str, dict[str, MCPToolPolicy]]:
+        """List explicit tool policies for multiple servers in one query."""
+        if not server_names:
+            return {}
+
+        collection = self._get_tool_policies_collection()
+        policies_by_server: dict[str, dict[str, MCPToolPolicy]] = {}
+        async for doc in collection.find({"server_name": {"$in": server_names}}).limit(
+            MCP_TOOL_POLICY_LIST_LIMIT
+        ):
+            policy = self._doc_to_tool_policy(doc)
+            if not policy.server_name or not policy.tool_name:
+                continue
+            policies_by_server.setdefault(policy.server_name, {})[policy.tool_name] = policy
+        return policies_by_server
 
     async def set_system_tool_disabled(
         self, server_name: str, tool_name: str, disabled: bool
@@ -616,15 +647,11 @@ class MCPStorage(StorageOperations):
         if not server_doc:
             raise ValueError(f"System server '{server_name}' not found")
 
-        disabled_tools = server_doc.get("disabled_tools", [])
-        if disabled:
-            # Add to disabled list if not already there
-            if tool_name not in disabled_tools:
-                disabled_tools.append(tool_name)
-        else:
-            # Remove from disabled list if present
-            if tool_name in disabled_tools:
-                disabled_tools.remove(tool_name)
+        disabled_tools = _apply_disabled_tool_update(
+            server_doc.get("disabled_tools", []),
+            tool_name,
+            disabled,
+        )
 
         await collection.update_one(
             {"name": server_name},
@@ -648,9 +675,9 @@ class MCPStorage(StorageOperations):
         """
         collection = self._get_system_collection()
         result: dict[str, set[str]] = {}
-        async for doc in collection.find({}):
+        async for doc in collection.find({}).limit(MCP_SERVER_LIST_LIMIT):
             server_name = doc["name"]
-            disabled_tools = doc.get("disabled_tools", [])
+            disabled_tools = _normalize_disabled_tools(doc.get("disabled_tools", []))
             if disabled_tools:
                 result[server_name] = set(disabled_tools)
         return result
@@ -673,13 +700,11 @@ class MCPStorage(StorageOperations):
         if not server_doc:
             raise ValueError(f"User server '{server_name}' not found for user '{user_id}'")
 
-        disabled_tools = server_doc.get("disabled_tools", [])
-        if disabled:
-            if tool_name not in disabled_tools:
-                disabled_tools.append(tool_name)
-        else:
-            if tool_name in disabled_tools:
-                disabled_tools.remove(tool_name)
+        disabled_tools = _apply_disabled_tool_update(
+            server_doc.get("disabled_tools", []),
+            tool_name,
+            disabled,
+        )
 
         await collection.update_one(
             {"name": server_name, "user_id": user_id},
@@ -703,9 +728,9 @@ class MCPStorage(StorageOperations):
         """
         collection = self._get_user_collection()
         result: dict[str, set[str]] = {}
-        async for doc in collection.find({"user_id": user_id}):
+        async for doc in collection.find({"user_id": user_id}).limit(MCP_SERVER_LIST_LIMIT):
             server_name = doc["name"]
-            disabled_tools = doc.get("disabled_tools", [])
+            disabled_tools = _normalize_disabled_tools(doc.get("disabled_tools", []))
             if disabled_tools:
                 result[server_name] = set(disabled_tools)
         return result
@@ -713,6 +738,35 @@ class MCPStorage(StorageOperations):
     # ==========================================
     # Document Conversion
     # ==========================================
+
+    async def _decrypt_server_secrets_async(self, doc: dict[str, Any]) -> dict[str, Any]:
+        return await run_blocking_io(decrypt_server_secrets, doc)
+
+    async def _doc_to_system_server_async(self, doc: dict[str, Any]) -> SystemMCPServer:
+        return self._doc_to_system_server(await self._decrypt_server_secrets_async(doc))
+
+    async def _doc_to_user_server_async(self, doc: dict[str, Any]) -> UserMCPServer:
+        return self._doc_to_user_server(await self._decrypt_server_secrets_async(doc))
+
+    async def _doc_to_response_async(
+        self,
+        doc: dict[str, Any],
+        is_system: bool,
+        can_edit: bool,
+        hide_sensitive: bool = False,
+    ) -> MCPServerResponse:
+        return self._doc_to_response(
+            await self._decrypt_server_secrets_async(doc),
+            is_system=is_system,
+            can_edit=can_edit,
+            hide_sensitive=hide_sensitive,
+            already_decrypted=True,
+        )
+
+    async def _doc_to_config_dict_async(self, doc: dict[str, Any]) -> dict[str, Any]:
+        return self._doc_to_config_dict(
+            await self._decrypt_server_secrets_async(doc), already_decrypted=True
+        )
 
     def _doc_to_system_server(self, doc: dict[str, Any]) -> SystemMCPServer:
         """Convert MongoDB document to SystemMCPServer"""
@@ -723,9 +777,6 @@ class MCPStorage(StorageOperations):
             created_at = to_iso(created_at)
         if updated_at and hasattr(updated_at, "isoformat"):
             updated_at = to_iso(updated_at)
-
-        # 解密敏感字段
-        doc = decrypt_server_secrets(doc)
 
         return SystemMCPServer(
             name=doc["name"],
@@ -739,7 +790,7 @@ class MCPStorage(StorageOperations):
             command=doc.get("command"),
             env_keys=doc.get("env_keys"),
             is_system=True,
-            disabled_tools=doc.get("disabled_tools", []),
+            disabled_tools=_normalize_disabled_tools(doc.get("disabled_tools", [])),
             allowed_roles=doc.get("allowed_roles", []),
             role_quotas=doc.get("role_quotas", {}),
             created_at=created_at,
@@ -758,9 +809,6 @@ class MCPStorage(StorageOperations):
         if updated_at and hasattr(updated_at, "isoformat"):
             updated_at = to_iso(updated_at)
 
-        # 解密敏感字段
-        doc = decrypt_server_secrets(doc)
-
         return UserMCPServer(
             name=doc["name"],
             transport=MCPTransport._value2member_map_.get(
@@ -774,7 +822,7 @@ class MCPStorage(StorageOperations):
             env_keys=doc.get("env_keys"),
             user_id=doc["user_id"],
             is_system=False,
-            disabled_tools=doc.get("disabled_tools", []),
+            disabled_tools=_normalize_disabled_tools(doc.get("disabled_tools", [])),
             created_at=created_at,
             updated_at=updated_at,
         )
@@ -806,6 +854,7 @@ class MCPStorage(StorageOperations):
         is_system: bool,
         can_edit: bool,
         hide_sensitive: bool = False,
+        already_decrypted: bool = False,
     ) -> MCPServerResponse:
         """Convert MongoDB document to MCPServerResponse with masked sensitive fields.
 
@@ -820,7 +869,8 @@ class MCPStorage(StorageOperations):
         doc_copy = copy.deepcopy(doc)
 
         # 解密敏感字段
-        doc_copy = decrypt_server_secrets(doc_copy)
+        if not already_decrypted:
+            doc_copy = decrypt_server_secrets(doc_copy)
 
         if hide_sensitive:
             # Non-admin viewing a system server: strip all connection details
@@ -858,10 +908,16 @@ class MCPStorage(StorageOperations):
             updated_at=updated_at,
         )
 
-    def _doc_to_config_dict(self, doc: dict[str, Any]) -> dict[str, Any]:
+    def _doc_to_config_dict(
+        self,
+        doc: dict[str, Any],
+        *,
+        already_decrypted: bool = False,
+    ) -> dict[str, Any]:
         """Convert MongoDB document to config dict format (for langchain-mcp-adapters)"""
         # 先解密敏感字段
-        doc = decrypt_server_secrets(doc)
+        if not already_decrypted:
+            doc = decrypt_server_secrets(doc)
 
         transport = doc.get("transport", "streamable_http")
         result = {"transport": transport}

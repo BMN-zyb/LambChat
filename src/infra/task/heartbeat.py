@@ -12,6 +12,7 @@ from src.infra.storage.redis import get_redis_client
 from src.infra.utils.datetime import utc_now_iso
 
 from .constants import HEARTBEAT_INTERVAL, HEARTBEAT_PREFIX, HEARTBEAT_TIMEOUT
+from .startup_cleanup import _gather_limited
 
 logger = get_logger(__name__)
 
@@ -36,26 +37,27 @@ class TaskHeartbeat:
             try:
                 redis_client = get_redis_client()
                 while True:
-                    # 设置心跳，带 TTL（超时时间的 2 倍）
-                    await redis_client.set(
-                        f"{HEARTBEAT_PREFIX}{run_id}",
-                        utc_now_iso(),
-                        ex=HEARTBEAT_TIMEOUT * 2,
-                    )
-                    # 刷新并发限制的 Sorted Set 分数（保持条目活跃）
-                    if user_id:
-                        try:
-                            from src.infra.task.concurrency import get_concurrency_limiter
+                    try:
+                        # 设置心跳，带 TTL（超时时间的 2 倍）
+                        await redis_client.set(
+                            f"{HEARTBEAT_PREFIX}{run_id}",
+                            utc_now_iso(),
+                            ex=HEARTBEAT_TIMEOUT * 2,
+                        )
+                        # 刷新并发限制的 Sorted Set 分数（保持条目活跃）
+                        if user_id:
+                            try:
+                                from src.infra.task.concurrency import get_concurrency_limiter
 
-                            limiter = get_concurrency_limiter()
-                            await limiter.refresh(user_id, run_id)
-                        except Exception:
-                            pass
+                                limiter = get_concurrency_limiter()
+                                await limiter.refresh(user_id, run_id)
+                            except Exception:
+                                pass
+                    except Exception as e:
+                        logger.warning(f"Heartbeat write failed for run_id={run_id}: {e}")
                     await asyncio.sleep(HEARTBEAT_INTERVAL)
             except asyncio.CancelledError:
                 pass
-            except Exception as e:
-                logger.warning(f"Heartbeat error for run_id={run_id}: {e}")
             finally:
                 self._heartbeat_tasks.pop(run_id, None)
 
@@ -82,8 +84,8 @@ class TaskHeartbeat:
 
     async def stop_all(self) -> None:
         """停止所有心跳任务"""
-        for run_id in list(self._heartbeat_tasks.keys()):
-            await self.stop(run_id)
+        run_ids = list(self._heartbeat_tasks.keys())
+        await _gather_limited([lambda run_id=run_id: self.stop(run_id) for run_id in run_ids])
 
     async def check_exists(self, run_id: str) -> bool:
         """

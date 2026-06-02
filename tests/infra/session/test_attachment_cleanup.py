@@ -21,7 +21,11 @@ class _FileRecordStorage:
 
 
 class _TraceStorage:
-    async def get_session_events(self, _session_id: str) -> list[dict]:
+    def __init__(self) -> None:
+        self.get_session_events_calls: list[tuple[str, dict]] = []
+
+    async def get_session_events(self, _session_id: str, **kwargs) -> list[dict]:
+        self.get_session_events_calls.append((_session_id, kwargs))
         return []
 
     async def delete_session_traces(self, _session_id: str) -> int:
@@ -149,3 +153,48 @@ async def test_delete_session_cleans_checkpoints_after_session_document_delete(
 
     assert deleted is True
     assert calls == ["session", "checkpoints"]
+
+
+@pytest.mark.asyncio
+async def test_collect_user_attachment_keys_uses_bounded_user_message_query() -> None:
+    manager = SessionManager()
+
+    class _AttachmentTraceStorage:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict]] = []
+
+        async def get_session_events(self, session_id: str, **kwargs) -> list[dict]:
+            self.calls.append((session_id, kwargs))
+            return [
+                {
+                    "event_type": "user:message",
+                    "data": {
+                        "attachments": [
+                            {"key": "attachments/u1/a.png"},
+                            {"key": "attachments/u1/a.png"},
+                            {"key": " attachments/u1/b.txt "},
+                        ]
+                    },
+                },
+                {
+                    "event_type": "assistant:message",
+                    "data": {"attachments": [{"key": "attachments/u1/ignored.png"}]},
+                },
+            ]
+
+    trace_storage = _AttachmentTraceStorage()
+    manager._trace_storage = trace_storage
+
+    keys = await manager._collect_user_attachment_keys("session-1")
+
+    assert keys == ["attachments/u1/a.png", "attachments/u1/b.txt"]
+    assert trace_storage.calls == [
+        (
+            "session-1",
+            {
+                "event_types": ["user:message"],
+                "completed_only": False,
+                "max_events": 1000,
+            },
+        )
+    ]

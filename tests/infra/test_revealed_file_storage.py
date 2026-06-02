@@ -2,7 +2,11 @@ from datetime import datetime, timezone
 
 import pytest
 
-from src.infra.revealed_file.storage import RevealedFileStorage
+from src.infra.revealed_file.storage import (
+    REVEALED_FILE_GROUPED_FILES_PER_SESSION_MAX,
+    REVEALED_FILE_SESSION_LIST_LIMIT,
+    RevealedFileStorage,
+)
 
 
 class _FakeCursor:
@@ -75,7 +79,10 @@ class _FakeCollection:
         self.update_calls = []
         self.created_indexes = []
         self.dropped_indexes = []
+        self.delete_many_calls = []
         self.name = "revealed_files"
+        self.find_cursors = []
+        self.aggregate_pipelines = []
 
     async def index_information(self):
         return dict(self.indexes)
@@ -94,6 +101,8 @@ class _FakeCollection:
         return name
 
     async def delete_many(self, _query):
+        self.delete_many_calls.append(_query)
+
         class _Result:
             deleted_count = 0
 
@@ -114,9 +123,12 @@ class _FakeCollection:
         matched = [
             _apply_projection(doc, projection) for doc in self.docs if _matches_query(doc, query)
         ]
-        return _FakeCursor(matched)
+        cursor = _FakeCursor(matched)
+        self.find_cursors.append(cursor)
+        return cursor
 
     def aggregate(self, pipeline):
+        self.aggregate_pipelines.append(pipeline)
         if any("$count" in stage for stage in pipeline):
             return _FakeAggregateResult(self.count_result)
         return _FakeAggregateResult(self.session_results)
@@ -250,6 +262,40 @@ async def test_list_files_keeps_project_meta_for_project_items(
 
 
 @pytest.mark.asyncio
+async def test_list_files_clamps_storage_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime.now(timezone.utc)
+    storage = RevealedFileStorage()
+    storage._collection = _FakeCollection(
+        docs=[
+            {
+                "_id": f"file-{index}",
+                "user_id": "user-1",
+                "session_id": "session-1",
+                "file_name": f"file-{index}.txt",
+                "file_type": "document",
+                "source": "reveal_file",
+                "file_key": f"revealed_files/file-{index}.txt",
+                "created_at": now,
+            }
+            for index in range(80)
+        ]
+    )
+    storage.ensure_indexes_if_needed = _no_op_async
+    monkeypatch.setattr(
+        "src.infra.storage.mongodb.get_mongo_client",
+        lambda: _FakeMongoClient([{"session_id": "session-1", "name": "Session One"}]),
+    )
+
+    result = await storage.list_files("user-1", limit=10_000)
+
+    assert len(result["items"]) == 50
+    assert result["limit"] == 50
+    assert storage.collection.find_cursors[0]._limit == 50
+
+
+@pytest.mark.asyncio
 async def test_list_files_grouped_keeps_project_meta_for_project_items(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -300,6 +346,107 @@ async def test_list_files_grouped_keeps_project_meta_for_project_items(
 
 
 @pytest.mark.asyncio
+async def test_list_files_grouped_clamps_session_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime.now(timezone.utc)
+    storage = RevealedFileStorage()
+    storage._collection = _FakeCollection(
+        docs=[],
+        session_results=[
+            {"_id": f"session-{index}", "file_count": 1, "latest_file_at": now}
+            for index in range(80)
+        ],
+        count_result=[{"total": 80}],
+    )
+    storage.ensure_indexes_if_needed = _no_op_async
+    monkeypatch.setattr(
+        "src.infra.storage.mongodb.get_mongo_client",
+        lambda: _FakeMongoClient([]),
+    )
+
+    result = await storage.list_files_grouped_by_session("user-1", limit=10_000)
+
+    assert result["limit"] == 50
+    paginated_pipeline = storage.collection.aggregate_pipelines[1]
+    assert {"$limit": 50} in paginated_pipeline
+
+
+@pytest.mark.asyncio
+async def test_list_files_grouped_caps_files_per_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime.now(timezone.utc)
+    storage = RevealedFileStorage()
+    session_ids = ["session-1", "session-2"]
+    storage._collection = _FakeCollection(
+        docs=[
+            {
+                "_id": f"{session_id}-file-{index}",
+                "user_id": "user-1",
+                "session_id": session_id,
+                "file_name": f"file-{index:02d}.txt",
+                "file_type": "document",
+                "source": "reveal_file",
+                "file_key": f"revealed_files/{session_id}/file-{index:02d}.txt",
+                "created_at": now,
+            }
+            for session_id in session_ids
+            for index in range(REVEALED_FILE_GROUPED_FILES_PER_SESSION_MAX + 5)
+        ],
+        session_results=[
+            {
+                "_id": session_id,
+                "file_count": REVEALED_FILE_GROUPED_FILES_PER_SESSION_MAX + 5,
+                "latest_file_at": now,
+            }
+            for session_id in session_ids
+        ],
+        count_result=[{"total": len(session_ids)}],
+    )
+    storage.ensure_indexes_if_needed = _no_op_async
+    monkeypatch.setattr(
+        "src.infra.storage.mongodb.get_mongo_client",
+        lambda: _FakeMongoClient(
+            [{"session_id": session_id, "name": session_id} for session_id in session_ids]
+        ),
+    )
+
+    result = await storage.list_files_grouped_by_session("user-1", limit=len(session_ids))
+
+    assert [len(session["files"]) for session in result["sessions"]] == [
+        REVEALED_FILE_GROUPED_FILES_PER_SESSION_MAX,
+        REVEALED_FILE_GROUPED_FILES_PER_SESSION_MAX,
+    ]
+    assert [cursor._limit for cursor in storage.collection.find_cursors] == [
+        REVEALED_FILE_GROUPED_FILES_PER_SESSION_MAX,
+        REVEALED_FILE_GROUPED_FILES_PER_SESSION_MAX,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_get_user_sessions_limits_grouping_on_server(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = RevealedFileStorage()
+    storage._collection = _FakeCollection(
+        session_results=[
+            {"_id": f"session-{index}", "count": 1}
+            for index in range(REVEALED_FILE_SESSION_LIST_LIMIT + 50)
+        ],
+    )
+    storage.ensure_indexes_if_needed = _no_op_async
+    monkeypatch.setattr(
+        "src.infra.storage.mongodb.get_mongo_client",
+        lambda: _FakeMongoClient([]),
+    )
+
+    await storage.get_user_sessions("user-1")
+
+    assert {"$limit": REVEALED_FILE_SESSION_LIST_LIMIT} in storage.collection.aggregate_pipelines[0]
+
+
+@pytest.mark.asyncio
 async def test_ensure_indexes_replaces_old_name_based_unique_index() -> None:
     storage = RevealedFileStorage()
     storage._collection = _FakeCollection(
@@ -319,3 +466,36 @@ async def test_ensure_indexes_replaces_old_name_based_unique_index() -> None:
         and keys == [("user_id", 1), ("file_key", 1), ("source", 1)]
         for keys, kwargs in storage.collection.created_indexes
     )
+
+
+@pytest.mark.asyncio
+async def test_ensure_indexes_deduplicates_without_collecting_duplicate_ids() -> None:
+    storage = RevealedFileStorage()
+    storage._collection = _FakeCollection(
+        session_results=[
+            {
+                "_id": {
+                    "user_id": "user-1",
+                    "file_key": "revealed_files/report.txt",
+                    "source": "reveal_file",
+                },
+                "keep_id": "newest-id",
+                "count": 3,
+            }
+        ]
+    )
+
+    await storage._ensure_indexes()
+
+    duplicate_pipeline = storage.collection.aggregate_pipelines[0]
+    group_stage = next(stage["$group"] for stage in duplicate_pipeline if "$group" in stage)
+    assert "ids" not in group_stage
+    assert group_stage["keep_id"] == {"$max": "$_id"}
+    assert storage.collection.delete_many_calls == [
+        {
+            "user_id": "user-1",
+            "file_key": "revealed_files/report.txt",
+            "source": "reveal_file",
+            "_id": {"$ne": "newest-id"},
+        }
+    ]

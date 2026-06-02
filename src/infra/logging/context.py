@@ -15,19 +15,24 @@ from typing import Optional
 class TraceInfo:
     """追踪信息数据类"""
 
+    request_id: Optional[str] = None
     trace_id: Optional[str] = None
     span_id: Optional[str] = None
     parent_span_id: Optional[str] = None
 
     def is_set(self) -> bool:
         """检查是否设置了追踪信息"""
-        return self.trace_id is not None
+        return self.request_id is not None or self.trace_id is not None
 
     def format(self) -> str:
         """格式化为日志字符串"""
         if not self.is_set():
             return "-"
-        parts = [f"trace_id={self.trace_id}"]
+        parts = []
+        if self.request_id:
+            parts.append(f"request_id={self.request_id}")
+        if self.trace_id:
+            parts.append(f"trace_id={self.trace_id}")
         if self.span_id:
             parts.append(f"span_id={self.span_id}")
         return " ".join(parts)
@@ -37,6 +42,7 @@ class TraceInfo:
 class RequestContext:
     """请求上下文数据类"""
 
+    request_id: Optional[str] = None
     session_id: Optional[str] = None
     run_id: Optional[str] = None
     user_id: Optional[str] = None
@@ -60,6 +66,7 @@ class TraceContext:
         TraceContext.clear()
     """
 
+    _request_id: ContextVar[Optional[str]] = ContextVar("request_id", default=None)
     _trace_id: ContextVar[Optional[str]] = ContextVar("trace_id", default=None)
     _span_id: ContextVar[Optional[str]] = ContextVar("span_id", default=None)
     _parent_span_id: ContextVar[Optional[str]] = ContextVar("parent_span_id", default=None)
@@ -68,6 +75,9 @@ class TraceContext:
     _session_id: ContextVar[Optional[str]] = ContextVar("session_id", default=None)
     _run_id: ContextVar[Optional[str]] = ContextVar("run_id", default=None)
     _user_id: ContextVar[Optional[str]] = ContextVar("user_id", default=None)
+    _request_context_request_id: ContextVar[Optional[str]] = ContextVar(
+        "request_context_request_id", default=None
+    )
     _request_trace_id: ContextVar[Optional[str]] = ContextVar("request_trace_id", default=None)
 
     @classmethod
@@ -76,6 +86,7 @@ class TraceContext:
         trace_id: str,
         span_id: Optional[str] = None,
         parent_span_id: Optional[str] = None,
+        request_id: Optional[str] = None,
     ) -> None:
         """
         设置追踪上下文
@@ -84,7 +95,9 @@ class TraceContext:
             trace_id: 追踪 ID（跨请求唯一）
             span_id: 当前跨度 ID
             parent_span_id: 父跨度 ID（用于嵌套调用）
+            request_id: 请求 ID（单次 HTTP 请求唯一）
         """
+        cls._request_id.set(request_id)
         cls._trace_id.set(trace_id)
         cls._span_id.set(span_id)
         cls._parent_span_id.set(parent_span_id)
@@ -98,6 +111,7 @@ class TraceContext:
             TraceInfo 包含 trace_id, span_id, parent_span_id
         """
         return TraceInfo(
+            request_id=cls._request_id.get(),
             trace_id=cls._trace_id.get(),
             span_id=cls._span_id.get(),
             parent_span_id=cls._parent_span_id.get(),
@@ -106,6 +120,7 @@ class TraceContext:
     @classmethod
     def clear(cls) -> None:
         """清除追踪上下文"""
+        cls._request_id.set(None)
         cls._trace_id.set(None)
         cls._span_id.set(None)
         cls._parent_span_id.set(None)
@@ -133,6 +148,7 @@ class TraceContext:
     @classmethod
     def set_request_context(
         cls,
+        request_id: Optional[str] = None,
         session_id: Optional[str] = None,
         run_id: Optional[str] = None,
         user_id: Optional[str] = None,
@@ -147,7 +163,11 @@ class TraceContext:
             session_id: 会话 ID
             run_id: 运行 ID
             user_id: 用户 ID
+            request_id: 请求 ID
+            trace_id: 追踪 ID
         """
+        if request_id is not None:
+            cls._request_context_request_id.set(request_id)
         if session_id is not None:
             cls._session_id.set(session_id)
         if run_id is not None:
@@ -166,6 +186,7 @@ class TraceContext:
             RequestContext 包含 session_id, run_id, user_id
         """
         return RequestContext(
+            request_id=cls._request_context_request_id.get(),
             session_id=cls._session_id.get(),
             run_id=cls._run_id.get(),
             user_id=cls._user_id.get(),
@@ -175,6 +196,7 @@ class TraceContext:
     @classmethod
     def clear_request_context(cls) -> None:
         """清除请求上下文"""
+        cls._request_context_request_id.set(None)
         cls._session_id.set(None)
         cls._run_id.set(None)
         cls._user_id.set(None)

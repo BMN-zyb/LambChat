@@ -28,6 +28,18 @@ class StreamEventMixin:
     total_tokens: int
     total_cache_creation_tokens: int
     total_cache_read_tokens: int
+    _output_buffer_chars: int
+
+    def _append_output_text(self, text: str) -> None:
+        from src.infra.agent.events.processor import OUTPUT_TEXT_COPY_MAX_CHARS
+
+        if not text or self._output_buffer_chars >= OUTPUT_TEXT_COPY_MAX_CHARS:
+            return
+
+        remaining = OUTPUT_TEXT_COPY_MAX_CHARS - self._output_buffer_chars
+        clipped = text[:remaining]
+        self._output_buffer.write(clipped)
+        self._output_buffer_chars += len(clipped)
 
     async def _flush_chunk_buffer(self) -> None:
         text, key = self._chunk_buffer.consume()
@@ -224,7 +236,7 @@ class StreamEventMixin:
 
         if isinstance(content, str) and content:
             if current_depth == 0:
-                self._output_buffer.write(content)
+                self._append_output_text(content)
             ready_flushes = self._buffer_text_chunk(
                 content,
                 current_depth,
@@ -273,7 +285,7 @@ class StreamEventMixin:
                     if text:
                         self.thinking_ids[current_agent_id] = None
                         if current_depth == 0:
-                            self._output_buffer.write(text)
+                            self._append_output_text(text)
                         ready_flushes = self._buffer_text_chunk(
                             text,
                             current_depth,

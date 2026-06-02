@@ -21,10 +21,18 @@ class _FakePayloadStore:
 class _FakeArqPool:
     def __init__(self) -> None:
         self.enqueued: list[tuple[str, tuple, dict]] = []
+        self.close_calls = 0
+        self.wait_closed_calls = 0
 
     async def enqueue_job(self, function: str, *args, **kwargs) -> SimpleNamespace:
         self.enqueued.append((function, args, kwargs))
         return SimpleNamespace(job_id="job-1")
+
+    async def close(self) -> None:
+        self.close_calls += 1
+
+    async def wait_closed(self) -> None:
+        self.wait_closed_calls += 1
 
 
 class _LockCheckingArqPool(_FakeArqPool):
@@ -101,6 +109,30 @@ async def test_submit_arq_persists_payload_and_enqueues_job() -> None:
 
 
 @pytest.mark.asyncio
+async def test_submit_arq_does_not_keep_run_info_in_submitter_memory() -> None:
+    manager = BackgroundTaskManager()
+    fake_executor = _FakeExecutor()
+    payload_store = _FakePayloadStore()
+    arq_pool = _FakeArqPool()
+    manager._executor = fake_executor  # type: ignore[assignment]
+
+    await manager.submit_arq(
+        session_id="session-1",
+        agent_id="search",
+        message="hello",
+        user_id="user-1",
+        executor_key="agent_stream",
+        payload_store=cast(Any, payload_store),
+        arq_pool=arq_pool,
+        run_id="run-1",
+        trace_id="trace-1",
+    )
+
+    assert manager._run_info == {}
+    assert payload_store.saved[0][1]["trace_id"] == "trace-1"
+
+
+@pytest.mark.asyncio
 async def test_submit_arq_enqueues_after_releasing_manager_lock() -> None:
     manager = BackgroundTaskManager()
     fake_executor = _FakeExecutor()
@@ -120,6 +152,56 @@ async def test_submit_arq_enqueues_after_releasing_manager_lock() -> None:
     )
 
     assert arq_pool.enqueued == [("run_agent_task", ("run-1",), {"_job_id": "run-1"})]
+
+
+@pytest.mark.asyncio
+async def test_submit_arq_reuses_manager_owned_pool_until_shutdown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = BackgroundTaskManager()
+    fake_executor = _FakeExecutor()
+    payload_store = _FakePayloadStore()
+    manager._executor = fake_executor  # type: ignore[assignment]
+    created_pools: list[_FakeArqPool] = []
+
+    async def _fake_create_pool(*args, **kwargs) -> _FakeArqPool:
+        del args, kwargs
+        pool = _FakeArqPool()
+        created_pools.append(pool)
+        return pool
+
+    monkeypatch.setattr("src.infra.task.manager.create_pool", _fake_create_pool)
+
+    await manager.submit_arq(
+        session_id="session-1",
+        agent_id="search",
+        message="hello",
+        user_id="user-1",
+        executor_key="agent_stream",
+        payload_store=cast(Any, payload_store),
+        run_id="run-1",
+    )
+    await manager.submit_arq(
+        session_id="session-1",
+        agent_id="search",
+        message="hello again",
+        user_id="user-1",
+        executor_key="agent_stream",
+        payload_store=cast(Any, payload_store),
+        run_id="run-2",
+    )
+
+    assert len(created_pools) == 1
+    assert created_pools[0].enqueued == [
+        ("run_agent_task", ("run-1",), {"_job_id": "run-1"}),
+        ("run_agent_task", ("run-2",), {"_job_id": "run-2"}),
+    ]
+    assert created_pools[0].close_calls == 0
+
+    await manager.shutdown()
+
+    assert created_pools[0].close_calls == 1
+    assert created_pools[0].wait_closed_calls == 1
 
 
 @pytest.mark.asyncio
@@ -161,9 +243,60 @@ async def test_submit_persists_user_message_before_background_task_starts(
         ("ensure_trace", "trace-1"),
         ("emit_user_message", "hello", [{"name": "a.txt"}]),
     ]
-    assert fake_executor.run_calls[0]["existing_trace_id"] == "trace-1"
-    assert fake_executor.run_calls[0]["user_message_written"] is True
-    assert manager._run_info["run-1"]["user_message_written"] is True
+
+
+@pytest.mark.asyncio
+async def test_shutdown_drains_release_concurrency_tasks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = BackgroundTaskManager()
+    release_started = asyncio.Event()
+    release_finished = False
+
+    class _FakeHeartbeat:
+        async def stop_all(self) -> None:
+            return None
+
+    class _FakeExecutor:
+        pass
+
+    class _FakeLimiter:
+        async def release(self, *args, **kwargs) -> None:
+            return None
+
+    async def _release_concurrency(user_id: str, run_id: str) -> None:
+        nonlocal release_finished
+        del user_id, run_id
+        release_started.set()
+        await asyncio.sleep(0.01)
+        release_finished = True
+
+    async def _close_arq_pool() -> None:
+        return None
+
+    monkeypatch.setattr(
+        "src.infra.task.concurrency.get_concurrency_limiter",
+        lambda: _FakeLimiter(),
+        raising=False,
+    )
+    monkeypatch.setattr(manager, "_release_concurrency", _release_concurrency)
+    monkeypatch.setattr(manager, "_close_arq_pool", _close_arq_pool)
+    manager._heartbeat = _FakeHeartbeat()  # type: ignore[assignment]
+    manager._executor = _FakeExecutor()  # type: ignore[assignment]
+    manager._run_info["run-1"] = {"user_id": "user-1", "session_id": "session-1"}
+
+    completed_task = asyncio.create_task(asyncio.sleep(0))
+    await completed_task
+    manager._tasks["run-1"] = completed_task
+    manager._on_task_done("run-1", completed_task)
+    await release_started.wait()
+
+    assert manager._release_tasks
+
+    await manager.shutdown()
+
+    assert release_finished is True
+    assert manager._release_tasks == set()
 
 
 @pytest.mark.asyncio

@@ -308,7 +308,10 @@ async def agent_node(state: Dict[str, Any], config: RunnableConfig) -> Dict[str,
     # 只需传入新消息，避免与 checkpoint 中的历史消息重复。
     user_input = state.get("input", "")
     if supports_vision:
-        attachments = await inline_image_attachments_as_data_urls(attachments)
+        attachments = await inline_image_attachments_as_data_urls(
+            attachments,
+            base_url=configurable.get("base_url", ""),
+        )
     new_message = build_human_message(user_input, attachments, supports_vision=supports_vision)
 
     # 创建事件处理器（使用 AgentEventProcessor 处理 astream_events）

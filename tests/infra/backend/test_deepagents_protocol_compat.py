@@ -37,6 +37,9 @@ class _FakeSkillStorage:
             for skill_name, user_id in skill_keys
         }
 
+    async def get_all_user_skill_names(self, user_id: str) -> list[str]:
+        return sorted(self.files.keys())
+
 
 class _FakeFilesAPI:
     def __init__(
@@ -54,6 +57,19 @@ class _FakeFilesAPI:
         if format != "text":
             raise AssertionError(f"unexpected format: {format}")
         return self.file_contents[path]
+
+
+class _FakeDownloadFilesAPI:
+    def __init__(self, entries: dict[str, list[SimpleNamespace]]) -> None:
+        self.entries = entries
+        self.read_calls: list[tuple[str, str]] = []
+
+    def list(self, path: str):
+        return self.entries.get(path, [])
+
+    def read(self, path: str, format: str = "text"):
+        self.read_calls.append((path, format))
+        return b"x" * 1024
 
 
 class _FakeE2BSandbox:
@@ -120,3 +136,41 @@ def test_e2b_backend_read_slices_file_data_for_offset_reads() -> None:
     assert result.file_data["content"] == "beta\ngamma\n"
     assert "2\tbeta" in str(result)
     assert "3\tgamma" in str(result)
+
+
+def test_e2b_download_files_skips_large_file_before_reading(monkeypatch) -> None:
+    from src.infra.backend.e2b import E2BBackend
+
+    monkeypatch.setattr("src.infra.backend.e2b.SANDBOX_DOWNLOAD_MAX_BYTES", 8)
+    files_api = _FakeDownloadFilesAPI(
+        {
+            "/home/user": [
+                SimpleNamespace(path="/home/user/large.bin", is_dir=False, size=9),
+            ],
+        }
+    )
+    backend = E2BBackend(sandbox=_FakeE2BSandbox(files_api))
+
+    responses = backend.download_files(["/home/user/large.bin"])
+
+    assert responses[0].content is None
+    assert files_api.read_calls == []
+
+
+def test_e2b_read_skips_large_file_before_text_read(monkeypatch) -> None:
+    from src.infra.backend.e2b import E2BBackend
+
+    monkeypatch.setattr("src.infra.backend.e2b.SANDBOX_READ_MAX_BYTES", 8)
+    files_api = _FakeDownloadFilesAPI(
+        {
+            "/home/user": [
+                SimpleNamespace(path="/home/user/large.txt", is_dir=False, size=9),
+            ],
+        }
+    )
+    backend = E2BBackend(sandbox=_FakeE2BSandbox(files_api))
+
+    result = backend.read("/home/user/large.txt")
+
+    assert "too large" in str(result)
+    assert files_api.read_calls == []

@@ -16,24 +16,29 @@ from src.kernel.schemas.mcp import (
 class _AsyncCursor:
     def __init__(self, docs: list[dict[str, Any]]) -> None:
         self._docs = docs
+        self.iterated = 0
 
     async def __aiter__(self) -> AsyncIterator[dict[str, Any]]:
         for doc in self._docs:
+            self.iterated += 1
             yield doc
 
 
 class _FakeCollection:
     def __init__(self, docs: list[dict[str, Any]]) -> None:
         self._docs = docs
+        self.cursors: list[_AsyncCursor] = []
 
     def find(self, query: dict[str, Any]) -> _AsyncCursor:
-        return _AsyncCursor(
+        cursor = _AsyncCursor(
             [
                 doc
                 for doc in self._docs
                 if all(doc.get(key) == value for key, value in query.items())
             ]
         )
+        self.cursors.append(cursor)
+        return cursor
 
     async def find_one(self, query: dict[str, Any]) -> dict[str, Any] | None:
         for doc in self._docs:
@@ -50,14 +55,16 @@ class _FakeMCPStorage(StorageOperations):
     ) -> None:
         self._system_docs = system_docs
         self._user_docs = user_docs or []
+        self._system_collection = _FakeCollection(self._system_docs)
+        self._user_collection = _FakeCollection(self._user_docs)
         self.created_system_servers: list[MCPServerCreate] = []
         self.updated_system_servers: list[MCPServerUpdate] = []
 
     def _get_system_collection(self) -> _FakeCollection:
-        return _FakeCollection(self._system_docs)
+        return self._system_collection
 
     def _get_user_collection(self) -> _FakeCollection:
-        return _FakeCollection(self._user_docs)
+        return self._user_collection
 
     async def _get_user_preferences(self, user_id: str) -> dict[str, bool]:
         return {}
@@ -154,6 +161,26 @@ async def test_matching_user_role_can_access_restricted_system_mcp_servers() -> 
     assert [server.name for server in visible_servers] == ["restricted-server"]
     assert list(effective_config["mcpServers"]) == ["restricted-server"]
     assert [server["name"] for server in sandbox_servers] == ["restricted-server"]
+
+
+@pytest.mark.asyncio
+async def test_visible_servers_stops_after_requested_limit() -> None:
+    storage = _FakeMCPStorage(
+        [
+            {
+                "name": f"server-{index}",
+                "transport": "sse",
+                "enabled": True,
+                "allowed_roles": [],
+            }
+            for index in range(10)
+        ]
+    )
+
+    visible_servers = await storage.get_visible_servers("user-1", limit=3)
+
+    assert [server.name for server in visible_servers] == ["server-0", "server-1", "server-2"]
+    assert storage._system_collection.cursors[0].iterated == 3
 
 
 @pytest.mark.asyncio

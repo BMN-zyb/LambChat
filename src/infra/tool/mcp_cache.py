@@ -19,6 +19,7 @@ from typing import Any, Optional, Set
 from langchain_core.tools import BaseTool
 from langchain_mcp_adapters.client import MultiServerMCPClient
 
+from src.infra.async_utils import run_blocking_io
 from src.infra.logging import get_logger
 from src.infra.storage.redis import get_redis_client
 from src.kernel.config import settings
@@ -33,6 +34,7 @@ MAX_CACHE_ENTRIES = 100
 
 # 最大缓存锁数（防止锁泄漏，通常不需要大于缓存条目数）
 MAX_CACHE_LOCKS = 200
+MCP_CONFIG_HASH_SCAN_LIMIT = 500
 
 # Redis 缓存键前缀
 CONFIG_HASH_KEY_PREFIX = "mcp_config_hash:"
@@ -102,6 +104,26 @@ def _get_cache_ttl() -> int:
 
 def _get_max_cache_entries() -> int:
     return max(int(getattr(settings, "MCP_USER_CACHE_MAX_ENTRIES", MAX_CACHE_ENTRIES) or 0), 1)
+
+
+async def _scan_config_hash_keys(redis_client, *, limit: int | None = None):
+    if limit is None:
+        limit = MCP_CONFIG_HASH_SCAN_LIMIT
+    cursor = 0
+    keys = []
+    while True:
+        cursor, batch = await redis_client.scan(
+            cursor=cursor,
+            match=f"{CONFIG_HASH_KEY_PREFIX}*",
+            count=100,
+        )
+        for key in batch:
+            keys.append(key)
+            if len(keys) >= limit:
+                logger.warning("[MCP Cache] Redis hash scan limit reached: %s", limit)
+                return keys
+        if cursor == 0:
+            return keys
 
 
 def _remove_lock_if_idle(user_id: str) -> bool:
@@ -268,7 +290,7 @@ async def get_cached_tools(
     Returns:
         tuple: (tools, client) - 工具列表和客户端
     """
-    current_hash = compute_config_hash(config)
+    current_hash = await run_blocking_io(compute_config_hash, config)
     lock = _get_cache_lock(user_id)
 
     async with lock:
@@ -309,12 +331,16 @@ async def get_cached_tools(
         logger.info(f"[MCP Cache] Creating tools for user {user_id}")
         tools, client = await create_client_func(config)
 
+        old_cached = _tools_cache.get(user_id)
+
         # 更新进程内缓存
         _tools_cache[user_id] = CachedMCPEntry(
             tools=tools,
             client=client,
             config_hash=current_hash,
         )
+        if old_cached and old_cached.client is not client:
+            await _close_client(old_cached.client)
 
         # 更新 Redis 中的配置哈希
         await _store_config_hash(user_id, current_hash)
@@ -371,15 +397,7 @@ async def invalidate_all_cache() -> int:
     # 清除 Redis 中所有配置哈希（使用 SCAN 代替 KEYS 避免阻塞）
     try:
         redis_client = get_redis_client()
-        cursor = 0
-        all_keys = []
-        while True:
-            cursor, keys = await redis_client.scan(
-                cursor=cursor, match=f"{CONFIG_HASH_KEY_PREFIX}*", count=100
-            )
-            all_keys.extend(keys)
-            if cursor == 0:
-                break
+        all_keys = await _scan_config_hash_keys(redis_client)
         if all_keys:
             await redis_client.delete(*all_keys)
             logger.info(f"[MCP Cache] Invalidated {len(all_keys)} Redis hash entries")
@@ -433,16 +451,7 @@ async def get_cache_stats() -> dict[str, Any]:
     # Redis 哈希键统计（使用 SCAN 代替 KEYS 避免阻塞）
     try:
         redis_client = get_redis_client()
-        cursor = 0
-        total_keys = 0
-        while True:
-            cursor, keys = await redis_client.scan(
-                cursor=cursor, match=f"{CONFIG_HASH_KEY_PREFIX}*", count=100
-            )
-            total_keys += len(keys)
-            if cursor == 0:
-                break
-        stats["redis_hash_keys"] = total_keys
+        stats["redis_hash_keys"] = len(await _scan_config_hash_keys(redis_client))
     except Exception as e:
         stats["redis_hash_error"] = str(e)
 

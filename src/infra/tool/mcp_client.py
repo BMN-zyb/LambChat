@@ -18,6 +18,7 @@ from pydantic import PrivateAttr
 
 from src.infra.async_utils import run_blocking_io
 from src.infra.logging import get_logger
+from src.kernel.config import settings
 from src.kernel.schemas.mcp import MCPRoleQuota, MCPToolPolicy
 
 logger = get_logger(__name__)
@@ -26,6 +27,7 @@ logger = get_logger(__name__)
 MCP_MAX_RETRIES = 3
 MCP_RETRY_DELAY = 1.0  # 秒
 MCP_TOOL_TIMEOUT = 300  # 单次工具调用超时（秒）
+MCP_CONFIG_FILE_MAX_BYTES = 1024 * 1024
 
 # 与 deepagents backend 冲突的工具名（需要过滤掉）
 CONFLICTING_TOOL_NAMES = frozenset(
@@ -39,6 +41,22 @@ CONFLICTING_TOOL_NAMES = frozenset(
         "bash",
     ]
 )
+
+
+def _get_effective_config_max_servers() -> int:
+    value = getattr(settings, "MCP_EFFECTIVE_CONFIG_MAX_SERVERS", 100)
+    try:
+        return max(1, int(value))
+    except (TypeError, ValueError):
+        return 100
+
+
+def _get_effective_config_max_tools() -> int:
+    value = getattr(settings, "MCP_EFFECTIVE_CONFIG_MAX_TOOLS", 200)
+    try:
+        return max(1, int(value))
+    except (TypeError, ValueError):
+        return 200
 
 
 class MCPToolWithRetry(BaseTool):
@@ -151,7 +169,7 @@ class MCPToolWithRetry(BaseTool):
         if self._role_quotas:
             from src.infra.mcp.quota import (
                 check_and_consume_mcp_quota,
-                quota_error_json,
+                quota_error_json_async,
             )
 
             quota_result = await check_and_consume_mcp_quota(
@@ -163,7 +181,7 @@ class MCPToolWithRetry(BaseTool):
                 is_admin=self._is_admin,
             )
             if not quota_result.allowed:
-                return quota_error_json(self._server_name or self.name, quota_result)
+                return await quota_error_json_async(self._server_name or self.name, quota_result)
 
         last_error: Exception | None = None
         for attempt in range(self._max_retries):
@@ -350,6 +368,16 @@ class MCPClientManager:
             logger.warning(f"MCP config file not found: {config_path}")
             return None
 
+        file_size = os.path.getsize(config_path)
+        if file_size > MCP_CONFIG_FILE_MAX_BYTES:
+            logger.warning(
+                "MCP config file too large: %s bytes (max %s): %s",
+                file_size,
+                MCP_CONFIG_FILE_MAX_BYTES,
+                config_path,
+            )
+            return None
+
         with open(config_path, "r", encoding="utf-8") as f:
             config = json.load(f)
 
@@ -403,13 +431,20 @@ class MCPClientManager:
         mcp_servers = config.get("mcpServers", {})
         if not mcp_servers:
             return [], None
+        max_servers = _get_effective_config_max_servers()
+        if len(mcp_servers) > max_servers:
+            logger.warning(
+                "[MCP] Direct config contains %s server(s); only loading first %s",
+                len(mcp_servers),
+                max_servers,
+            )
 
         # 转换配置格式以适配 langchain-mcp-adapters
         # Use dict[str, Any] to allow flexible key-value pairs for different transport types
         server_configs: dict[str, dict[str, Any]] = {}
         self._server_role_quotas.clear()
         self._server_tool_policies.clear()
-        for server_name, server_config in mcp_servers.items():
+        for server_name, server_config in list(mcp_servers.items())[:max_servers]:
             transport = server_config.get("transport", "streamable_http")
             role_quotas = server_config.get("role_quotas") or {}
             self._server_role_quotas[server_name] = {
@@ -475,8 +510,26 @@ class MCPClientManager:
             except Exception as e:
                 return (server_name, e)
 
-        # 并行执行
-        results = await asyncio.gather(*[_load_server_tools(name) for name in server_configs])
+        server_names = list(server_configs)
+        results: list[tuple[str, list[BaseTool] | Exception]] = []
+        next_index = 0
+        lock = asyncio.Lock()
+        concurrency = min(
+            max(1, int(getattr(settings, "MCP_SERVER_LOAD_CONCURRENCY", 4) or 1)),
+            len(server_names),
+        )
+
+        async def _load_worker() -> None:
+            nonlocal next_index
+            while True:
+                async with lock:
+                    if next_index >= len(server_names):
+                        return
+                    server_name = server_names[next_index]
+                    next_index += 1
+                results.append(await _load_server_tools(server_name))
+
+        await asyncio.gather(*(_load_worker() for _ in range(concurrency)))
 
         # 处理结果
         all_tools: list[BaseTool] = []
@@ -484,6 +537,7 @@ class MCPClientManager:
         # Track which server each tool belongs to: (server_name, raw_tool_name) -> server_name
         self._tool_server_map.clear()
         self._tool_name_server_map.clear()
+        max_tools = _get_effective_config_max_tools()
 
         for server_name, result in results:
             if isinstance(result, Exception):
@@ -499,7 +553,18 @@ class MCPClientManager:
                         f"[MCP] Failed to load tools from server '{server_name}': {result}"
                     )
             else:
-                for tool in result:
+                remaining = max_tools - len(all_tools)
+                if remaining <= 0:
+                    logger.warning(
+                        "[MCP] Tool load limit reached (%s); skipping %s tool(s) from server '%s'",
+                        max_tools,
+                        len(result),
+                        server_name,
+                    )
+                    continue
+                kept_tools = result[:remaining]
+                skipped_count = len(result) - len(kept_tools)
+                for tool in kept_tools:
                     # Map (server_name, raw_tool_name) to avoid conflicts when
                     # multiple servers expose tools with the same name
                     raw_name = tool.name
@@ -509,8 +574,17 @@ class MCPClientManager:
                     self._tool_server_map[(server_name, raw_name)] = server_name
                     self._tool_name_server_map[tool.name] = server_name
                     self._tool_name_server_map[raw_name] = server_name
-                all_tools.extend(result)
-                logger.info(f"[MCP] Loaded {len(result)} tools from server '{server_name}'")
+                all_tools.extend(kept_tools)
+                if skipped_count:
+                    logger.warning(
+                        "[MCP] Loaded %s/%s tools from server '%s' due to total tool limit %s",
+                        len(kept_tools),
+                        len(result),
+                        server_name,
+                        max_tools,
+                    )
+                else:
+                    logger.info(f"[MCP] Loaded {len(result)} tools from server '{server_name}'")
 
         if failed_servers:
             logger.warning(

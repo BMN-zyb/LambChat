@@ -39,6 +39,58 @@ from src.kernel.config import settings
 logger = get_logger(__name__)
 
 _SESSION_EVENTS_BATCH_SIZE = 200
+SESSION_EVENT_FILTER_LIST_LIMIT = 100
+TRACE_EVENTS_DEFAULT_LIMIT = 1000
+TRACE_EVENTS_READ_LIMIT = 5000
+TRACE_LIST_LIMIT = 100
+
+
+def _get_session_event_read_default_limit() -> int:
+    configured = max(int(getattr(settings, "SESSION_EVENT_READ_DEFAULT_LIMIT", 1000) or 0), 1)
+    return min(configured, TRACE_EVENTS_READ_LIMIT)
+
+
+def _clamp_positive_int(value: int | None, *, default: int, maximum: int) -> int:
+    try:
+        candidate = int(value if value is not None else default)
+    except (TypeError, ValueError):
+        candidate = default
+    return min(max(candidate, 1), maximum)
+
+
+def _clamp_event_read_limit(value: int | None, *, default: int) -> int:
+    try:
+        candidate = int(value if value is not None else default)
+    except (TypeError, ValueError):
+        candidate = default
+    if candidate <= 0:
+        return 0
+    return min(candidate, TRACE_EVENTS_READ_LIMIT)
+
+
+def _clamp_nonnegative_int(value: int | None) -> int:
+    try:
+        return max(int(value or 0), 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _bounded_unique_strings(
+    values: Optional[List[str]],
+    limit: int = SESSION_EVENT_FILTER_LIST_LIMIT,
+) -> List[str]:
+    if not values:
+        return []
+    bounded: List[str] = []
+    seen = set()
+    for value in values:
+        if not isinstance(value, str) or not value or value in seen:
+            continue
+        seen.add(value)
+        bounded.append(value)
+        if len(bounded) >= limit:
+            break
+    return bounded
 
 
 class TraceStorage:
@@ -340,20 +392,27 @@ class TraceStorage:
             logger.error(f"Failed to complete trace {trace_id}: {e}")
             return False
 
-    async def get_trace(self, trace_id: str) -> Optional[Dict[str, Any]]:
+    async def get_trace(
+        self,
+        trace_id: str,
+        *,
+        include_events: bool = False,
+    ) -> Optional[Dict[str, Any]]:
         """
-        获取完整的 trace
+        获取 trace 摘要，默认不加载大 events 数组。
 
         Args:
             trace_id: Trace ID
+            include_events: 是否返回完整 events 数组
 
         Returns:
             trace 文档或 None
         """
         try:
+            projection = {"_id": 0} if include_events else {"_id": 0, "events": 0}
             doc = await self.collection.find_one(
                 {"trace_id": trace_id},
-                {"_id": 0},
+                projection,
             )
             return doc
         except Exception as e:
@@ -364,6 +423,7 @@ class TraceStorage:
         self,
         trace_id: str,
         event_types: Optional[List[str]] = None,
+        max_events: int = TRACE_EVENTS_DEFAULT_LIMIT,
     ) -> List[Dict[str, Any]]:
         """
         获取 trace 的事件列表
@@ -371,19 +431,135 @@ class TraceStorage:
         Args:
             trace_id: Trace ID
             event_types: 可选的事件类型过滤
+            max_events: 最大返回事件数，防止一次读取超大 trace
 
         Returns:
             事件列表
         """
-        trace = await self.get_trace(trace_id)
-        if not trace:
+        max_events = _clamp_event_read_limit(
+            max_events,
+            default=TRACE_EVENTS_DEFAULT_LIMIT,
+        )
+        if max_events <= 0:
             return []
 
-        events = trace.get("events", [])
+        pipeline: List[Dict[str, Any]] = [
+            {"$match": {"trace_id": trace_id}},
+            {
+                "$project": {
+                    "events.event_type": 1,
+                    "events.data": 1,
+                    "events.timestamp": 1,
+                }
+            },
+            {"$unwind": "$events"},
+        ]
         if event_types:
-            events = [e for e in events if e.get("event_type") in event_types]
+            pipeline.append({"$match": {"events.event_type": {"$in": event_types}}})
+        pipeline.append({"$limit": max_events})
+        pipeline.append(
+            {
+                "$project": {
+                    "_id": 0,
+                    "event_type": "$events.event_type",
+                    "data": "$events.data",
+                    "timestamp": "$events.timestamp",
+                }
+            }
+        )
 
-        return events
+        events: List[Dict[str, Any]] = []
+        try:
+            async for event in self.collection.aggregate(pipeline):
+                events.append(event)
+            return events
+        except Exception as e:
+            logger.error(f"Failed to get trace events for {trace_id}: {e}")
+            return []
+
+    async def get_first_trace_event(
+        self,
+        trace_id: str,
+        event_types: Optional[List[str]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Fetch the first matching event from one trace without loading the full events array."""
+        pipeline: List[Dict[str, Any]] = [
+            {"$match": {"trace_id": trace_id}},
+            {
+                "$project": {
+                    "events.event_type": 1,
+                    "events.data": 1,
+                    "events.timestamp": 1,
+                }
+            },
+            {"$unwind": "$events"},
+        ]
+        if event_types:
+            pipeline.append({"$match": {"events.event_type": {"$in": event_types}}})
+        pipeline.extend(
+            [
+                {"$limit": 1},
+                {
+                    "$project": {
+                        "_id": 0,
+                        "event_type": "$events.event_type",
+                        "data": "$events.data",
+                        "timestamp": "$events.timestamp",
+                    }
+                },
+            ]
+        )
+
+        try:
+            async for event in self.collection.aggregate(pipeline):
+                return event
+            return None
+        except Exception as e:
+            logger.error(f"Failed to get first trace event for {trace_id}: {e}")
+            return None
+
+    async def get_last_trace_event(
+        self,
+        trace_id: str,
+        event_types: Optional[List[str]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Fetch the latest matching event from one trace without returning the full events array."""
+        pipeline: List[Dict[str, Any]] = [
+            {"$match": {"trace_id": trace_id}},
+            {
+                "$project": {
+                    "events.event_type": 1,
+                    "events.data": 1,
+                    "events.timestamp": 1,
+                    "events.seq": 1,
+                }
+            },
+            {"$unwind": "$events"},
+        ]
+        if event_types:
+            pipeline.append({"$match": {"events.event_type": {"$in": event_types}}})
+        pipeline.extend(
+            [
+                {"$sort": {"events.seq": -1, "events.timestamp": -1}},
+                {"$limit": 1},
+                {
+                    "$project": {
+                        "_id": 0,
+                        "event_type": "$events.event_type",
+                        "data": "$events.data",
+                        "timestamp": "$events.timestamp",
+                    }
+                },
+            ]
+        )
+
+        try:
+            async for event in self.collection.aggregate(pipeline):
+                return event
+            return None
+        except Exception as e:
+            logger.error(f"Failed to get last trace event for {trace_id}: {e}")
+            return None
 
     async def list_traces(
         self,
@@ -408,6 +584,8 @@ class TraceStorage:
         Returns:
             trace 列表（不含 events 数组，仅摘要）
         """
+        limit = _clamp_positive_int(limit, default=50, maximum=TRACE_LIST_LIMIT)
+        skip = _clamp_nonnegative_int(skip)
         query = {}
         if session_id:
             query["session_id"] = session_id
@@ -444,6 +622,8 @@ class TraceStorage:
         trace_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """列出会话 run 摘要，并只投影第一条用户消息事件。"""
+        limit = _clamp_positive_int(limit, default=50, maximum=TRACE_LIST_LIMIT)
+        skip = _clamp_nonnegative_int(skip)
         query = {"session_id": session_id}
         if trace_id:
             query["trace_id"] = trace_id
@@ -503,6 +683,7 @@ class TraceStorage:
         exclude_run_id: Optional[str] = None,
         completed_only: bool = True,
         run_ids: Optional[List[str]] = None,
+        max_events: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
         """
         获取会话的所有事件（跨 traces 聚合）
@@ -516,11 +697,14 @@ class TraceStorage:
             exclude_run_id: 可选的运行 ID 排除（用于排除正在运行的 run）
             completed_only: 是否只返回成功完成的 trace 中的事件（默认 True）
             run_ids: 可选的运行 ID 列表过滤（用于部分分享等场景）
+            max_events: 可选的最大返回事件数
 
         Returns:
             事件列表，按 run 顺序合并
         """
         try:
+            event_types = _bounded_unique_strings(event_types, SESSION_EVENT_FILTER_LIST_LIMIT)
+            run_ids = _bounded_unique_strings(run_ids, SESSION_EVENT_FILTER_LIST_LIMIT)
             # 构建查询条件
             match_query: Dict[str, Any] = {"session_id": session_id}
             if run_ids:
@@ -533,50 +717,56 @@ class TraceStorage:
             if completed_only:
                 match_query["status"] = {"$ne": "running"}
 
-            # 使用 projection 减少数据传输量，只返回需要的字段
-            # 注意: started_at 必须保留，否则 .sort("started_at", 1) 无法利用索引
-            projection: Dict[str, Any] = {
-                "trace_id": 1,
-                "run_id": 1,
-                "started_at": 1,
-                "events.event_type": 1,
-                "events.data": 1,
-                "events.timestamp": 1,
-            }
+            if max_events is None:
+                max_events = _get_session_event_read_default_limit()
+            else:
+                max_events = _clamp_event_read_limit(
+                    max_events,
+                    default=_get_session_event_read_default_limit(),
+                )
 
-            all_events: List[Dict[str, Any]] = []
-            # 按 started_at 排序分批获取 traces，避免长会话时一次性加载全部文档
-            cursor = self.collection.find(match_query, projection).sort("started_at", 1)
-            while True:
-                traces = await cursor.to_list(length=_SESSION_EVENTS_BATCH_SIZE)
-                if not traces:
-                    break
+            if max_events <= 0:
+                return []
 
-                # 合并当前批次事件：按 run 顺序，每个 run 内的事件保持原有顺序
-                for trace in traces:
-                    events = trace.get("events", [])
-                    # 事件类型过滤（服务端过滤，减少内存中处理的数据量）
-                    if event_types:
-                        events = [e for e in events if e.get("event_type") in event_types]
-                    # 添加 trace 信息
-                    for event in events:
-                        all_events.append(
-                            {
-                                "trace_id": trace.get("trace_id"),
-                                "run_id": trace.get("run_id"),
-                                "event_type": event.get("event_type"),
-                                "data": event.get("data"),
-                                "timestamp": event.get("timestamp"),
-                            }
-                        )
-
-                if len(traces) < _SESSION_EVENTS_BATCH_SIZE:
-                    break
-
-            logger.debug(
-                f"Session {session_id} (run_id={run_id}) returned {len(all_events)} events"
+            pipeline: List[Dict[str, Any]] = [
+                {"$match": match_query},
+                {"$sort": {"started_at": 1}},
+                {
+                    "$project": {
+                        "trace_id": 1,
+                        "run_id": 1,
+                        "events.event_type": 1,
+                        "events.data": 1,
+                        "events.timestamp": 1,
+                    }
+                },
+                {"$unwind": "$events"},
+            ]
+            if event_types:
+                pipeline.append({"$match": {"events.event_type": {"$in": event_types}}})
+            pipeline.extend(
+                [
+                    {"$limit": max_events},
+                    {
+                        "$project": {
+                            "_id": 0,
+                            "trace_id": 1,
+                            "run_id": 1,
+                            "event_type": "$events.event_type",
+                            "data": "$events.data",
+                            "timestamp": "$events.timestamp",
+                        }
+                    },
+                ]
             )
-            return all_events
+
+            events: List[Dict[str, Any]] = []
+            async for event in self.collection.aggregate(pipeline):
+                events.append(event)
+            logger.debug(
+                f"Session {session_id} (run_id={run_id}) returned {len(events)} bounded events"
+            )
+            return events
         except Exception as e:
             logger.error(f"Failed to get session events: {e}")
             return []

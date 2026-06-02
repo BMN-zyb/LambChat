@@ -133,3 +133,25 @@ def test_e2b_glob_no_infinite_loop_on_visited_paths() -> None:
 
     assert len(files_api.calls) < 20  # would blow up without visited guard
     assert any(m["path"] == "/home/user/a/file.txt" for m in result["matches"])
+
+
+def test_e2b_glob_caps_result_count(monkeypatch) -> None:
+    monkeypatch.setattr(e2b_module, "SANDBOX_GLOB_MAX_MATCHES", 25, raising=False)
+    files_api = _FakeFilesAPI(
+        {
+            "/home/user": [
+                SimpleNamespace(
+                    path=f"/home/user/file-{index}.txt",
+                    is_dir=False,
+                    size=index,
+                )
+                for index in range(1000)
+            ],
+        }
+    )
+    backend = E2BBackend(sandbox=_FakeE2BSandbox(files_api))
+
+    result = backend.glob("*", path="/")
+
+    assert len(result["matches"]) == 25
+    assert result["matches"][-1]["path"] == "/home/user/file-24.txt"

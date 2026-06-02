@@ -5,18 +5,18 @@
 Simplified architecture: files + metadata (stored in __meta__ doc), enabled/disabled in user metadata.
 """
 
-import io
-import zipfile
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, UploadFile
 from pydantic import BaseModel
 
 from src.api.deps import require_permissions
-from src.api.routes.upload import _read_upload_file_limited, get_s3_enabled
-from src.infra.skill.binary import guess_mime_type, is_binary_file, parse_binary_ref
+from src.api.routes import skill_uploads
+from src.api.routes.upload import _read_upload_file_limited
+from src.infra.async_utils import run_blocking_io
+from src.infra.skill.binary import guess_mime_type, parse_binary_ref_async
 from src.infra.skill.marketplace import MarketplaceStorage
-from src.infra.skill.storage import SkillStorage
+from src.infra.skill.storage import SkillStorage, normalize_skill_name_list
 from src.infra.skill.types import (
     InstalledFrom,
     MarketplaceSkillCreate,
@@ -29,10 +29,36 @@ from src.infra.skill.types import (
     UserSkillPreferenceUpdate,
 )
 from src.infra.user.storage import UserStorage
-from src.kernel.config import settings
+from src.kernel.config import settings  # noqa: F401 - compatibility for route tests/patching
 from src.kernel.schemas.user import TokenPayload
 
 router = APIRouter()
+_ZIP_MEMBER_MAX_BYTES: int | None = None
+_ZIP_MAX_MEMBERS = 500
+SKILL_BATCH_OPERATION_MAX_NAMES = 100
+_skill_uploads_get_skill_upload_max_size = skill_uploads._get_skill_upload_max_size
+
+
+def _get_skill_upload_max_size() -> tuple[int, int]:
+    return _skill_uploads_get_skill_upload_max_size()
+
+
+def _sync_zip_upload_limits() -> None:
+    skill_uploads._ZIP_MEMBER_MAX_BYTES = _ZIP_MEMBER_MAX_BYTES
+    skill_uploads._ZIP_MAX_MEMBERS = _ZIP_MAX_MEMBERS
+    skill_uploads._get_skill_upload_max_size = _get_skill_upload_max_size
+
+
+def _parse_zip_skill_preview(zip_content: bytes) -> list[dict]:
+    _sync_zip_upload_limits()
+    return skill_uploads._parse_zip_skill_preview(zip_content)
+
+
+def _parse_zip_skills(
+    zip_content: bytes,
+) -> list[tuple[str, dict[str, str], dict[str, bytes]]]:
+    _sync_zip_upload_limits()
+    return skill_uploads._parse_zip_skills(zip_content)
 
 
 def get_storage() -> SkillStorage:
@@ -49,12 +75,37 @@ def sanitize_file_path(path: str) -> str:
     return "/".join(parts)
 
 
-def _get_skill_upload_max_size() -> tuple[int, int]:
-    if get_s3_enabled():
-        max_size_bytes = int(settings.S3_MAX_FILE_SIZE)
-    else:
-        max_size_bytes = int(settings.FILE_UPLOAD_MAX_SIZE_DOCUMENT) * 1024 * 1024
-    return max_size_bytes, max_size_bytes // (1024 * 1024)
+def _count_unique_skill_names(values: list[str]) -> int:
+    seen: set[str] = set()
+    for value in values:
+        if isinstance(value, str) and value and value not in seen:
+            seen.add(value)
+    return len(seen)
+
+
+def _reject_oversized_skill_batch(values: list[str]) -> None:
+    if _count_unique_skill_names(values) > SKILL_BATCH_OPERATION_MAX_NAMES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot process more than {SKILL_BATCH_OPERATION_MAX_NAMES} skills at once",
+        )
+
+
+def _merge_disabled_skill_names(
+    current: object,
+    *,
+    add: list[str] | None = None,
+    remove: list[str] | None = None,
+) -> list[str]:
+    remove_set = set(normalize_skill_name_list(remove or []))
+    add_names = normalize_skill_name_list(add or [])
+    ordered = [name for name in add_names if name not in remove_set]
+    ordered.extend(
+        name
+        for name in normalize_skill_name_list(current)
+        if name not in remove_set and name not in ordered
+    )
+    return normalize_skill_name_list(ordered)
 
 
 class UpdateFileRequest(BaseModel):
@@ -63,138 +114,10 @@ class UpdateFileRequest(BaseModel):
     content: str
 
 
-def _parse_zip_skills(
-    zip_content: bytes,
-) -> list[tuple[str, dict[str, str], dict[str, bytes]]]:
-    """
-    解析 ZIP 内容，找到所有 SKILL.md 文件，每个 SKILL.md 的上级文件夹作为一个独立 skill。
+async def _parse_skill_md_offload(content: str) -> tuple[Optional[str], str, list[str]]:
+    from src.infra.skill.parser import parse_skill_md
 
-    Returns:
-        list of (skill_name, text_files_dict, binary_files_dict) tuples
-    """
-    max_file_size, max_file_size_mb = _get_skill_upload_max_size()
-    if len(zip_content) > max_file_size:
-        raise ValueError(f"ZIP file too large (max {max_file_size_mb}MB)")
-
-    try:
-        zf = zipfile.ZipFile(io.BytesIO(zip_content))
-    except zipfile.BadZipFile:
-        raise ValueError("Invalid ZIP file")
-
-    try:
-        names = zf.namelist()
-
-        # 检测并去掉单顶层目录前缀（如 awesome-claude-skills/xxx → xxx）
-        top_level = set()
-        for n in names:
-            parts = n.split("/")
-            if parts[0]:
-                top_level.add(parts[0])
-        prefix = ""
-        if len(top_level) == 1:
-            top = list(top_level)[0]
-            is_dir = any(n.startswith(top + "/") for n in names)
-            if is_dir:
-                prefix = top + "/"
-
-        # 读取所有有效文件，区分文本和二进制
-        text_files: dict[str, str] = {}
-        binary_files: dict[str, bytes] = {}
-        for name in names:
-            if (
-                name.endswith("/")
-                or "__MACOSX" in name
-                or name.endswith(".DS_Store")
-                or name.endswith("Thumbs.db")
-                or ".git/" in name
-            ):
-                continue
-            try:
-                raw = zf.read(name)
-            except Exception:
-                continue
-
-            # 检测二进制文件
-            if is_binary_file(name, raw):
-                binary_files[name] = raw
-            else:
-                try:
-                    text = raw.decode("utf-8")
-                    text_files[name] = text
-                except UnicodeDecodeError:
-                    # 即使通过了扩展名检查，UTF-8 解码失败也当二进制
-                    binary_files[name] = raw
-
-        # 去掉顶层目录前缀
-        if prefix:
-            text_files = {
-                k[len(prefix) :]: v
-                for k, v in text_files.items()
-                if k.startswith(prefix) and k[len(prefix) :]
-            }
-            binary_files = {
-                k[len(prefix) :]: v
-                for k, v in binary_files.items()
-                if k.startswith(prefix) and k[len(prefix) :]
-            }
-
-        # 找到所有 SKILL.md 的路径
-        skill_md_paths = [p for p in text_files.keys() if p.split("/")[-1].lower() == "skill.md"]
-
-        if not skill_md_paths:
-            raise ValueError("No SKILL.md found in ZIP")
-
-        skills: list[tuple[str, dict[str, str], dict[str, bytes]]] = []
-
-        for skill_md_path in skill_md_paths:
-            # SKILL.md 所在的文件夹就是 skill 的根目录
-            skill_root = skill_md_path.rsplit("/", 1)[0] if "/" in skill_md_path else ""
-            skill_prefix = skill_root + "/" if skill_root else ""
-
-            # 收集该 skill 根目录下的所有文件（相对路径）
-            skill_text_files: dict[str, str] = {}
-            for fpath, content in text_files.items():
-                if fpath.startswith(skill_prefix):
-                    rel = fpath[len(skill_prefix) :]
-                    if rel:
-                        skill_text_files[rel] = content
-
-            skill_binary_files: dict[str, bytes] = {}
-            for fpath, data in binary_files.items():
-                if fpath.startswith(skill_prefix):
-                    rel = fpath[len(skill_prefix) :]
-                    if rel:
-                        skill_binary_files[rel] = data
-
-            # 优先使用 SKILL.md 的 name 字段，回退到文件夹名
-            skill_md_content = skill_text_files.get("SKILL.md", "")
-            skill_name = None
-            if skill_md_content:
-                try:
-                    from src.infra.skill.parser import (
-                        parse_skill_md,
-                        sanitize_skill_name,
-                    )
-
-                    parsed_name, _, _ = parse_skill_md(skill_md_content)
-                    if parsed_name:
-                        skill_name = sanitize_skill_name(parsed_name)
-                except Exception:
-                    pass
-            if not skill_name and skill_root:
-                skill_name = skill_root.split("/")[-1]
-            if not skill_name:
-                skill_name = "unnamed-skill"
-
-            if skill_text_files or skill_binary_files:
-                skills.append((skill_name, skill_text_files, skill_binary_files))
-
-        if not skills:
-            raise ValueError("No valid skills found in ZIP")
-
-        return skills
-    finally:
-        zf.close()
+    return await run_blocking_io(parse_skill_md, content)
 
 
 # ==========================================
@@ -224,7 +147,7 @@ async def preview_zip_skills(
         raise HTTPException(status_code=400, detail="Failed to read file content")
 
     try:
-        skills = _parse_zip_skills(content)
+        skill_list = await run_blocking_io(_parse_zip_skill_preview, content)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -232,31 +155,8 @@ async def preview_zip_skills(
     user_skills = await storage.list_user_skills(user.sub)
     existing_names = {s["skill_name"] for s in user_skills}
 
-    skill_list = []
-    for skill_name, text_files, binary_files in skills:
-        # 提取 description
-        description = ""
-        skill_md_content = text_files.get("SKILL.md", "")
-        if skill_md_content:
-            try:
-                from src.infra.skill.parser import parse_skill_md
-
-                _, desc, tags = parse_skill_md(skill_md_content)
-                if desc:
-                    description = desc
-            except Exception:
-                pass
-
-        skill_list.append(
-            {
-                "name": skill_name,
-                "description": description,
-                "file_count": len(text_files) + len(binary_files),
-                "files": sorted(set(text_files.keys()) | set(binary_files.keys())),
-                "binary_files": sorted(binary_files.keys()),
-                "already_exists": skill_name in existing_names,
-            }
-        )
+    for skill in skill_list:
+        skill["already_exists"] = skill["name"] in existing_names
 
     return {
         "skill_count": len(skill_list),
@@ -287,7 +187,7 @@ async def upload_skill_from_zip(
         raise HTTPException(status_code=400, detail="Failed to read file content")
 
     try:
-        skills = _parse_zip_skills(content)
+        skills = await run_blocking_io(_parse_zip_skills, content)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -340,7 +240,7 @@ async def upload_skill_from_zip(
 @router.get("/", response_model=UserSkillListResponse)
 async def list_user_skills(
     skip: int = Query(0, ge=0),
-    limit: int = Query(20, ge=1, le=1000),
+    limit: int = Query(20, ge=1, le=100),
     q: str | None = None,
     tags: list[str] | None = Query(None),
     user: TokenPayload = Depends(require_permissions("skill:read")),
@@ -355,9 +255,13 @@ async def list_user_skills(
     pinned_skill_names: list[str] = []
     favorite_skill_names: list[str] = []
     if user_doc and user_doc.metadata:
-        disabled_skills = user_doc.metadata.get("disabled_skills", []) or []
-        pinned_skill_names = user_doc.metadata.get("pinned_skill_names", []) or []
-        favorite_skill_names = user_doc.metadata.get("favorite_skill_names", []) or []
+        disabled_skills = normalize_skill_name_list(user_doc.metadata.get("disabled_skills", []))
+        pinned_skill_names = normalize_skill_name_list(
+            user_doc.metadata.get("pinned_skill_names", [])
+        )
+        favorite_skill_names = normalize_skill_name_list(
+            user_doc.metadata.get("favorite_skill_names", [])
+        )
     available_tags = await storage.list_user_skill_tags(user.sub)
 
     skills = await storage.list_user_skills(
@@ -388,19 +292,20 @@ async def list_user_skills(
             available_tags=available_tags,
         )
 
-    # 批量查询发布状态
-    published_map = await marketplace.get_user_published_skills(user.sub)
+    skill_names = [s["skill_name"] for s in skills]
+    # 批量查询当前页发布状态，避免按用户拉取全部发布记录
+    published_map = await marketplace.get_user_published_skills(
+        user.sub,
+        skill_names=skill_names,
+    )
 
     # 批量获取所有 SKILL.md 用于提取 description
-    from src.infra.skill.parser import parse_skill_md
-
-    skill_names = [s["skill_name"] for s in skills]
     skill_md_map = await storage.batch_get_skill_md_contents(skill_names, user.sub)
     description_map: dict[str, str] = {}
     tags_map: dict[str, list[str]] = {}
     for name, content in skill_md_map.items():
         if content:
-            _, parsed_desc, parsed_tags = parse_skill_md(content)
+            _, parsed_desc, parsed_tags = await _parse_skill_md_offload(content)
             if parsed_desc:
                 description_map[name] = parsed_desc
             if parsed_tags:
@@ -445,8 +350,8 @@ async def get_user_skill(
     marketplace: MarketplaceStorage = Depends(get_marketplace_storage),
 ):
     """获取用户某个 Skill 的详细信息"""
-    files = await storage.get_skill_files(name, user.sub)
-    if not files:
+    file_paths = await storage.list_skill_file_paths(name, user.sub)
+    if not file_paths:
         raise HTTPException(status_code=404, detail=f"Skill '{name}' not found")
 
     # Get disabled_skills from user metadata
@@ -454,36 +359,44 @@ async def get_user_skill(
     user_doc = await user_storage.get_by_id(user.sub)
     disabled_skills = set()
     if user_doc and user_doc.metadata:
-        disabled_skills = set(user_doc.metadata.get("disabled_skills", []))
+        disabled_skills = set(
+            normalize_skill_name_list(user_doc.metadata.get("disabled_skills", []))
+        )
     pinned_skill_names = (
-        set((user_doc.metadata or {}).get("pinned_skill_names", [])) if user_doc else set()
+        set(normalize_skill_name_list((user_doc.metadata or {}).get("pinned_skill_names", [])))
+        if user_doc
+        else set()
     )
     favorite_skill_names = (
-        set((user_doc.metadata or {}).get("favorite_skill_names", [])) if user_doc else set()
+        set(normalize_skill_name_list((user_doc.metadata or {}).get("favorite_skill_names", [])))
+        if user_doc
+        else set()
     )
     enabled = name not in disabled_skills
 
     # Get metadata from __meta__ doc
     meta = await storage.get_skill_meta(name, user.sub)
-    published_map = await marketplace.get_user_published_skills(user.sub)
+    published_map = await marketplace.get_user_published_skills(
+        user.sub,
+        skill_names=[name],
+    )
 
     # 使用文件聚合统计获取时间戳，与 list_user_skills 保持一致
     file_stats = await storage.get_skill_file_stats(name, user.sub)
 
-    def extract_metadata(files: dict[str, str]) -> tuple[str, list[str]]:
-        from src.infra.skill.parser import parse_skill_md
-
-        _, desc, tags = parse_skill_md(files.get("SKILL.md", ""))
+    async def extract_metadata() -> tuple[str, list[str]]:
+        skill_md = await storage.get_skill_file(name, "SKILL.md", user.sub)
+        _, desc, tags = await _parse_skill_md_offload(skill_md or "")
         return desc, tags
 
-    description, tags = extract_metadata(files)
+    description, tags = await extract_metadata()
 
     return UserSkill(
         skill_name=name,
         description=description,
         tags=tags,
         enabled=enabled,
-        files=list(files.keys()),
+        files=file_paths,
         file_count=file_stats["file_count"],
         installed_from=meta.installed_from.value if meta else None,
         published_marketplace_name=meta.published_marketplace_name if meta else None,
@@ -514,7 +427,7 @@ async def get_skill_file(
         raise HTTPException(status_code=404, detail="File not found")
 
     # 检查是否为二进制文件引用
-    binary_ref = parse_binary_ref(content)
+    binary_ref = await parse_binary_ref_async(content)
     if binary_ref:
         file_url = f"/api/upload/file/{binary_ref.storage_key}"
         return {
@@ -656,10 +569,11 @@ async def delete_user_skill(
     user_storage = UserStorage()
     user_doc = await user_storage.get_by_id(user.sub)
     if user_doc and user_doc.metadata:
-        disabled = set(user_doc.metadata.get("disabled_skills", []))
-        if name in disabled:
-            disabled.discard(name)
-            await user_storage.update_metadata(user.sub, {"disabled_skills": sorted(disabled)})
+        disabled = _merge_disabled_skill_names(
+            user_doc.metadata.get("disabled_skills", []),
+            remove=[name],
+        )
+        await user_storage.update_metadata(user.sub, {"disabled_skills": disabled})
 
     await storage.remove_user_skill_preference(user.sub, [name])
 
@@ -724,10 +638,12 @@ async def batch_delete_skills(
     storage: SkillStorage = Depends(get_storage),
 ):
     """批量删除 Skills"""
+    _reject_oversized_skill_batch(body.names)
+    names = normalize_skill_name_list(body.names)
     deleted: list[str] = []
     errors: list[dict[str, str]] = []
 
-    for name in body.names:
+    for name in names:
         try:
             await storage.delete_skill_and_meta(name, user.sub)
             deleted.append(name)
@@ -741,10 +657,11 @@ async def batch_delete_skills(
         user_storage = UserStorage()
         user_doc = await user_storage.get_by_id(user.sub)
         if user_doc and user_doc.metadata:
-            disabled = set(user_doc.metadata.get("disabled_skills", []))
-            if disabled & set(deleted):
-                disabled -= set(deleted)
-                await user_storage.update_metadata(user.sub, {"disabled_skills": sorted(disabled)})
+            disabled = _merge_disabled_skill_names(
+                user_doc.metadata.get("disabled_skills", []),
+                remove=deleted,
+            )
+            await user_storage.update_metadata(user.sub, {"disabled_skills": disabled})
         await storage.remove_user_skill_preference(user.sub, deleted)
 
     return {"deleted": deleted, "errors": errors}
@@ -758,7 +675,9 @@ async def batch_toggle_skills(
 ):
     """批量切换 Skills 的启用状态"""
     missing_names = []
-    for name in body.names:
+    _reject_oversized_skill_batch(body.names)
+    names = normalize_skill_name_list(body.names)
+    for name in names:
         try:
             await _ensure_skill_exists(storage, name, user.sub)
         except HTTPException:
@@ -773,21 +692,27 @@ async def batch_toggle_skills(
     user_doc = await user_storage.get_by_id(user.sub)
     if user_doc is None:
         raise HTTPException(status_code=404, detail="User not found")
-    disabled = set((user_doc.metadata or {}).get("disabled_skills", []))
 
     if body.enabled:
-        # Enable: remove from disabled set
-        disabled -= set(body.names)
+        disabled = _merge_disabled_skill_names(
+            (user_doc.metadata or {}).get("disabled_skills", []),
+            remove=names,
+        )
     else:
-        # Disable: add to disabled set
-        disabled |= set(body.names)
+        disabled = _merge_disabled_skill_names(
+            (user_doc.metadata or {}).get("disabled_skills", []),
+            add=names,
+        )
 
     # Invalidate cache first, then update metadata
     # This ensures clients see fresh data even if metadata update fails
     await storage.invalidate_user_cache(user.sub)
-    await user_storage.update_metadata(user.sub, {"disabled_skills": sorted(disabled)})
+    await user_storage.update_metadata(
+        user.sub,
+        {"disabled_skills": disabled},
+    )
 
-    return {"updated": body.names, "errors": []}
+    return {"updated": names, "errors": []}
 
 
 @router.patch("/{name}/toggle")
@@ -805,26 +730,31 @@ async def toggle_user_skill(
     user_doc = await user_storage.get_by_id(user.sub)
     if user_doc is None:
         raise HTTPException(status_code=404, detail="User not found")
-    disabled = set((user_doc.metadata or {}).get("disabled_skills", []))
+    current_disabled = normalize_skill_name_list(
+        (user_doc.metadata or {}).get("disabled_skills", [])
+    )
 
     target_enabled = body.enabled if body else None
 
     if target_enabled is not None:
         # 直接设置目标状态
         if target_enabled:
-            disabled.discard(name)
+            disabled = _merge_disabled_skill_names(current_disabled, remove=[name])
         else:
-            disabled.add(name)
+            disabled = _merge_disabled_skill_names(current_disabled, add=[name])
     else:
         # Flip 当前状态
-        if name in disabled:
-            disabled.discard(name)
+        if name in current_disabled:
+            disabled = _merge_disabled_skill_names(current_disabled, remove=[name])
         else:
-            disabled.add(name)
+            disabled = _merge_disabled_skill_names(current_disabled, add=[name])
 
     # Invalidate cache first, then update metadata
     await storage.invalidate_user_cache(user.sub)
-    await user_storage.update_metadata(user.sub, {"disabled_skills": sorted(disabled)})
+    await user_storage.update_metadata(
+        user.sub,
+        {"disabled_skills": disabled},
+    )
 
     is_enabled = name not in disabled
     status = "enabled" if is_enabled else "disabled"

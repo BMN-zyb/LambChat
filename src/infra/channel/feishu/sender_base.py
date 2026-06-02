@@ -7,6 +7,7 @@ from typing import Any
 
 import httpx
 
+from src.infra.async_utils import run_blocking_io
 from src.infra.logging import get_logger
 
 logger = get_logger(__name__)
@@ -112,15 +113,23 @@ class FeishuBaseSenderMixin:
             return None
         try:
             client = self._get_feishu_http_client()
-            response = await client.request(
-                method,
-                f"{self._FEISHU_API_BASE}{path}",
-                headers={
+            request_kwargs: dict[str, Any] = {
+                "headers": {
                     "Authorization": f"Bearer {token}",
                     "Content-Type": "application/json; charset=utf-8",
                 },
-                params=params,
-                json=json_body,
+                "params": params,
+            }
+            if json_body is not None:
+                request_kwargs["content"] = await run_blocking_io(
+                    json.dumps,
+                    json_body,
+                    ensure_ascii=False,
+                )
+            response = await client.request(
+                method,
+                f"{self._FEISHU_API_BASE}{path}",
+                **request_kwargs,
             )
             try:
                 payload = response.json()
@@ -169,10 +178,11 @@ class FeishuBaseSenderMixin:
         )
 
     async def create_stream_card(self, initial_text: str = "...") -> str | None:
+        card_json = await run_blocking_io(self._build_stream_card_json, initial_text)
         payload = await self._feishu_json(
             "POST",
             "/cardkit/v1/cards",
-            json_body={"type": "card_json", "data": self._build_stream_card_json(initial_text)},
+            json_body={"type": "card_json", "data": card_json},
         )
         if not payload or payload.get("code") != 0:
             logger.warning("[Feishu] Create stream card failed: %s", payload)
@@ -186,7 +196,11 @@ class FeishuBaseSenderMixin:
         *,
         reply_to_id: str | None = None,
     ) -> tuple[bool, str | None]:
-        content = json.dumps({"type": "card", "data": {"card_id": card_id}}, ensure_ascii=False)
+        content = await run_blocking_io(
+            json.dumps,
+            {"type": "card", "data": {"card_id": card_id}},
+            ensure_ascii=False,
+        )
         if reply_to_id:
             payload = await self._feishu_json(
                 "POST",
@@ -239,13 +253,18 @@ class FeishuBaseSenderMixin:
         return True
 
     async def finalize_stream_card(self, card_id: str, content: str, sequence: int) -> bool:
+        card_json = await run_blocking_io(
+            self._build_stream_card_json,
+            content or " ",
+            streaming=False,
+        )
         payload = await self._feishu_json(
             "PUT",
             f"/cardkit/v1/cards/{card_id}",
             json_body={
                 "card": {
                     "type": "card_json",
-                    "data": self._build_stream_card_json(content or " ", streaming=False),
+                    "data": card_json,
                 },
                 "sequence": sequence,
             },

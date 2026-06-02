@@ -7,6 +7,7 @@ Stores user-level Feishu bot configurations with encrypted sensitive fields.
 from datetime import datetime
 from typing import Any, Optional
 
+from src.infra.async_utils import run_blocking_io
 from src.infra.logging import get_logger
 from src.infra.mcp.encryption import decrypt_value, encrypt_value
 from src.infra.storage.mongodb import get_mongo_client
@@ -23,6 +24,8 @@ from src.kernel.schemas.feishu import (
 )
 
 logger = get_logger(__name__)
+
+FEISHU_CONFIG_LIST_LIMIT = 200
 
 
 class FeishuStorage:
@@ -50,7 +53,7 @@ class FeishuStorage:
         collection = self._get_collection()
         doc = await collection.find_one({"user_id": user_id})
         if doc:
-            return self._doc_to_config(doc)
+            return await self._doc_to_config(doc)
         return None
 
     async def create_config(self, config: FeishuConfigCreate, user_id: str) -> FeishuConfig:
@@ -66,7 +69,7 @@ class FeishuStorage:
         doc = {
             "user_id": user_id,
             "app_id": config.app_id,
-            "app_secret": self._encrypt_secret(config.app_secret),
+            "app_secret": await self._encrypt_secret(config.app_secret),
             "encrypt_key": config.encrypt_key,
             "verification_token": config.verification_token,
             "react_emoji": config.react_emoji,
@@ -82,7 +85,7 @@ class FeishuStorage:
         await collection.insert_one(doc)
         logger.info(f"Created Feishu config for user {user_id}")
 
-        return self._doc_to_config(doc)
+        return await self._doc_to_config(doc)
 
     async def update_config(
         self, user_id: str, updates: FeishuConfigUpdate
@@ -99,7 +102,7 @@ class FeishuStorage:
         if updates.app_id is not None:
             update_data["app_id"] = updates.app_id
         if updates.app_secret is not None:
-            update_data["app_secret"] = self._encrypt_secret(updates.app_secret)
+            update_data["app_secret"] = await self._encrypt_secret(updates.app_secret)
         if updates.encrypt_key is not None:
             update_data["encrypt_key"] = updates.encrypt_key
         if updates.verification_token is not None:
@@ -121,7 +124,7 @@ class FeishuStorage:
         logger.info(f"Updated Feishu config for user {user_id}")
 
         updated_doc = await collection.find_one({"user_id": user_id})
-        return self._doc_to_config(updated_doc) if updated_doc else None
+        return await self._doc_to_config(updated_doc) if updated_doc else None
 
     async def delete_config(self, user_id: str) -> bool:
         """Delete Feishu configuration for a user"""
@@ -171,29 +174,29 @@ class FeishuStorage:
         """List all enabled Feishu configurations (for channel manager)"""
         collection = self._get_collection()
         configs = []
-        async for doc in collection.find({"enabled": True}):
-            configs.append(self._doc_to_config(doc))
+        async for doc in collection.find({"enabled": True}).limit(FEISHU_CONFIG_LIST_LIMIT):
+            configs.append(await self._doc_to_config(doc))
         return configs
 
-    def _encrypt_secret(self, secret: str) -> dict[str, Any] | str:
+    async def _encrypt_secret(self, secret: str) -> dict[str, Any] | str:
         """Encrypt a secret string"""
         if not secret:
             return ""
         # Use the same encryption as MCP
-        return encrypt_value({"value": secret})
+        return await run_blocking_io(encrypt_value, {"value": secret})
 
-    def _decrypt_secret(self, encrypted: dict | str) -> str:
+    async def _decrypt_secret(self, encrypted: dict | str) -> str:
         """Decrypt a secret string"""
         if not encrypted:
             return ""
         if isinstance(encrypted, str):
             return encrypted  # Legacy unencrypted
-        decrypted = decrypt_value(encrypted)
+        decrypted = await run_blocking_io(decrypt_value, encrypted)
         if isinstance(decrypted, dict):
             return decrypted.get("value", "")
         return ""
 
-    def _doc_to_config(self, doc: dict) -> FeishuConfig:
+    async def _doc_to_config(self, doc: dict) -> FeishuConfig:
         """Convert MongoDB document to FeishuConfig"""
         created_at = doc.get("created_at")
         updated_at = doc.get("updated_at")
@@ -206,7 +209,7 @@ class FeishuStorage:
         return FeishuConfig(
             user_id=doc["user_id"],
             app_id=doc["app_id"],
-            app_secret=self._decrypt_secret(doc.get("app_secret", "")),
+            app_secret=await self._decrypt_secret(doc.get("app_secret", "")),
             encrypt_key=doc.get("encrypt_key", ""),
             verification_token=doc.get("verification_token", ""),
             react_emoji=doc.get("react_emoji", "THUMBSUP"),

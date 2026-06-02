@@ -33,6 +33,9 @@ from src.kernel.types import Permission
 router = APIRouter()
 logger = get_logger(__name__)
 
+SHARE_PARTIAL_RUN_IDS_LIMIT = 100
+SHARE_EVENT_RESPONSE_LIMIT_MAX = 1000
+
 
 def _check_permission(user: TokenPayload, permission: str) -> bool:
     """检查用户是否拥有指定权限"""
@@ -46,6 +49,27 @@ def _require_share_permission(user: TokenPayload) -> None:
             status_code=status.HTTP_403_FORBIDDEN,
             detail="没有分享会话的权限",
         )
+
+
+def _validate_share_run_ids(share_data: ShareCreate) -> None:
+    if share_data.share_type != ShareType.PARTIAL:
+        return
+    if not share_data.run_ids:
+        raise HTTPException(
+            status_code=400,
+            detail="部分分享需要指定 run_ids",
+        )
+    if len(share_data.run_ids) > SHARE_PARTIAL_RUN_IDS_LIMIT:
+        raise HTTPException(
+            status_code=400,
+            detail=f"run_ids 数量不能超过 {SHARE_PARTIAL_RUN_IDS_LIMIT}",
+        )
+
+
+def _bounded_partial_run_ids(run_ids: list[str] | None) -> list[str] | None:
+    if not run_ids:
+        return None
+    return run_ids[:SHARE_PARTIAL_RUN_IDS_LIMIT]
 
 
 def _resolve_shared_team_avatar(team) -> str | None:
@@ -114,12 +138,7 @@ async def create_share(
             detail="只能分享自己的会话",
         )
 
-    # 验证 partial share 时提供了 run_ids
-    if share_data.share_type == ShareType.PARTIAL and not share_data.run_ids:
-        raise HTTPException(
-            status_code=400,
-            detail="部分分享需要指定 run_ids",
-        )
+    _validate_share_run_ids(share_data)
 
     # 创建分享
     storage = ShareStorage()
@@ -256,6 +275,7 @@ async def delete_share(
 @router.get("/public/{share_id}", response_model=SharedContentResponse)
 async def get_shared_content(
     share_id: str,
+    event_limit: int = Query(1000, ge=1, le=SHARE_EVENT_RESPONSE_LIMIT_MAX),
     user: Optional[TokenPayload] = Depends(get_current_user_optional),
 ):
     """
@@ -288,19 +308,28 @@ async def get_shared_content(
     # 获取会话事件
     dual_writer = get_dual_writer()
 
+    events_probe_limit = event_limit + 1
+    partial_run_ids = (
+        _bounded_partial_run_ids(share.run_ids) if share.share_type == ShareType.PARTIAL else None
+    )
+
     # 如果是部分分享，只获取指定 run 的事件
-    if share.share_type == ShareType.PARTIAL and share.run_ids:
+    if partial_run_ids:
         events = await dual_writer.read_session_events(
             share.session_id,
             completed_only=True,
-            run_ids=share.run_ids,
+            run_ids=partial_run_ids,
+            max_events=events_probe_limit,
         )
     else:
-        # 全部分享，获取所有事件
         events = await dual_writer.read_session_events(
             share.session_id,
             completed_only=True,
+            max_events=events_probe_limit,
         )
+    events_limited = len(events) > event_limit
+    if events_limited:
+        events = events[:event_limit]
 
     # 获取分享者信息
     user_storage = UserStorage()
@@ -353,5 +382,7 @@ async def get_shared_content(
         events=events,
         owner=owner_info,
         share_type=share.share_type,
-        run_ids=share.run_ids,
+        run_ids=partial_run_ids if share.share_type == ShareType.PARTIAL else share.run_ids,
+        events_limited=events_limited,
+        events_limit=event_limit,
     )

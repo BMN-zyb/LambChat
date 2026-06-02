@@ -6,6 +6,7 @@ import json
 import uuid
 from typing import Any, Optional
 
+from src.infra.async_utils import run_blocking_io
 from src.infra.logging import get_logger
 from src.infra.pubsub_hub import get_pubsub_hub
 from src.infra.storage.redis import get_redis_client
@@ -55,7 +56,7 @@ class ToolCachePubSub:
 
     async def _handle_message(self, message: dict[str, Any]) -> None:
         try:
-            data = json.loads(message["data"])
+            data = await run_blocking_io(json.loads, message["data"])
             if data.get("instance_id") == self._instance_id:
                 return
 
@@ -95,12 +96,13 @@ async def publish_tool_cache_invalidation(cache: str, *, user_id: str | None = N
     try:
         redis_client = get_redis_client()
         pubsub = get_tool_cache_pubsub()
-        payload = json.dumps(
+        payload = await run_blocking_io(
+            json.dumps,
             {
                 "instance_id": pubsub.instance_id,
                 "cache": cache,
                 "user_id": user_id,
-            }
+            },
         )
         await redis_client.publish(TOOL_CACHE_INVALIDATION_CHANNEL, payload)
     except Exception as e:

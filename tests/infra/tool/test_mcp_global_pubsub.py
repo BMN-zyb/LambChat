@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -148,6 +150,259 @@ def test_global_mcp_cache_uses_configured_max_entries(
     assert removed == 1
     assert "user-old" not in mcp_global._global_entries
     assert "user-new" in mcp_global._global_entries
+
+
+def test_global_mcp_warmup_limit_setting_default() -> None:
+    from src.kernel.config.base import Settings
+    from src.kernel.config.definitions import SETTING_DEFINITIONS
+
+    definition = SETTING_DEFINITIONS["MCP_GLOBAL_WARMUP_MAX_USERS"]
+
+    assert Settings(_env_file=None).MCP_GLOBAL_WARMUP_MAX_USERS == 100
+    assert definition["default"] == 100
+    assert definition.get("frontend_visible", False) is False
+
+
+def test_global_mcp_init_wait_setting_default() -> None:
+    from src.kernel.config.base import Settings
+    from src.kernel.config.definitions import SETTING_DEFINITIONS
+
+    definition = SETTING_DEFINITIONS["MCP_GLOBAL_INIT_WAIT_SECONDS"]
+
+    assert Settings(_env_file=None).MCP_GLOBAL_INIT_WAIT_SECONDS == 5
+    assert definition["default"] == 5
+    assert definition.get("frontend_visible", False) is False
+
+
+def test_mcp_effective_config_server_limit_setting_default() -> None:
+    from src.kernel.config.base import Settings
+    from src.kernel.config.definitions import SETTING_DEFINITIONS
+
+    definition = SETTING_DEFINITIONS["MCP_EFFECTIVE_CONFIG_MAX_SERVERS"]
+
+    assert Settings(_env_file=None).MCP_EFFECTIVE_CONFIG_MAX_SERVERS == 100
+    assert definition["default"] == 100
+    assert definition.get("frontend_visible", False) is False
+
+
+def test_mcp_effective_config_tool_limit_setting_default() -> None:
+    from src.kernel.config.base import Settings
+    from src.kernel.config.definitions import SETTING_DEFINITIONS
+
+    definition = SETTING_DEFINITIONS["MCP_EFFECTIVE_CONFIG_MAX_TOOLS"]
+
+    assert Settings(_env_file=None).MCP_EFFECTIVE_CONFIG_MAX_TOOLS == 200
+    assert definition["default"] == 200
+    assert definition.get("frontend_visible", False) is False
+
+
+@pytest.mark.asyncio
+async def test_global_mcp_warmup_uses_configured_concurrency(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    active = 0
+    max_active = 0
+    release = asyncio.Event()
+    started = asyncio.Event()
+
+    async def _fake_get_tools(user_id: str):
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        if active == 2:
+            started.set()
+        await release.wait()
+        active -= 1
+        return [], None
+
+    monkeypatch.setattr(mcp_global, "get_global_mcp_tools", _fake_get_tools)
+    monkeypatch.setattr(mcp_global.settings, "MCP_GLOBAL_WARMUP_CONCURRENCY", 2)
+
+    task = asyncio.create_task(
+        mcp_global.warmup_global_cache([f"user-{index}" for index in range(5)])
+    )
+    await asyncio.wait_for(started.wait(), timeout=1)
+
+    assert max_active == 2
+
+    release.set()
+    await task
+
+
+@pytest.mark.asyncio
+async def test_global_mcp_warmup_caps_direct_user_list(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    warmed: list[str] = []
+
+    async def _fake_get_tools(user_id: str):
+        warmed.append(user_id)
+        return [], None
+
+    monkeypatch.setattr(mcp_global, "get_global_mcp_tools", _fake_get_tools)
+    monkeypatch.setattr(mcp_global.settings, "MCP_GLOBAL_WARMUP_MAX_USERS", 2)
+    monkeypatch.setattr(mcp_global.settings, "MCP_GLOBAL_WARMUP_CONCURRENCY", 10)
+
+    await mcp_global.warmup_global_cache([f"user-{index}" for index in range(5)])
+
+    assert warmed == ["user-0", "user-1"]
+
+
+@pytest.mark.asyncio
+async def test_warmup_active_users_iterates_cursor_without_unbounded_to_list(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    warmed: list[str] = []
+
+    class _FakeCursor:
+        def __init__(self) -> None:
+            self.docs = [{"_id": f"user-{index}"} for index in range(3)]
+
+        def __aiter__(self):
+            self._iter = iter(self.docs)
+            return self
+
+        async def __anext__(self):
+            try:
+                return next(self._iter)
+            except StopIteration as exc:
+                raise StopAsyncIteration from exc
+
+        async def to_list(self, length=None):
+            raise AssertionError("warmup should not materialize an unbounded cursor")
+
+    class _FakeCollection:
+        def aggregate(self, pipeline):
+            assert {"$limit": 0} not in pipeline
+            return _FakeCursor()
+
+    class _FakeClient:
+        def __getitem__(self, _name):
+            return {"users": _FakeCollection()}
+
+    async def _fake_warmup_global_cache(user_ids: list[str]) -> None:
+        warmed.extend(user_ids)
+
+    monkeypatch.setattr(mcp_global, "get_mongo_client", lambda: _FakeClient(), raising=False)
+    monkeypatch.setattr("src.infra.storage.mongodb.get_mongo_client", lambda: _FakeClient())
+    monkeypatch.setattr(mcp_global, "warmup_global_cache", _fake_warmup_global_cache)
+
+    await mcp_global.warmup_active_users_mcp(limit=0)
+
+    assert warmed == ["user-0", "user-1", "user-2"]
+
+
+@pytest.mark.asyncio
+async def test_global_mcp_initialization_renews_distributed_lock_during_slow_start(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    renew_started = asyncio.Event()
+    allow_initialize = asyncio.Event()
+    renew_calls: list[tuple[str, str, int]] = []
+
+    class _SlowManager:
+        def __init__(self, **_kwargs) -> None:
+            self._initialized = False
+
+        async def initialize(self) -> None:
+            await renew_started.wait()
+            self._initialized = True
+            allow_initialize.set()
+
+        async def get_tools(self) -> list:
+            return []
+
+        async def close(self) -> None:
+            return None
+
+    async def _fake_acquire(lock_key: str, ttl: int = mcp_global.DISTRIBUTED_LOCK_TTL):
+        return True, "lock-value"
+
+    async def _fake_renew(lock_key: str, lock_value: str, ttl: int) -> bool:
+        renew_calls.append((lock_key, lock_value, ttl))
+        renew_started.set()
+        return True
+
+    async def _fake_release(_lock_key: str, _lock_value: str) -> bool:
+        return True
+
+    monkeypatch.setattr(mcp_global, "acquire_distributed_lock", _fake_acquire)
+    monkeypatch.setattr(mcp_global, "renew_distributed_lock", _fake_renew)
+    monkeypatch.setattr(mcp_global, "release_distributed_lock", _fake_release)
+    monkeypatch.setattr(mcp_global, "_get_lock_renew_interval", lambda _ttl: 0.01)
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "src.infra.tool.mcp_client",
+        SimpleNamespace(MCPClientManager=_SlowManager),
+    )
+
+    tools, manager = await mcp_global.get_global_mcp_tools("user-1")
+
+    assert tools == []
+    assert manager is not None
+    assert allow_initialize.is_set()
+    assert renew_calls == [("mcp_init_lock:user-1", "lock-value", mcp_global.DISTRIBUTED_LOCK_TTL)]
+
+
+@pytest.mark.asyncio
+async def test_global_mcp_lock_wait_uses_configured_attempt_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sleep_calls: list[float] = []
+    check_calls = 0
+
+    class _FastManager:
+        def __init__(self, **_kwargs) -> None:
+            self._initialized = False
+
+        async def initialize(self) -> None:
+            self._initialized = True
+
+        async def get_tools(self) -> list:
+            return []
+
+        async def close(self) -> None:
+            return None
+
+    async def _fake_acquire(lock_key: str, ttl: int = mcp_global.DISTRIBUTED_LOCK_TTL):
+        return False, ""
+
+    async def _fake_check_done(user_id: str) -> bool:
+        nonlocal check_calls
+        check_calls += 1
+        return False
+
+    async def _fake_sleep(delay: float) -> None:
+        sleep_calls.append(delay)
+
+    async def _fake_mark_done(_user_id: str) -> None:
+        return None
+
+    monkeypatch.setattr(mcp_global, "acquire_distributed_lock", _fake_acquire)
+    monkeypatch.setattr(mcp_global, "check_init_done", _fake_check_done)
+    monkeypatch.setattr(mcp_global, "mark_init_done", _fake_mark_done)
+    monkeypatch.setattr(mcp_global.asyncio, "sleep", _fake_sleep)
+    monkeypatch.setattr(
+        mcp_global,
+        "settings",
+        SimpleNamespace(
+            MCP_GLOBAL_INIT_WAIT_SECONDS=2,
+            MCP_GLOBAL_CACHE_TTL_SECONDS=900,
+            MCP_GLOBAL_MAX_ENTRIES=100,
+        ),
+    )
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "src.infra.tool.mcp_client",
+        SimpleNamespace(MCPClientManager=_FastManager),
+    )
+
+    tools, manager = await mcp_global.get_global_mcp_tools("user-1")
+
+    assert tools == []
+    assert manager is not None
+    assert check_calls == 2
+    assert sleep_calls == [1.0, 1.0]
 
 
 @pytest.fixture(autouse=True)

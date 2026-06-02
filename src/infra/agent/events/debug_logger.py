@@ -63,6 +63,9 @@ def shutdown() -> None:
 
 
 _SANITIZE_MAX_DEPTH = 10
+_SANITIZE_MAX_STRING_CHARS = 2000
+_SANITIZE_MAX_LIST_ITEMS = 100
+_SANITIZE_MAX_DICT_ITEMS = 100
 
 
 def _sanitize(obj: Any, _depth: int = 0) -> Any:
@@ -72,11 +75,25 @@ def _sanitize(obj: Any, _depth: int = 0) -> Any:
     if obj is None or isinstance(obj, (bool, int, float)):
         return obj
     if isinstance(obj, str):
+        if len(obj) > _SANITIZE_MAX_STRING_CHARS:
+            return (
+                obj[:_SANITIZE_MAX_STRING_CHARS].rstrip() + f"\n[truncated from {len(obj)} chars]"
+            )
         return obj
     if isinstance(obj, dict):
-        return {k: _sanitize(v, _depth + 1) for k, v in obj.items()}
+        sanitized: dict[Any, Any] = {}
+        for index, (key, value) in enumerate(obj.items()):
+            if index >= _SANITIZE_MAX_DICT_ITEMS:
+                sanitized["_truncated_keys"] = len(obj) - _SANITIZE_MAX_DICT_ITEMS
+                break
+            sanitized[key] = _sanitize(value, _depth + 1)
+        return sanitized
     if isinstance(obj, (list, tuple)):
-        return [_sanitize(v, _depth + 1) for v in obj]
+        sanitized_items = [_sanitize(v, _depth + 1) for v in obj[:_SANITIZE_MAX_LIST_ITEMS]]
+        omitted = len(obj) - _SANITIZE_MAX_LIST_ITEMS
+        if omitted > 0:
+            sanitized_items.append({"_truncated_items": omitted})
+        return sanitized_items
     # Pydantic BaseModel → dict then recurse
     if hasattr(obj, "model_dump"):
         return _sanitize(obj.model_dump(), _depth + 1)
@@ -107,18 +124,21 @@ async def debug_log_event(event: Any) -> None:
         return
 
     try:
-        record: dict[str, Any] = {
-            "_ts": time.strftime("%H:%M:%S.") + f"{time.time() % 1:.3f}"[2:],
-        }
-        record.update(_sanitize(event))
-
-        line = json.dumps(record, ensure_ascii=False, default=str) + "\n"
-        log_file = _get_log_file()
-
-        await run_blocking_io(_write_line, log_file, line, timeout=1.0)
+        await run_blocking_io(_write_event_sync, event, timeout=1.0)
     except Exception:
         # Debug logging is non-critical — must never kill the agent stream.
         pass
+
+
+def _write_event_sync(event: Any) -> None:
+    """Sanitize, serialize, and write a debug event synchronously."""
+    record: dict[str, Any] = {
+        "_ts": time.strftime("%H:%M:%S.") + f"{time.time() % 1:.3f}"[2:],
+    }
+    record.update(_sanitize(event))
+    line = json.dumps(record, ensure_ascii=False, default=str) + "\n"
+    log_file = _get_log_file()
+    _write_line(log_file, line)
 
 
 def _write_line(log_file: Any, line: str) -> None:

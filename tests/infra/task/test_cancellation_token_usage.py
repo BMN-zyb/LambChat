@@ -1,7 +1,9 @@
 import asyncio
+import json
 
 import pytest
 
+from src.infra.task import cancellation as cancellation_module
 from src.infra.task.cancellation import TaskCancellation
 
 
@@ -52,6 +54,43 @@ async def test_cancel_run_marks_trace_error_without_zero_usage_placeholder(
             },
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_cancel_run_offloads_cancel_publish_json_serialization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[object] = []
+
+    class _RecordingRedis:
+        def __init__(self) -> None:
+            self.published: list[tuple[str, str]] = []
+
+        async def set(self, *args, **kwargs):
+            return True
+
+        async def publish(self, channel: str, payload: str):
+            self.published.append((channel, payload))
+            return 1
+
+    redis = _RecordingRedis()
+    cancellation = TaskCancellation(lock=asyncio.Lock(), tasks={})
+
+    async def _fake_run_blocking_io(func, /, *args, **kwargs):
+        calls.append(func)
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(cancellation_module, "get_redis_client", lambda: redis)
+    monkeypatch.setattr(
+        cancellation_module, "run_blocking_io", _fake_run_blocking_io, raising=False
+    )
+
+    result = await cancellation.cancel_run("run-1", publish=True)
+
+    assert result["success"] is True
+    assert calls == [json.dumps]
+    assert redis.published
+    assert json.loads(redis.published[0][1])["run_id"] == "run-1"
 
 
 @pytest.mark.asyncio

@@ -20,6 +20,7 @@ from typing import Any, AsyncGenerator, Dict, List, Optional
 
 from pymongo import UpdateOne
 
+from src.infra.async_utils import run_blocking_io
 from src.infra.logging import get_logger
 from src.infra.session.trace_storage import TraceStorage, get_trace_storage
 from src.infra.storage.redis import RedisStorage
@@ -37,6 +38,8 @@ _TTL_SET_KEYS_MAX = 5000  # _ttl_set_keys 上限，防止内存泄漏
 _LIVE_STREAM_READ_TIMEOUT_SECONDS = 24 * 60 * 60
 _SSE_HEARTBEAT_INTERVAL_SECONDS = 15
 _REDIS_XREAD_BLOCK_MS = 5000
+_REDIS_REPLAY_BATCH_SIZE = 500
+MongoBufferItem = tuple[str, str, dict, str, Optional[str], datetime]
 
 
 def _get_max_events_per_trace() -> int:
@@ -55,6 +58,79 @@ def _get_ttl_set_keys_max() -> int:
 def _get_ttl_refresh_interval() -> float:
     ttl_seconds = max(int(getattr(settings, "SSE_CACHE_TTL", 86400) or 0), 1)
     return max(min(ttl_seconds / 2, 300.0), 1.0)
+
+
+def _get_redis_replay_batch_size() -> int:
+    return max(
+        int(
+            getattr(settings, "SESSION_EVENT_REDIS_REPLAY_BATCH_SIZE", _REDIS_REPLAY_BATCH_SIZE)
+            or 0
+        ),
+        1,
+    )
+
+
+async def _serialize_event_data_for_redis(data: Any) -> str:
+    if isinstance(data, dict):
+        return await run_blocking_io(json.dumps, data, ensure_ascii=False)
+    return str(data)
+
+
+async def _parse_event_data_from_redis(data: Any) -> Any:
+    if isinstance(data, str):
+        try:
+            return await run_blocking_io(json.loads, data)
+        except json.JSONDecodeError:
+            return data
+    return data
+
+
+def _build_mongo_bulk_operations(
+    batch: list[MongoBufferItem],
+    *,
+    now: datetime,
+    max_events: int,
+) -> list[UpdateOne]:
+    grouped: dict[str, list[dict]] = defaultdict(list)
+    trace_context: dict[str, tuple[str, Optional[str]]] = {}
+
+    for trace_id, event_type, data, session_id, run_id, timestamp in batch:
+        grouped[trace_id].append(
+            {
+                "event_type": event_type,
+                "data": data,
+                "timestamp": timestamp,
+            }
+        )
+        if trace_id not in trace_context:
+            trace_context[trace_id] = (session_id, run_id)
+
+    operations: list[UpdateOne] = []
+    for trace_id, events in grouped.items():
+        session_id, run_id = trace_context.get(trace_id, ("", None))
+        operations.append(
+            UpdateOne(
+                {"trace_id": trace_id},
+                {
+                    "$push": {
+                        "events": {
+                            "$each": events,
+                            "$slice": -max_events,
+                        }
+                    },
+                    "$inc": {"event_count": len(events)},
+                    "$set": {"updated_at": now},
+                    "$setOnInsert": {
+                        "session_id": session_id,
+                        "run_id": run_id or "",
+                        "status": "running",
+                        "started_at": now,
+                    },
+                },
+                upsert=True,
+            )
+        )
+    return operations
 
 
 class DualEventWriter:
@@ -76,10 +152,12 @@ class DualEventWriter:
         self._ttl_set_keys: OrderedDict[str, float] = OrderedDict()
         # MongoDB 批量写入缓冲
         # (trace_id, event_type, data, session_id, run_id, timestamp)
-        self._mongo_buffer: list[tuple[str, str, dict, str, Optional[str], datetime]] = []
+        self._mongo_buffer: list[MongoBufferItem] = []
         self._mongo_lock = asyncio.Lock()  # 只保护 buffer 和 flush 操作
         self._flush_event = asyncio.Event()  # 使用 Event 替代轮询标志
         self._flush_event.set()  # 初始状态为已就绪
+        self._flush_task: asyncio.Task[None] | None = None
+        self._flush_task_waiting = False
 
     @property
     def redis(self) -> RedisStorage:
@@ -138,7 +216,7 @@ class DualEventWriter:
         stream_key = self._stream_key(session_id, run_id)
         fields = {
             "event_type": event_type,
-            "data": (json.dumps(data, ensure_ascii=False) if isinstance(data, dict) else str(data)),
+            "data": await _serialize_event_data_for_redis(data),
             "timestamp": timestamp.isoformat(),
         }
         redis_success = await self._write_to_redis_direct(stream_key, fields)
@@ -174,23 +252,67 @@ class DualEventWriter:
                 # 使用 Event 触发延迟刷新
                 elif self._flush_event.is_set():
                     self._flush_event.clear()
-                    task = asyncio.create_task(self._schedule_flush())
-                    task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+                    self._flush_task = asyncio.create_task(self._schedule_flush())
+                    self._flush_task.add_done_callback(self._on_flush_task_done)
 
             if should_flush_now:
-                await self._do_flush()
+                await self.flush_mongo_buffer()
 
         return redis_success
+
+    def _on_flush_task_done(self, task: asyncio.Task[None]) -> None:
+        if self._flush_task is task:
+            self._flush_task = None
+        if task.cancelled():
+            return
+        try:
+            exc = task.exception()
+        except asyncio.CancelledError:
+            return
+        if exc is not None:
+            logger.warning("Scheduled MongoDB event flush failed: %s", exc)
 
     async def _schedule_flush(self) -> None:
         """调度延迟刷新"""
         try:
+            self._flush_task_waiting = True
             await asyncio.sleep(_MONGO_FLUSH_INTERVAL)
-        except asyncio.CancelledError:
-            # 被取消时也要执行刷新，确保数据不丢失
-            pass
         finally:
-            await self._do_flush()
+            self._flush_task_waiting = False
+        await self._do_flush()
+
+    async def _drain_scheduled_flush_task(self) -> bool:
+        task = self._flush_task
+        if task is None:
+            return False
+        if task is asyncio.current_task():
+            return False
+        if task.done():
+            if self._flush_task is task:
+                self._flush_task = None
+            return False
+
+        if self._flush_task_waiting:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            if self._flush_task is task:
+                self._flush_task = None
+            return False
+
+        try:
+            await task
+        except asyncio.CancelledError:
+            return False
+        except Exception as e:
+            logger.warning("Scheduled MongoDB event flush failed while draining: %s", e)
+            return False
+        finally:
+            if self._flush_task is task:
+                self._flush_task = None
+        return True
 
     async def _do_flush(self) -> None:
         """实际执行批量写入，使用 bulk_write 优化"""
@@ -202,50 +324,14 @@ class DualEventWriter:
             batch = self._mongo_buffer
             self._mongo_buffer = []
 
-        # 按 trace_id 分组
-        grouped: dict[str, list[dict]] = defaultdict(list)
-        trace_context: dict[str, tuple[str, Optional[str]]] = {}
         now = utc_now()
-
-        for trace_id, event_type, data, session_id, run_id, timestamp in batch:
-            grouped[trace_id].append(
-                {
-                    "event_type": event_type,
-                    "data": data,
-                    "timestamp": timestamp,  # 保留原始时间戳
-                }
-            )
-            if trace_id not in trace_context:
-                trace_context[trace_id] = (session_id, run_id)
-
-        # 构建批量操作
-        operations: list[UpdateOne] = []
         max_events = _get_max_events_per_trace()
-
-        for trace_id, events in grouped.items():
-            session_id, run_id = trace_context.get(trace_id, ("", None))
-            operations.append(
-                UpdateOne(
-                    {"trace_id": trace_id},
-                    {
-                        "$push": {
-                            "events": {
-                                "$each": events,
-                                "$slice": -max_events,  # 只保留最新的 N 个事件，防止单文档过大
-                            }
-                        },
-                        "$inc": {"event_count": len(events)},
-                        "$set": {"updated_at": now},
-                        "$setOnInsert": {
-                            "session_id": session_id,
-                            "run_id": run_id or "",
-                            "status": "running",
-                            "started_at": now,
-                        },
-                    },
-                    upsert=True,
-                )
-            )
+        operations = await run_blocking_io(
+            _build_mongo_bulk_operations,
+            batch,
+            now=now,
+            max_events=max_events,
+        )
 
         # 批量执行
         if operations:
@@ -262,9 +348,9 @@ class DualEventWriter:
 
     async def flush_mongo_buffer(self) -> None:
         """强制刷新缓冲（外部调用）"""
-        # 等待当前刷新完成后再执行
-        await self._flush_event.wait()
-        await self._do_flush()
+        flushed_by_scheduled_task = await self._drain_scheduled_flush_task()
+        if not flushed_by_scheduled_task:
+            await self._do_flush()
 
     async def _flush_redis_buffer(self) -> None:
         """保留兼容性"""
@@ -362,32 +448,42 @@ class DualEventWriter:
         last_heartbeat = start_time
         logger.info(f"[Redis] Reading from stream: {stream_key}")
 
-        def parse_data(data_str):
-            if isinstance(data_str, str):
-                try:
-                    return json.loads(data_str)
-                except json.JSONDecodeError:
-                    return data_str
-            return data_str
-
         try:
-            entries = await self.redis.xrange(
-                stream_key,
-                min="-",
-                max="+",
+            replay_min = "-"
+            replay_batch_size = _get_redis_replay_batch_size()
+            replayed_count = 0
+            while True:
+                entries = await self.redis.xrange(
+                    stream_key,
+                    min=replay_min,
+                    max="+",
+                    count=replay_batch_size,
+                )
+                if not entries:
+                    break
+                replayed_count += len(entries)
+                logger.debug(
+                    "[Redis] Initial xrange replayed %d entries from %s",
+                    len(entries),
+                    stream_key,
+                )
+                for entry_id, fields in entries:
+                    event = {
+                        "id": entry_id,
+                        "event_type": fields.get("event_type"),
+                        "data": await _parse_event_data_from_redis(fields.get("data", "{}")),
+                        "timestamp": fields.get("timestamp"),
+                    }
+                    yield event
+                    last_id = entry_id
+                    if event["event_type"] in ("complete", "error", "done"):
+                        return
+                replay_min = f"({last_id}"
+                if len(entries) < replay_batch_size:
+                    break
+            logger.info(
+                f"[Redis] Initial xrange replayed {replayed_count} entries from {stream_key}"
             )
-            logger.info(f"[Redis] Initial xrange returned {len(entries)} entries from {stream_key}")
-            for entry_id, fields in entries:
-                event = {
-                    "id": entry_id,
-                    "event_type": fields.get("event_type"),
-                    "data": parse_data(fields.get("data", "{}")),
-                    "timestamp": fields.get("timestamp"),
-                }
-                yield event
-                last_id = entry_id
-                if event["event_type"] in ("complete", "error", "done"):
-                    return
 
             logger.info(f"[Redis] Entering blocking xread loop for {stream_key}")
             while True:
@@ -421,6 +517,7 @@ class DualEventWriter:
                 try:
                     results = await self.redis.xread(
                         {stream_key: last_id},
+                        count=replay_batch_size,
                         block=block,
                     )
                     if results:
@@ -432,7 +529,9 @@ class DualEventWriter:
                                 event = {
                                     "id": entry_id,
                                     "event_type": fields.get("event_type"),
-                                    "data": parse_data(fields.get("data", "{}")),
+                                    "data": await _parse_event_data_from_redis(
+                                        fields.get("data", "{}")
+                                    ),
                                     "timestamp": fields.get("timestamp"),
                                 }
                                 yield event
@@ -458,9 +557,10 @@ class DualEventWriter:
         self,
         trace_id: str,
         event_types: Optional[List[str]] = None,
+        max_events: int = 1000,
     ) -> List[Dict[str, Any]]:
         """获取 trace 的事件列表"""
-        return await self.trace.get_trace_events(trace_id, event_types)
+        return await self.trace.get_trace_events(trace_id, event_types, max_events=max_events)
 
     async def list_traces(
         self,
@@ -489,6 +589,7 @@ class DualEventWriter:
         exclude_run_id: Optional[str] = None,
         completed_only: bool = True,
         run_ids: Optional[List[str]] = None,
+        max_events: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
         """
         从 MongoDB 读取会话的所有事件（跨 traces 聚合）
@@ -500,6 +601,7 @@ class DualEventWriter:
             exclude_run_id: 可选的运行 ID 排除（用于排除正在运行的 run）
             completed_only: 是否只返回完成的 trace 中的事件（默认 True）
             run_ids: 可选的运行 ID 列表过滤
+            max_events: 可选的最大返回事件数
 
         Returns:
             事件列表
@@ -511,6 +613,7 @@ class DualEventWriter:
             exclude_run_id=exclude_run_id,
             completed_only=completed_only,
             run_ids=run_ids,
+            max_events=max_events,
         )
 
     async def get_stream_length(self, session_id: str, run_id: Optional[str] = None) -> int:

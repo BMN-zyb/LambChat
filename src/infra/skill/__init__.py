@@ -2,6 +2,10 @@
 Skills 管理模块 - 简化架构
 """
 
+import json
+from typing import Any
+
+from src.infra.async_utils import run_blocking_io
 from src.infra.skill.loader import load_skill_files
 from src.infra.skill.manager import SkillManager
 from src.infra.skill.marketplace import MarketplaceStorage
@@ -13,6 +17,42 @@ __all__ = [
     "MarketplaceStorage",
     "load_skill_files",
 ]
+
+LEGACY_SKILL_MIGRATION_BATCH_SIZE = 100
+LEGACY_SKILL_MIGRATION_USER_FLUSH_SIZE = 100
+
+
+def _legacy_cursor(cursor):
+    batch_size = getattr(cursor, "batch_size", None)
+    if callable(batch_size):
+        return batch_size(LEGACY_SKILL_MIGRATION_BATCH_SIZE)
+    return cursor
+
+
+async def _json_dumps_legacy_meta(data: dict[str, Any]) -> str:
+    return await run_blocking_io(json.dumps, data)
+
+
+async def _flush_disabled_skill_updates(
+    users_collection,
+    pending: dict[str, set[str]],
+) -> int:
+    updated = 0
+    for user_id, disabled_skills in list(pending.items()):
+        disabled_list = sorted(disabled_skills)
+        current = await users_collection.find_one({"id": user_id})
+        current_meta = (current.get("metadata") or {}) if current else {}
+        current_disabled = current_meta.get("disabled_skills", [])
+
+        # 合并（不覆盖已有的）
+        merged_disabled = sorted(set(current_disabled) | set(disabled_list))
+        await users_collection.update_one(
+            {"id": user_id},
+            {"$set": {"metadata": {**current_meta, "disabled_skills": merged_disabled}}},
+        )
+        updated += 1
+    pending.clear()
+    return updated
 
 
 async def init_skill_indexes() -> None:
@@ -44,8 +84,6 @@ async def _migrate_legacy_skills(logger) -> None:
     - enabled/disabled → 用户表 metadata.disabled_skills
     - 元数据（installed_from 等）→ skill_files 中的 __meta__ 文档
     """
-    import json
-
     from src.infra.storage.mongodb import get_mongo_client
     from src.kernel.config import settings
 
@@ -83,19 +121,17 @@ async def _migrate_legacy_skills(logger) -> None:
         f"skill_toggles={old_toggles_count}. Starting migration..."
     )
 
-    # 收集所有旧 system_skills 的名称
-    system_skill_names: set[str] = set()
-    async for doc in old_system.find({}, {"name": 1}):
-        system_skill_names.add(doc["name"])
-
     # 1. system_skills -> skill_marketplace + skill_marketplace_files
     migrated_count = 0
-    async for doc in old_system.find({}):
+    async for doc in _legacy_cursor(old_system.find({})):
         skill_name = doc["name"]
 
         existing = await new_marketplace.find_one({"skill_name": skill_name})
         if existing:
-            async for file_doc in old_files.find({"skill_name": skill_name, "user_id": "system"}):
+            file_cursor = _legacy_cursor(
+                old_files.find({"skill_name": skill_name, "user_id": "system"})
+            )
+            async for file_doc in file_cursor:
                 await new_marketplace_files.update_one(
                     {"skill_name": skill_name, "file_path": file_doc["file_path"]},
                     {
@@ -123,7 +159,10 @@ async def _migrate_legacy_skills(logger) -> None:
             }
         )
 
-        async for file_doc in old_files.find({"skill_name": skill_name, "user_id": "system"}):
+        file_cursor = _legacy_cursor(
+            old_files.find({"skill_name": skill_name, "user_id": "system"})
+        )
+        async for file_doc in file_cursor:
             await new_marketplace_files.update_one(
                 {"skill_name": skill_name, "file_path": file_doc["file_path"]},
                 {
@@ -142,8 +181,9 @@ async def _migrate_legacy_skills(logger) -> None:
     # 2. 迁移 skill_toggles → __meta__ 文档 + metadata.disabled_skills
     migrated_toggles = 0
     users_to_update: dict[str, set[str]] = {}  # user_id -> set of disabled skill names
+    disabled_updated = 0
 
-    async for toggle_doc in old_toggles.find({}):
+    async for toggle_doc in _legacy_cursor(old_toggles.find({})):
         user_id = toggle_doc["user_id"]
         skill_name = toggle_doc["skill_name"]
         enabled = toggle_doc.get("enabled", True)
@@ -166,7 +206,7 @@ async def _migrate_legacy_skills(logger) -> None:
                     "skill_name": skill_name,
                     "user_id": user_id,
                     "file_path": "__meta__",
-                    "content": json.dumps(meta_data),
+                    "content": await _json_dumps_legacy_meta(meta_data),
                     "created_at": toggle_doc.get("created_at"),
                     "updated_at": toggle_doc.get("updated_at"),
                 }
@@ -178,10 +218,15 @@ async def _migrate_legacy_skills(logger) -> None:
             if user_id not in users_to_update:
                 users_to_update[user_id] = set()
             users_to_update[user_id].add(skill_name)
+            if len(users_to_update) >= LEGACY_SKILL_MIGRATION_USER_FLUSH_SIZE:
+                disabled_updated += await _flush_disabled_skill_updates(
+                    users_collection,
+                    users_to_update,
+                )
 
     # 3. user_skill_preferences → __meta__ 文档 + metadata.disabled_skills
     migrated_prefs = 0
-    async for doc in old_prefs.find({}):
+    async for doc in _legacy_cursor(old_prefs.find({})):
         user_id = doc["user_id"]
         skill_name = doc["skill_name"]
         enabled = doc.get("enabled", True)
@@ -190,7 +235,8 @@ async def _migrate_legacy_skills(logger) -> None:
             {"skill_name": skill_name, "user_id": user_id, "file_path": "__meta__"}
         )
         if not existing_meta:
-            installed_from = "marketplace" if skill_name in system_skill_names else "manual"
+            marketplace_doc = await new_marketplace.find_one({"skill_name": skill_name})
+            installed_from = "marketplace" if marketplace_doc else "manual"
             meta_data = {
                 "installed_from": installed_from,
                 "created_at": doc.get("created_at"),
@@ -201,7 +247,7 @@ async def _migrate_legacy_skills(logger) -> None:
                     "skill_name": skill_name,
                     "user_id": user_id,
                     "file_path": "__meta__",
-                    "content": json.dumps(meta_data),
+                    "content": await _json_dumps_legacy_meta(meta_data),
                     "created_at": doc.get("created_at"),
                     "updated_at": doc.get("updated_at"),
                 }
@@ -212,9 +258,14 @@ async def _migrate_legacy_skills(logger) -> None:
             if user_id not in users_to_update:
                 users_to_update[user_id] = set()
             users_to_update[user_id].add(skill_name)
+            if len(users_to_update) >= LEGACY_SKILL_MIGRATION_USER_FLUSH_SIZE:
+                disabled_updated += await _flush_disabled_skill_updates(
+                    users_collection,
+                    users_to_update,
+                )
 
     # 4. user_skills → __meta__ 文档
-    async for doc in old_user.find({}):
+    async for doc in _legacy_cursor(old_user.find({})):
         user_id = doc["user_id"]
         skill_name = doc["name"]
         enabled = doc.get("enabled", True)
@@ -233,7 +284,7 @@ async def _migrate_legacy_skills(logger) -> None:
                     "skill_name": skill_name,
                     "user_id": user_id,
                     "file_path": "__meta__",
-                    "content": json.dumps(meta_data),
+                    "content": await _json_dumps_legacy_meta(meta_data),
                     "created_at": doc.get("created_at"),
                     "updated_at": doc.get("updated_at"),
                 }
@@ -243,26 +294,21 @@ async def _migrate_legacy_skills(logger) -> None:
             if user_id not in users_to_update:
                 users_to_update[user_id] = set()
             users_to_update[user_id].add(skill_name)
+            if len(users_to_update) >= LEGACY_SKILL_MIGRATION_USER_FLUSH_SIZE:
+                disabled_updated += await _flush_disabled_skill_updates(
+                    users_collection,
+                    users_to_update,
+                )
 
     # 5. 批量更新用户 metadata.disabled_skills
-    disabled_updated = 0
-    for user_id, disabled_skills in users_to_update.items():
-        disabled_list = sorted(disabled_skills)
-        current = await users_collection.find_one({"id": user_id})
-        current_meta = (current.get("metadata") or {}) if current else {}
-        current_disabled = current_meta.get("disabled_skills", [])
-
-        # 合并（不覆盖已有的）
-        merged_disabled = sorted(set(current_disabled) | set(disabled_list))
-        await users_collection.update_one(
-            {"id": user_id},
-            {"$set": {"metadata": {**current_meta, "disabled_skills": merged_disabled}}},
-        )
-        disabled_updated += 1
+    disabled_updated += await _flush_disabled_skill_updates(
+        users_collection,
+        users_to_update,
+    )
 
     # 6. 为旧版用户复制 marketplace 文件到 skill_files
     installed_count = 0
-    async for meta_doc in new_files.find({"file_path": "__meta__"}):
+    async for meta_doc in _legacy_cursor(new_files.find({"file_path": "__meta__"})):
         user_id = meta_doc["user_id"]
         skill_name = meta_doc["skill_name"]
 
@@ -273,7 +319,8 @@ async def _migrate_legacy_skills(logger) -> None:
             continue
 
         files_copied = 0
-        async for mp_file in new_marketplace_files.find({"skill_name": skill_name}):
+        mp_file_cursor = _legacy_cursor(new_marketplace_files.find({"skill_name": skill_name}))
+        async for mp_file in mp_file_cursor:
             await new_files.update_one(
                 {"skill_name": skill_name, "user_id": user_id, "file_path": mp_file["file_path"]},
                 {

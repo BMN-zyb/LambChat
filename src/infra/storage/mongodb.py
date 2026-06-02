@@ -3,14 +3,19 @@ MongoDB 存储实现
 """
 
 import asyncio
+import fnmatch
+import json
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any, List, Optional
 
 from pydantic import BaseModel
 
+from src.infra.async_utils import run_blocking_io
 from src.infra.logging import get_logger
+from src.infra.pubsub_hub import get_pubsub_hub
 from src.infra.storage.base import StorageBase
+from src.infra.storage.redis import get_redis_client
 from src.infra.utils.datetime import utc_now
 from src.kernel.config import settings
 
@@ -18,6 +23,8 @@ if TYPE_CHECKING:
     from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorCollection
 
 logger = get_logger(__name__)
+MONGODB_STORAGE_KEYS_LIMIT = 1000
+APPROVAL_RESPONSE_CHANNEL = "approval:response"
 
 
 @lru_cache
@@ -127,9 +134,11 @@ class MongoDBStorage(StorageBase):
         return result is not None
 
     async def keys(self, pattern: str) -> list[str]:
-        """获取匹配的键列表"""
-        regex = pattern.replace("*", ".*")
-        cursor = self.collection.find({"_id": {"$regex": regex}})
+        """获取匹配的键列表，默认限制数量避免误扫全库。"""
+        regex = fnmatch.translate(pattern)
+        cursor = self.collection.find({"_id": {"$regex": regex}}, {"_id": 1}).limit(
+            MONGODB_STORAGE_KEYS_LIMIT
+        )
         return [doc["_id"] async for doc in cursor]
 
 
@@ -292,7 +301,10 @@ class ApprovalStorage:
         return result.deleted_count > 0
 
     async def list_pending(
-        self, session_id: Optional[str] = None, user_id: Optional[str] = None
+        self,
+        session_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        limit: int = 100,
     ) -> List[PendingApproval]:
         """获取待处理审批列表"""
         query = {"status": "pending", "expires_at": {"$gt": utc_now()}}
@@ -301,7 +313,8 @@ class ApprovalStorage:
         if user_id:
             query["user_id"] = user_id
 
-        cursor = self.collection.find(query).sort("created_at", -1)
+        bounded_limit = max(1, min(int(limit), 100))
+        cursor = self.collection.find(query).sort("created_at", -1).limit(bounded_limit)
         approvals = []
         async for doc in cursor:
             doc.pop("_id", None)
@@ -337,7 +350,7 @@ def get_approval_storage() -> ApprovalStorage:
 
 
 # ============================================================================
-# 分布式通知 (仅使用 MongoDB 轮询)
+# 分布式通知 (Redis Pub/Sub + MongoDB 轮询兜底)
 # ============================================================================
 
 
@@ -345,11 +358,17 @@ async def notify_approval_response(approval_id: str, response: ApprovalResponse)
     """
     通知等待的 Agent 审批已响应
 
-    仅使用 MongoDB 存储响应，wait_for_response 通过轮询检测变化。
+    响应主体仍以 MongoDB 为准；Redis Pub/Sub 只负责唤醒跨实例等待者。
     """
-    # MongoDB 存储响应在 update_status 时已完成
-    # 这里保留空实现以保持接口兼容性
-    pass
+    try:
+        redis_client = get_redis_client()
+        payload = await run_blocking_io(json.dumps, {"approval_id": approval_id})
+        await redis_client.publish(
+            APPROVAL_RESPONSE_CHANNEL,
+            payload,
+        )
+    except Exception as e:
+        logger.warning("Failed to publish approval response notification: %s", e)
 
 
 async def wait_for_response_distributed(
@@ -357,7 +376,7 @@ async def wait_for_response_distributed(
     timeout: float = 300,
 ) -> Optional[ApprovalResponse]:
     """
-    等待审批响应 (仅使用 MongoDB 轮询，指数退避)
+    等待审批响应 (Redis Pub/Sub 唤醒 + MongoDB 轮询兜底)
 
     Args:
         approval_id: 审批 ID
@@ -371,16 +390,53 @@ async def wait_for_response_distributed(
     min_interval = 0.5
     max_interval = 3.0
     current_interval = min_interval
+    notification_event = asyncio.Event()
+    subscription_token: str | None = None
+    hub = None
 
-    while True:
-        elapsed = asyncio.get_event_loop().time() - start_time
-        if elapsed >= timeout:
-            return None
+    async def _handle_notification(message: dict[str, Any]) -> None:
+        try:
+            data = await run_blocking_io(json.loads, message.get("data") or "{}")
+            if data.get("approval_id") == approval_id:
+                notification_event.set()
+        except json.JSONDecodeError:
+            logger.warning("Invalid approval response notification: %s", message.get("data"))
 
-        # 轻量检查：只查 response 字段是否存在
-        if await storage.has_response(approval_id):
-            return await storage.get_response(approval_id)
+    try:
+        hub = get_pubsub_hub()
+        subscription_token = hub.subscribe(APPROVAL_RESPONSE_CHANNEL, _handle_notification)
+        await hub.start()
+    except Exception as e:
+        logger.warning("Failed to subscribe approval response notifications: %s", e)
+        hub = None
+        subscription_token = None
 
-        # 指数退避，上限 3 秒
-        await asyncio.sleep(current_interval)
-        current_interval = min(current_interval * 1.5, max_interval)
+    try:
+        while True:
+            elapsed = asyncio.get_event_loop().time() - start_time
+            if elapsed >= timeout:
+                return None
+
+            # 轻量检查：只查 response 字段是否存在
+            if await storage.has_response(approval_id):
+                return await storage.get_response(approval_id)
+
+            remaining = timeout - elapsed
+            wait_interval = min(current_interval, remaining)
+            if wait_interval <= 0:
+                return None
+
+            try:
+                await asyncio.wait_for(notification_event.wait(), timeout=wait_interval)
+            except asyncio.TimeoutError:
+                current_interval = min(current_interval * 1.5, max_interval)
+                continue
+
+            notification_event.clear()
+            response = await storage.get_response(approval_id)
+            if response:
+                return response
+    finally:
+        if hub is not None and subscription_token is not None:
+            hub.unsubscribe(subscription_token)
+            await hub.stop_if_idle()

@@ -27,16 +27,18 @@ Reveal Project 工具
 """
 
 import asyncio
+import inspect
 import json
-import mimetypes
 import os
 import uuid
-from typing import Annotated, Any, Literal, Optional
+from tempfile import SpooledTemporaryFile
+from typing import Annotated, Any, Optional
 
 from langchain.tools import ToolRuntime, tool
 from langchain_core.tools import BaseTool
 
 from src.infra.async_utils import run_blocking_io
+from src.infra.async_utils.background_tasks import BestEffortTaskLimiter
 from src.infra.logging import get_logger
 from src.infra.logging.context import TraceContext
 from src.infra.revealed_file.storage import get_revealed_file_storage
@@ -45,432 +47,98 @@ from src.infra.tool.backend_utils import (
     get_base_url_from_runtime,
     get_user_id_from_runtime,
 )
+from src.infra.tool.reveal_project_detection import (
+    ProjectTemplate,
+    _find_entry,
+    _get_mime_type,
+    _is_binary,
+    _resolve_reveal_mode,
+    _should_skip,
+    detect_template,
+)
 
-logger = get_logger(__name__)
-
-ProjectTemplate = Literal[
-    "react", "vue", "vanilla", "static", "angular", "svelte", "solid", "nextjs"
-]
-RevealMode = Literal["project", "folder"]
-
-# 上传并发数
-UPLOAD_CONCURRENCY = 10
+# 上传并发数。每个 worker 会短暂持有一个下载后的 bytes 缓冲，默认值需要保守。
+UPLOAD_CONCURRENCY = 4
 
 # 同名项目最大保留版本数，超出时清理最旧的
 MAX_PROJECT_VERSIONS = 5
-
-BINARY_EXTENSIONS = {
-    ".png",
-    ".jpg",
-    ".jpeg",
-    ".gif",
-    ".ico",
-    ".webp",
-    ".bmp",
-    ".svg",
-    ".woff",
-    ".woff2",
-    ".ttf",
-    ".eot",
-    ".otf",
-    ".mp3",
-    ".mp4",
-    ".webm",
-    ".zip",
-    ".mpg",
-    ".mpeg",
-    ".mov",
-    ".avi",
-    ".wav",
-    ".ogg",
-    ".flac",
-    ".pdf",
-    ".doc",
-    ".docx",
-    ".xls",
-    ".xlsx",
-    ".ppt",
-    ".pptx",
-    ".gz",
-    ".tar",
-    ".bz2",
-    ".7z",
-    ".rar",
-    ".exe",
-    ".dll",
-    ".so",
-    ".dylib",
-    ".bin",
-    ".dat",
-    ".wasm",
-}
-
-# 文本文件白名单：既覆盖前端项目，也覆盖常见代码/脚本/配置/文档目录
-TEXT_EXTENSIONS = {
-    # Web 核心
-    ".html",
-    ".htm",
-    ".css",
-    # JavaScript / TypeScript
-    ".js",
-    ".jsx",
-    ".mjs",
-    ".cjs",
-    ".ts",
-    ".tsx",
-    ".mts",
-    ".cts",
-    # 框架 / 预处理器
-    ".vue",
-    ".svelte",
-    ".less",
-    ".scss",
-    ".sass",
-    ".styl",
-    # 数据 / 配置
-    ".json",
-    ".json5",
-    ".toml",
-    ".yaml",
-    ".yml",
-    # 模板 / 标记
-    ".md",
-    ".mdx",
-    ".txt",
-    ".graphql",
-    ".gql",
-    # 其他前端资源
-    ".map",
-    ".xml",
-    # 通用代码 / 脚本
-    ".py",
-    ".rb",
-    ".php",
-    ".java",
-    ".kt",
-    ".kts",
-    ".go",
-    ".rs",
-    ".c",
-    ".cc",
-    ".cpp",
-    ".cxx",
-    ".h",
-    ".hpp",
-    ".cs",
-    ".swift",
-    ".scala",
-    ".pl",
-    ".pm",
-    ".r",
-    ".lua",
-    ".zig",
-    ".sh",
-    ".bash",
-    ".zsh",
-    ".fish",
-    ".ps1",
-    ".bat",
-    ".cmd",
-    # 通用配置 / 数据
-    ".ini",
-    ".cfg",
-    ".conf",
-    ".properties",
-    ".lock",
-    ".csv",
-    ".tsv",
-    ".sql",
-    ".proto",
-    ".dockerfile",
-}
-
-IGNORE_DIRS = {
-    "node_modules",
-    ".git",
-    ".venv",
-    "venv",
-    "__pycache__",
-    ".DS_Store",
-    "dist",
-    "build",
-    ".next",
-    ".nuxt",
-    "coverage",
-    ".turbo",
-    ".cache",
-    ".parcel-cache",
-}
-
-IGNORE_FILES = {
-    "package-lock.json",
-    "yarn.lock",
-    "pnpm-lock.yaml",
-    ".env",
-    ".env.local",
-    ".env.development",
-    ".env.production",
-    "tsconfig.tsbuildinfo",
-    ".eslintcache",
-}
-
-ALLOWED_TEXT_FILENAMES = {
-    "Dockerfile",
-    "Containerfile",
-    "Makefile",
-    "Procfile",
-    "Gemfile",
-    "Rakefile",
-    "Jenkinsfile",
-}
-
-# 入口文件候选顺序（按模板类型分组，避免 React 项目误选 /index.html）
-ENTRY_CANDIDATES_BY_TEMPLATE: dict[str, list[str]] = {
-    "nextjs": [
-        "/pages/index.tsx",
-        "/pages/index.jsx",
-        "/pages/_app.tsx",
-        "/pages/_app.jsx",
-        "/index.html",
-    ],
-    "react": [
-        "/src/main.tsx",
-        "/src/main.jsx",
-        "/src/index.tsx",
-        "/src/index.jsx",
-        "/src/main.ts",
-        "/src/main.js",
-        "/main.tsx",
-        "/main.jsx",
-        "/main.js",
-        "/src/App.tsx",
-        "/src/App.jsx",
-        "/App.tsx",
-        "/App.jsx",
-        "/index.html",
-    ],
-    "vue": [
-        "/src/main.js",
-        "/src/main.ts",
-        "/main.js",
-        "/main.ts",
-        "/src/main.vue",
-        "/src/App.vue",
-        "/App.vue",
-        "/index.html",
-    ],
-    "svelte": [
-        "/src/App.svelte",
-        "/App.svelte",
-        "/src/main.svelte",
-        "/main.svelte",
-        "/index.html",
-    ],
-    "angular": [
-        "/src/main.ts",
-        "/src/main.js",
-        "/main.ts",
-        "/main.js",
-        "/index.html",
-    ],
-    "solid": [
-        "/src/index.tsx",
-        "/src/index.jsx",
-        "/src/main.tsx",
-        "/src/main.jsx",
-        "/index.html",
-    ],
-    # static / vanilla / fallback：index.html 优先
-    "_default": [
-        "/index.html",
-        "/src/index.html",
-        "/public/index.html",
-        "/src/main.ts",
-        "/src/index.ts",
-        "/src/index.tsx",
-        "/src/index.jsx",
-        "/src/main.tsx",
-        "/src/main.jsx",
-        "/src/main.js",
-        "/main.ts",
-        "/index.ts",
-        "/index.js",
-        "/main.js",
-        "/src/main.vue",
-        "/src/App.svelte",
-        "/index.tsx",
-        "/index.jsx",
-        "/App.tsx",
-        "/App.jsx",
-    ],
-}
+PROJECT_UPLOAD_SPOOL_MEMORY_LIMIT = 2 * 1024 * 1024
+MAX_PROJECT_FILES = 200
+_project_cleanup_tasks = BestEffortTaskLimiter("project cleanup", max_tasks=4)
 
 
-def _has_any_file(file_keys: set[str], candidates: tuple[str, ...]) -> bool:
-    return any(path in file_keys for path in candidates)
+async def drain_project_cleanup_tasks() -> None:
+    await _project_cleanup_tasks.drain()
 
 
-def detect_template(
-    package_json_content: str, file_keys: Optional[set[str]] = None
-) -> ProjectTemplate:
-    """根据 package.json 内容和文件结构检测项目模板类型"""
-    normalized_file_keys = file_keys or set()
+async def _json_dumps_result(data: dict[str, Any]) -> str:
+    return await run_blocking_io(json.dumps, data, ensure_ascii=False)
 
+
+logger = get_logger(__name__)
+
+
+def _get_project_scan_limit() -> int:
+    return max(int(MAX_PROJECT_FILES), 1)
+
+
+def _get_storage_internal_upload_max_size(storage: Any) -> int:
+    config = getattr(storage, "_config", None)
+    configured = (
+        getattr(config, "internal_max_upload_size", 50 * 1024 * 1024)
+        if config
+        else 50 * 1024 * 1024
+    )
+    return max(int(configured or 50 * 1024 * 1024), 1)
+
+
+def _coerce_file_size(value: Any) -> int | None:
+    if isinstance(value, bool) or value is None:
+        return None
     try:
-        package = json.loads(package_json_content)
-        deps = {
-            **package.get("dependencies", {}),
-            **package.get("devDependencies", {}),
-        }
-        if "next" in deps:
-            return "nextjs"
-        if "solid-js" in deps:
-            return "solid"
-        if "svelte" in deps:
-            return "svelte"
-        if any(name.startswith("@angular/") for name in deps):
-            return "angular"
-        if "react" in deps:
-            return "react"
-        if "vue" in deps:
-            # 如果有 vite.config，使用 vite-vue 模板以获得更好的支持
-            if file_keys and any(
-                f.endswith(("vite.config.js", "vite.config.ts")) for f in file_keys
-            ):
-                return "vue"  # 前端会自动检测为 vite-vue
-            return "vue"
-    except (json.JSONDecodeError, AttributeError):
-        pass
-
-    if _has_any_file(
-        normalized_file_keys,
-        (
-            "/pages/index.tsx",
-            "/pages/index.jsx",
-            "/pages/_app.tsx",
-            "/pages/_app.jsx",
-        ),
-    ):
-        return "nextjs"
-
-    if _has_any_file(
-        normalized_file_keys,
-        (
-            "/src/App.svelte",
-            "/App.svelte",
-            "/src/main.svelte",
-            "/main.svelte",
-        ),
-    ):
-        return "svelte"
-
-    if "/angular.json" in normalized_file_keys and _has_any_file(
-        normalized_file_keys,
-        (
-            "/src/main.ts",
-            "/src/main.js",
-            "/main.ts",
-            "/main.js",
-        ),
-    ):
-        return "angular"
-
-    if _has_any_file(
-        normalized_file_keys,
-        (
-            "/src/main.jsx",
-            "/src/main.tsx",
-            "/src/index.jsx",
-            "/src/index.tsx",
-            "/main.jsx",
-            "/main.tsx",
-            "/index.jsx",
-            "/index.tsx",
-            "/App.jsx",
-            "/App.tsx",
-        ),
-    ):
-        return "react"
-
-    if _has_any_file(
-        normalized_file_keys,
-        (
-            "/src/main.vue",
-            "/src/App.vue",
-            "/App.vue",
-        ),
-    ):
-        return "vue"
-
-    if "/index.html" in normalized_file_keys:
-        return "static"
-
-    return "vanilla"
+        size = int(value)
+    except (TypeError, ValueError):
+        return None
+    return size if size >= 0 else None
 
 
-def _should_skip(rel_path: str) -> bool:
-    """检查文件是否应该跳过（忽略目录、隐藏文件、非白名单文本文件）"""
-    parts = rel_path.strip("/").split("/")
-    filename = parts[-1] if parts else ""
+async def _get_backend_file_size(backend: Any, file_path: str) -> int | None:
+    async_method = getattr(backend, "aget_file_size", None)
+    if callable(async_method):
+        try:
+            size = async_method(file_path)
+            if inspect.isawaitable(size):
+                size = await size
+            return _coerce_file_size(size)
+        except Exception as e:
+            logger.debug(f"[reveal_project] aget_file_size failed for {file_path}: {e}")
 
-    if any(p in IGNORE_DIRS or (p.startswith(".") and p not in IGNORE_DIRS) for p in parts[:-1]):
-        return True
-    if filename.startswith(".") and filename not in IGNORE_FILES:
-        return True
-    if filename in IGNORE_FILES:
-        return True
+    sync_method = getattr(backend, "get_file_size", None)
+    if callable(sync_method):
+        try:
+            return _coerce_file_size(await run_blocking_io(sync_method, file_path))
+        except Exception as e:
+            logger.debug(f"[reveal_project] get_file_size failed for {file_path}: {e}")
 
-    if filename in ALLOWED_TEXT_FILENAMES:
-        return False
+    private_method = getattr(backend, "_file_size", None)
+    if callable(private_method):
+        try:
+            return _coerce_file_size(await run_blocking_io(private_method, file_path))
+        except Exception as e:
+            logger.debug(f"[reveal_project] _file_size failed for {file_path}: {e}")
 
-    # 跳过不在白名单中的非二进制文件
-    ext = os.path.splitext(filename)[1].lower()
-    if ext not in BINARY_EXTENSIONS and ext not in TEXT_EXTENSIONS:
-        return True
-
-    return False
-
-
-def _is_binary(filename: str) -> bool:
-    """根据扩展名判断是否为二进制文件"""
-    ext = os.path.splitext(filename)[1].lower()
-    return ext in BINARY_EXTENSIONS
+    return None
 
 
-def _get_mime_type(filename: str) -> str:
-    """根据文件名获取 MIME 类型"""
-    ext = os.path.splitext(filename)[1].lower()
-
-    # 为前端文件扩展名提供明确的 MIME 类型映射
-    frontend_mime_types = {
-        ".vue": "text/plain",
-        ".svelte": "text/plain",
-        ".jsx": "text/plain",
-        ".tsx": "text/plain",
-        ".ts": "text/plain",
-        ".mts": "text/plain",
-        ".cts": "text/plain",
-        ".mjs": "text/plain",
-        ".cjs": "text/plain",
-        ".scss": "text/plain",
-        ".sass": "text/plain",
-        ".less": "text/plain",
-        ".styl": "text/plain",
-        ".json5": "text/plain",
-        ".toml": "text/plain",
-        ".yaml": "text/plain",
-        ".yml": "text/plain",
-        ".md": "text/plain",
-        ".mdx": "text/plain",
-        ".graphql": "text/plain",
-        ".gql": "text/plain",
-    }
-
-    if ext in frontend_mime_types:
-        return frontend_mime_types[ext]
-
-    mime_type, _ = mimetypes.guess_type(filename)
-    return mime_type or "application/octet-stream"
+def _append_capped(files: list[str], file_path: str | None, seen: set[str] | None = None) -> bool:
+    if not file_path:
+        return len(files) >= _get_project_scan_limit()
+    if seen is not None:
+        if file_path in seen:
+            return len(files) >= _get_project_scan_limit()
+        seen.add(file_path)
+    files.append(file_path)
+    return len(files) >= _get_project_scan_limit()
 
 
 async def _get_storage():
@@ -540,11 +208,14 @@ async def _list_project_files_via_glob(backend: Any, project_path: str) -> list[
         try:
             result = await backend.aglob(pattern, path=project_path)
             entries = result.matches or []
-            files = [
-                entry.get("path") if isinstance(entry, dict) else getattr(entry, "path", None)
-                for entry in entries
-            ]
-            return [f for f in files if f]
+            files: list[str] = []
+            for entry in entries:
+                file_path = (
+                    entry.get("path") if isinstance(entry, dict) else getattr(entry, "path", None)
+                )
+                if _append_capped(files, file_path):
+                    break
+            return files
         except Exception as e:
             logger.debug(f"aglob failed for {project_path}: {e}")
 
@@ -552,11 +223,14 @@ async def _list_project_files_via_glob(backend: Any, project_path: str) -> list[
         try:
             result = await run_blocking_io(backend.glob, pattern, project_path)
             entries = result.matches or []
-            files = [
-                entry.get("path") if isinstance(entry, dict) else getattr(entry, "path", None)
-                for entry in entries
-            ]
-            return [f for f in files if f]
+            files: list[str] = []
+            for entry in entries:
+                file_path = (
+                    entry.get("path") if isinstance(entry, dict) else getattr(entry, "path", None)
+                )
+                if _append_capped(files, file_path):
+                    break
+            return files
         except Exception as e:
             logger.debug(f"glob failed for {project_path}: {e}")
 
@@ -567,12 +241,13 @@ async def _list_project_files_via_backend_api(
     backend: Any, project_path: str
 ) -> tuple[list[str], bool]:
     """使用 backend 的原生 ls 递归列出项目文件（glob 不可用时的兜底方案）"""
-    files: set[str] = set()
+    files: list[str] = []
+    seen_files: set[str] = set()
     pending = [project_path]
     visited: set[str] = set()
     had_errors = False
 
-    while pending:
+    while pending and len(files) < _get_project_scan_limit():
         current = pending.pop()
         if current in visited:
             continue
@@ -612,7 +287,8 @@ async def _list_project_files_via_backend_api(
             if is_dir:
                 pending.append(normalized_path)
             else:
-                files.add(str(entry_path))
+                if _append_capped(files, str(entry_path), seen_files):
+                    break
 
     return sorted(files), had_errors
 
@@ -625,26 +301,32 @@ async def _list_project_files(backend: Any, project_path: str) -> list[str]:
     """
     if _is_sandbox_backend(backend):
         # 沙箱模式：shell find 最可靠
+        scan_limit = _get_project_scan_limit()
         output = await _execute_command(
             backend,
-            f'LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 find "{project_path}" -type f 2>/dev/null | head -200',
+            f'LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 find "{project_path}" -type f 2>/dev/null | head -{scan_limit}',
         )
         files: list[str] = []
+        seen_files: set[str] = set()
         if output:
             for line in output.strip().split("\n"):
                 line = line.strip()
                 if line and not line.startswith("find:"):
-                    files.append(line)
+                    if _append_capped(files, line, seen_files):
+                        break
 
         # 用原生 API 补充（处理 find 可能遗漏的情况）
-        api_files, _ = await _list_project_files_via_backend_api(backend, project_path)
-        if api_files:
-            files.extend(api_files)
+        api_files: list[str] = []
+        if len(files) < _get_project_scan_limit():
+            api_files, _ = await _list_project_files_via_backend_api(backend, project_path)
+            for file_path in api_files:
+                if _append_capped(files, file_path, seen_files):
+                    break
 
         logger.debug(
-            f"_list_project_files({project_path}) [sandbox]: find={len(files) - len(api_files)}, api={len(api_files)}, total={len(set(files))}"
+            f"_list_project_files({project_path}) [sandbox]: find={len(files) - len(api_files)}, api={len(api_files)}, total={len(files)}"
         )
-        return sorted(set(files))
+        return sorted(files)
     else:
         # 非沙箱模式：glob 高效递归
         glob_files = await _list_project_files_via_glob(backend, project_path)
@@ -661,23 +343,6 @@ async def _list_project_files(backend: Any, project_path: str) -> list[str]:
             f"_list_project_files({project_path}) [non-sandbox]: ls_fallback={len(api_files)}"
         )
         return api_files
-
-
-def _find_entry(file_keys: set[str], template: Optional[str] = None) -> Optional[str]:
-    """查找项目入口文件，优先使用模板对应的候选列表"""
-    # 按模板类型选择候选列表
-    candidates = ENTRY_CANDIDATES_BY_TEMPLATE.get(template or "_default", [])
-    if not candidates:
-        candidates = ENTRY_CANDIDATES_BY_TEMPLATE["_default"]
-    for candidate in candidates:
-        if candidate in file_keys:
-            return candidate
-    return None
-
-
-def _resolve_reveal_mode(entry: Optional[str]) -> RevealMode:
-    """根据是否找到可运行入口，决定展示为项目还是普通文件夹。"""
-    return "project" if entry else "folder"
 
 
 def _get_base_url(runtime: Any) -> str:
@@ -720,18 +385,18 @@ async def _upload_file(
 ) -> Optional[tuple[str, dict[str, Any], Optional[str], Optional[str]]]:
     """下载并上传单个文件到 OSS，返回 (rel_path, file_info, package_json_content)"""
     async with semaphore:
+        max_size = _get_storage_internal_upload_max_size(storage)
+        known_size = await _get_backend_file_size(backend, file_path)
+        if known_size is not None and known_size > max_size:
+            logger.info(f"Skipping large file before download: {rel_path} ({known_size} bytes)")
+            return None
+
         content_bytes = await _download_file_from_backend(backend, file_path)
         if content_bytes is None:
             logger.debug(f"Failed to read: {rel_path}")
             return rel_path, {}, None, "read_failed"
 
-        max_size = getattr(storage, "_config", None)
-        max_size = (
-            getattr(max_size, "internal_max_upload_size", 50 * 1024 * 1024)
-            if max_size
-            else 50 * 1024 * 1024
-        )
-        if len(content_bytes) > max_size:  # type: ignore[operator]
+        if len(content_bytes) > max_size:
             logger.info(f"Skipping large file: {rel_path} ({len(content_bytes)} bytes)")
             return None
 
@@ -741,13 +406,27 @@ async def _upload_file(
 
         upload_filename = rel_path.lstrip("/")
         content_type = mime_type if is_binary else "text/plain"
+        package_json_content = None
+        if rel_path == "/package.json":
+            try:
+                package_json_content = content_bytes.decode("utf-8")
+            except UnicodeDecodeError:
+                pass
 
-        upload_result = await storage.upload_bytes(
-            data=content_bytes,
-            folder=folder_name,
-            filename=upload_filename,
-            content_type=content_type,
-        )
+        with SpooledTemporaryFile(
+            max_size=PROJECT_UPLOAD_SPOOL_MEMORY_LIMIT,
+            mode="w+b",
+        ) as spooled:
+            await run_blocking_io(spooled.write, content_bytes)
+            del content_bytes
+            await run_blocking_io(spooled.seek, 0)
+            upload_result = await storage.upload_file(
+                file=spooled,
+                folder=folder_name,
+                filename=upload_filename,
+                content_type=content_type,
+                skip_size_limit=True,
+            )
 
         proxy_url = f"{base_url}/api/upload/file/{upload_result.key}"
 
@@ -759,15 +438,48 @@ async def _upload_file(
         if is_binary:
             file_info["content_type"] = upload_result.content_type or mime_type
 
-        # 提取 package.json 内容
-        package_json_content = None
-        if rel_path == "/package.json":
-            try:
-                package_json_content = content_bytes.decode("utf-8")
-            except UnicodeDecodeError:
-                pass
-
         return rel_path, file_info, package_json_content, None
+
+
+async def _upload_project_files_bounded(
+    storage: Any,
+    backend: Any,
+    upload_tasks: list[tuple[str, str]],
+    folder_name: str,
+    base_url: str,
+) -> list[Optional[tuple[str, dict[str, Any], Optional[str], Optional[str]]]]:
+    """Upload project files without creating one coroutine per file up front."""
+    if not upload_tasks:
+        return []
+
+    semaphore = asyncio.Semaphore(UPLOAD_CONCURRENCY)
+    results: list[Optional[tuple[str, dict[str, Any], Optional[str], Optional[str]]]] = []
+    next_index = 0
+    lock = asyncio.Lock()
+    worker_count = min(UPLOAD_CONCURRENCY, len(upload_tasks))
+
+    async def _worker() -> None:
+        nonlocal next_index
+        while True:
+            async with lock:
+                if next_index >= len(upload_tasks):
+                    return
+                file_path, rel_path = upload_tasks[next_index]
+                next_index += 1
+            results.append(
+                await _upload_file(
+                    storage,
+                    backend,
+                    file_path,
+                    rel_path,
+                    folder_name,
+                    base_url,
+                    semaphore,
+                )
+            )
+
+    await asyncio.gather(*(_worker() for _ in range(worker_count)))
+    return results
 
 
 @tool
@@ -806,14 +518,13 @@ async def reveal_project(
     backend = get_backend_from_runtime(runtime)
 
     if backend is None:
-        return json.dumps(
+        return await _json_dumps_result(
             {
                 "type": "project_reveal",
                 "version": 2,
                 "error": "backend_not_available",
                 "message": "无法访问文件系统",
-            },
-            ensure_ascii=False,
+            }
         )
 
     project_path = project_path.rstrip("/")
@@ -827,14 +538,13 @@ async def reveal_project(
         all_files = await _list_project_files(backend, project_path)
 
         if not all_files:
-            return json.dumps(
+            return await _json_dumps_result(
                 {
                     "type": "project_reveal",
                     "version": 2,
                     "error": "no_files_found",
                     "message": f"在 {project_path} 中没有找到文件",
-                },
-                ensure_ascii=False,
+                }
             )
 
         logger.info(f"Found {len(all_files)} files in {project_path}")
@@ -842,6 +552,7 @@ async def reveal_project(
         # 预处理：计算 rel_path 并过滤需要跳过的文件
         upload_tasks: list[tuple[str, str]] = []  # (file_path, rel_path)
         skipped_files = 0
+        skipped_due_to_file_limit = 0
         for file_path in all_files:
             rel_path = (
                 file_path[len(project_path) :] if file_path.startswith(project_path) else file_path
@@ -849,17 +560,21 @@ async def reveal_project(
             if not rel_path.startswith("/"):
                 rel_path = "/" + rel_path
             if not _should_skip(rel_path):
+                if len(upload_tasks) >= MAX_PROJECT_FILES:
+                    skipped_due_to_file_limit += 1
+                    continue
                 upload_tasks.append((file_path, rel_path))
             else:
                 skipped_files += 1
+        skipped_files += skipped_due_to_file_limit
 
-        # 并发上传所有文件到 OSS
-        semaphore = asyncio.Semaphore(UPLOAD_CONCURRENCY)
-        results = await asyncio.gather(
-            *[
-                _upload_file(storage, backend, fp, rp, folder_name, base_url, semaphore)
-                for fp, rp in upload_tasks
-            ],
+        # 并发上传到 OSS，但只保留固定数量的 worker/coroutine，避免大目录放大内存。
+        results = await _upload_project_files_bounded(
+            storage,
+            backend,
+            upload_tasks,
+            folder_name,
+            base_url,
         )
 
         # 构建 manifest
@@ -878,26 +593,28 @@ async def reveal_project(
                 package_json_content = pkg_content
 
         if not files_manifest:
-            return json.dumps(
+            return await _json_dumps_result(
                 {
                     "type": "project_reveal",
                     "version": 2,
                     "error": "no_files_found",
                     "message": f"在 {project_path} 中没有找到可上传的文件",
                     "scanned_files": len(all_files),
-                },
-                ensure_ascii=False,
+                }
             )
 
         # 异步清理同名项目的旧版本（不阻塞返回）
-        task = asyncio.create_task(_cleanup_old_versions(storage, project_name))
-        task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+        _project_cleanup_tasks.create_task(_cleanup_old_versions(storage, project_name))
 
         # 检测模板
         file_keys = set(files_manifest.keys())
         detected_template = template
         if not detected_template:
-            detected_template = detect_template(package_json_content or "{}", file_keys)
+            detected_template = await run_blocking_io(
+                detect_template,
+                package_json_content or "{}",
+                file_keys,
+            )
         entry = _find_entry(file_keys, detected_template)
         mode = _resolve_reveal_mode(entry)
 
@@ -915,6 +632,7 @@ async def reveal_project(
             "scanned_file_count": len(all_files),
             "filtered_file_count": len(upload_tasks),
             "skipped_file_count": skipped_files,
+            "skipped_due_to_file_limit_count": skipped_due_to_file_limit,
             "read_failed_count": len(failed_reads),
         }
         if failed_reads:
@@ -975,18 +693,17 @@ async def reveal_project(
         except Exception as e:
             logger.warning(f"Failed to index revealed project {project_name}: {e}")
 
-        return json.dumps(result, ensure_ascii=False)
+        return await _json_dumps_result(result)
 
     except Exception as e:
         logger.error(f"Error revealing project {project_path}: {e}", exc_info=True)
-        return json.dumps(
+        return await _json_dumps_result(
             {
                 "type": "project_reveal",
                 "version": 2,
                 "error": str(e),
                 "message": f"读取项目失败: {e}",
-            },
-            ensure_ascii=False,
+            }
         )
 
 

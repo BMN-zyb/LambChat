@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from src.api.routes.chat import validate_agent_model_access
+from src.infra.agent import model_access
 from src.kernel.exceptions import AuthorizationError
 from src.kernel.schemas.model import ModelConfig, ModelProfile
 from src.kernel.schemas.user import TokenPayload
@@ -60,6 +61,8 @@ class _AgentConfigStorage:
             return ["allowed-enabled"]
         if role_id == "role-empty":
             return []
+        if role_id == "role-large":
+            return [f"model-{index}" for index in range(model_access.ROLE_MODEL_ACCESS_LIMIT + 25)]
         return None
 
 
@@ -77,6 +80,8 @@ class _RoleManager:
             return _Role()
         if role_name == "empty":
             return _EmptyRole()
+        if role_name == "large":
+            return type("LargeRole", (), {"id": "role-large"})()
         return None
 
 
@@ -182,3 +187,22 @@ async def test_validate_agent_model_access_rejects_when_role_allows_no_models(
             {"model_id": "allowed-enabled"},
             user,
         )
+
+
+@pytest.mark.asyncio
+async def test_resolve_user_allowed_model_ids_caps_large_role_model_lists(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "src.infra.agent.config_storage.get_agent_config_storage",
+        lambda: _AgentConfigStorage(),
+    )
+    monkeypatch.setattr(
+        "src.infra.role.manager.get_role_manager",
+        lambda: _RoleManager(),
+    )
+    user = TokenPayload(sub="user-1", username="tester", roles=["large"])
+
+    allowed = await model_access.resolve_user_allowed_model_ids(user)
+
+    assert allowed == [f"model-{index}" for index in range(model_access.ROLE_MODEL_ACCESS_LIMIT)]

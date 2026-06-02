@@ -4,7 +4,7 @@
 
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from starlette.responses import Response
 
 from src.api.deps import require_permissions
@@ -16,8 +16,8 @@ router = APIRouter()
 
 @router.get("/", response_model=UserListResponse)
 async def list_users(
-    skip: int = 0,
-    limit: int = 20,
+    skip: int = Query(0, ge=0),
+    limit: int = Query(20, ge=1, le=100),
     search: Optional[str] = None,
     _: None = Depends(require_permissions("user:read")),
 ):

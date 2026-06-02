@@ -8,7 +8,8 @@ Agent 路由
 import asyncio
 import json
 import uuid
-from typing import Optional
+from collections.abc import Awaitable, Callable
+from typing import Optional, TypeVar
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
@@ -16,6 +17,7 @@ from fastapi.responses import StreamingResponse
 from src.agents.core.base import AgentFactory
 from src.api.deps import get_current_user_optional, get_current_user_required
 from src.api.routes.chat import validate_agent_model_access
+from src.infra.async_utils import run_blocking_io
 from src.infra.logging import get_logger
 from src.kernel.config import settings
 from src.kernel.exceptions import AuthorizationError
@@ -29,6 +31,113 @@ from src.kernel.schemas.user import TokenPayload
 
 router = APIRouter()
 logger = get_logger(__name__)
+
+AGENT_ROLE_FETCH_CONCURRENCY = 8
+AGENT_ROLE_LOOKUP_LIMIT = 100
+AGENT_SSE_DATA_MAX_BYTES = 256 * 1024
+T = TypeVar("T")
+
+
+async def _gather_limited(
+    factories: list[Callable[[], Awaitable[T]]],
+    *,
+    limit: int = AGENT_ROLE_FETCH_CONCURRENCY,
+) -> list[T]:
+    if not factories:
+        return []
+
+    results: list[T | None] = [None] * len(factories)
+    next_index = 0
+    lock = asyncio.Lock()
+    worker_count = min(max(1, limit), len(factories))
+
+    async def _worker() -> None:
+        nonlocal next_index
+        while True:
+            async with lock:
+                if next_index >= len(factories):
+                    return
+                index = next_index
+                next_index += 1
+            results[index] = await factories[index]()
+
+    await asyncio.gather(*(_worker() for _ in range(worker_count)))
+    return [result for result in results if result is not None]
+
+
+def _bounded_role_names(role_names: list[str] | None) -> list[str]:
+    if not role_names:
+        return []
+    bounded = []
+    seen = set()
+    for role_name in role_names:
+        if role_name in seen:
+            continue
+        seen.add(role_name)
+        bounded.append(role_name)
+        if len(bounded) >= AGENT_ROLE_LOOKUP_LIMIT:
+            break
+    return bounded
+
+
+def _role_agent_counts(role_agent_map: dict[str, list[str] | None]) -> dict[str, int]:
+    return {role_id: len(agents or []) for role_id, agents in role_agent_map.items()}
+
+
+def _estimated_json_data_bytes(data: object) -> int:
+    if data is None or isinstance(data, (bool, int, float)):
+        return len(json.dumps(data).encode("utf-8"))
+    if isinstance(data, str):
+        return len(data.encode("utf-8")) + 2
+    if isinstance(data, dict):
+        total = 2
+        for index, (key, value) in enumerate(data.items()):
+            if index:
+                total += 1
+            total += len(str(key).encode("utf-8")) + 3
+            total += _estimated_json_data_bytes(value)
+        return total
+    if isinstance(data, (list, tuple)):
+        total = 2
+        for index, item in enumerate(data):
+            if index:
+                total += 1
+            total += _estimated_json_data_bytes(item)
+        return total
+    return len(str(data).encode("utf-8")) + 2
+
+
+def _agent_sse_payload_too_large_event() -> str:
+    return 'event: error\ndata: {"error":"event_payload_too_large"}\n\n'
+
+
+def _json_dumps_agent_sse_data_limited(data: object) -> str | None:
+    if _estimated_json_data_bytes(data) > AGENT_SSE_DATA_MAX_BYTES:
+        return None
+
+    encoder = json.JSONEncoder(ensure_ascii=False)
+    chunks: list[str] = []
+    total = 0
+    for chunk in encoder.iterencode(data):
+        total += len(chunk.encode("utf-8"))
+        if total > AGENT_SSE_DATA_MAX_BYTES:
+            return None
+        chunks.append(chunk)
+    return "".join(chunks)
+
+
+def _format_agent_sse_event(event: dict) -> str:
+    data = event["data"]
+    if isinstance(data, str):
+        if len(data.encode("utf-8")) > AGENT_SSE_DATA_MAX_BYTES:
+            return _agent_sse_payload_too_large_event()
+        data_str = data
+    else:
+        data_str = _json_dumps_agent_sse_data_limited(data)
+        if data_str is None:
+            return _agent_sse_payload_too_large_event()
+    return f"event: {event['event']}\ndata: {data_str}\n\n"
+
 
 # 内置工具定义（带参数）
 BUILTIN_TOOLS = [
@@ -258,9 +367,13 @@ async def list_agents(
     db_user = await user_storage.get_by_id(optional_user.sub)
 
     # 使用数据库中的角色
-    user_roles = db_user.roles if db_user else optional_user.roles
+    user_roles = _bounded_role_names(db_user.roles if db_user else optional_user.roles)
     logger.info(
-        f"[Agents API] user_id={optional_user.sub}, db_user={db_user}, user_roles_from_db={user_roles}, user_roles_from_token={optional_user.roles}"
+        "[Agents API] user_id=%s, db_user_found=%s, user_role_count=%s, token_role_count=%s",
+        optional_user.sub,
+        db_user is not None,
+        len(user_roles),
+        len(optional_user.roles or []),
     )
 
     storage = get_agent_config_storage()
@@ -285,17 +398,26 @@ async def list_agents(
                 return role.id, role_agents, role_name
             return None
 
-        role_results = await asyncio.gather(*[_fetch_role(rn) for rn in user_roles])
+        role_results = await _gather_limited(
+            [lambda role_name=role_name: _fetch_role(role_name) for role_name in user_roles]
+        )
         for result in role_results:
             if result is not None:
                 rid, role_agents, role_name = result
                 role_ids.append(rid)
                 role_agent_map[rid] = role_agents
                 logger.info(
-                    f"[Agents API] role_name={role_name}, role_id={rid}, role_agents={role_agents}"
+                    "[Agents API] role_name=%s, role_id=%s, role_agent_count=%s",
+                    role_name,
+                    rid,
+                    len(role_agents or []),
                 )
 
-    logger.info(f"[Agents API] final role_ids={role_ids}, role_agent_map={role_agent_map}")
+    logger.info(
+        "[Agents API] final role_count=%s, role_agent_counts=%s",
+        len(role_ids),
+        _role_agent_counts(role_agent_map),
+    )
 
     from src.infra.agent.model_access import resolve_user_allowed_model_ids
 
@@ -389,12 +511,7 @@ async def chat_stream(
             ):
                 # event 格式: {"event": "xxx", "data": {...}}
                 # 确保 data 被正确序列化为 JSON
-                data_str = (
-                    event["data"]
-                    if isinstance(event["data"], str)
-                    else json.dumps(event["data"], ensure_ascii=False)
-                )
-                yield f"event: {event['event']}\ndata: {data_str}\n\n"
+                yield await run_blocking_io(_format_agent_sse_event, event)
         finally:
             # 清理请求上下文，防止 contextvars 泄漏
             from src.infra.logging.context import TraceContext
@@ -425,7 +542,7 @@ async def list_tools(
         if agent_id not in _AGENT_REGISTRY:
             from src.agents import discover_agents
 
-            discover_agents()
+            await run_blocking_io(discover_agents)
         agent_cls = _AGENT_REGISTRY.get(agent_id)
         if not agent_cls:
             logger.warning(

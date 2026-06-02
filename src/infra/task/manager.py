@@ -24,7 +24,7 @@ from .heartbeat import TaskHeartbeat
 from .pubsub import TaskPubSub
 from .recovery import TaskRecoveryService
 from .run_ids import generate_run_id
-from .startup_cleanup import TaskStartupCleanupService
+from .startup_cleanup import TaskStartupCleanupService, _gather_limited
 from .status import TaskStatus
 from .status_queries import TaskStatusQueries
 
@@ -69,6 +69,8 @@ class BackgroundTaskManager:
         self._cancellation = TaskCancellation(self._lock, self._tasks)
         self._pubsub = TaskPubSub(self._lock, self._tasks)
         self._executor: Optional[TaskExecutor] = None  # Lazy init in submit
+        self._arq_pool: Any | None = None
+        self._release_tasks: set[asyncio.Task[None]] = set()
 
     @property
     def storage(self) -> SessionStorage:
@@ -82,6 +84,33 @@ class BackgroundTaskManager:
         if self._executor is None:
             self._executor = TaskExecutor(self.storage, self._run_info, self._heartbeat)
         return self._executor
+
+    async def _get_arq_pool(self) -> Any:
+        """Return a manager-owned arq pool, creating it lazily."""
+        if self._arq_pool is None:
+            self._arq_pool = await create_pool(
+                build_arq_redis_settings(settings),
+                default_queue_name=settings.ARQ_QUEUE_NAME,
+            )
+        return self._arq_pool
+
+    async def _close_arq_pool(self) -> None:
+        """Close the manager-owned arq pool if it was created."""
+        arq_pool = self._arq_pool
+        self._arq_pool = None
+        if arq_pool is None:
+            return
+
+        close = getattr(arq_pool, "close", None)
+        if close is not None:
+            result = close()
+            if asyncio.iscoroutine(result):
+                await result
+        wait_closed = getattr(arq_pool, "wait_closed", None)
+        if wait_closed is not None:
+            result = wait_closed()
+            if asyncio.iscoroutine(result):
+                await result
 
     async def _persist_initial_user_message(
         self,
@@ -194,8 +223,8 @@ class BackgroundTaskManager:
             return session
         return await self.storage.get_by_id(session_id)
 
-    async def _release_recovery_lock(self, lock_key: str) -> None:
-        await self._recovery_service().release_recovery_lock(lock_key)
+    async def _release_recovery_lock(self, lock_key: str, token: str) -> None:
+        await self._recovery_service().release_recovery_lock(lock_key, token)
 
     async def submit(
         self,
@@ -370,13 +399,6 @@ class BackgroundTaskManager:
                 )
                 user_message_written = True
 
-            self._run_info[run_id] = {
-                "session_id": session_id,
-                "trace_id": trace_id,
-                "agent_id": agent_id,
-                "user_id": user_id,
-                "user_message_written": user_message_written,
-            }
             await payload_store.save(
                 run_id,
                 {
@@ -401,27 +423,9 @@ class BackgroundTaskManager:
                 },
             )
 
-        should_close_pool = False
         if arq_pool is None:
-            arq_pool = await create_pool(
-                build_arq_redis_settings(settings),
-                default_queue_name=settings.ARQ_QUEUE_NAME,
-            )
-            should_close_pool = True
-        try:
-            await arq_pool.enqueue_job("run_agent_task", run_id, _job_id=run_id)
-        finally:
-            if should_close_pool:
-                close = getattr(arq_pool, "close", None)
-                if close is not None:
-                    result = close()
-                    if asyncio.iscoroutine(result):
-                        await result
-                wait_closed = getattr(arq_pool, "wait_closed", None)
-                if wait_closed is not None:
-                    result = wait_closed()
-                    if asyncio.iscoroutine(result):
-                        await result
+            arq_pool = await self._get_arq_pool()
+        await arq_pool.enqueue_job("run_agent_task", run_id, _job_id=run_id)
 
         logger.info(
             "Task submitted to arq: session=%s, run_id=%s, agent=%s", session_id, run_id, agent_id
@@ -440,9 +444,25 @@ class BackgroundTaskManager:
         # 释放并发槽位
         user_id = run_info.get("user_id") if run_info else None
         if user_id:
-            asyncio.get_event_loop().call_soon(
-                lambda: asyncio.ensure_future(self._release_concurrency(user_id, run_id))
-            )
+            release_task = asyncio.create_task(self._release_concurrency(user_id, run_id))
+            self._release_tasks.add(release_task)
+            release_task.add_done_callback(self._on_release_task_done)
+
+    def _on_release_task_done(self, task: asyncio.Task[None]) -> None:
+        self._release_tasks.discard(task)
+        if task.cancelled():
+            return
+        try:
+            task.result()
+        except Exception as e:
+            logger.warning("Failed to release concurrency slot after task completion: %s", e)
+
+    async def _drain_release_tasks(self) -> None:
+        tasks = list(self._release_tasks)
+        if not tasks:
+            return
+        await asyncio.gather(*tasks, return_exceptions=True)
+        self._release_tasks.difference_update(tasks)
 
     def pop_pending_task(self, run_id: str) -> Optional[Dict[str, Any]]:
         """Pop and return a pending task context (used by concurrency limiter to dispatch queued tasks)."""
@@ -653,7 +673,9 @@ class BackgroundTaskManager:
             from .concurrency import get_concurrency_limiter
 
             limiter = get_concurrency_limiter()
-            for run_id, task in self._tasks.items():
+            shutdown_items = list(self._tasks.items())
+
+            async def _shutdown_run(run_id: str, task: asyncio.Task) -> None:
                 if not task.done():
                     task.cancel()
 
@@ -678,10 +700,36 @@ class BackgroundTaskManager:
                                 )
                     logger.warning(f"Task marked as failed (shutdown): run_id={run_id}")
 
+            async def _await_cancelled_run(run_id: str, task: asyncio.Task) -> None:
+                if task.done():
+                    return
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+                except Exception as e:
+                    logger.warning("Task raised while shutting down: run_id=%s error=%s", run_id, e)
+
+            await _gather_limited(
+                [
+                    lambda run_id=run_id, task=task: _shutdown_run(run_id, task)
+                    for run_id, task in shutdown_items
+                ]
+            )
+            await _gather_limited(
+                [
+                    lambda run_id=run_id, task=task: _await_cancelled_run(run_id, task)
+                    for run_id, task in shutdown_items
+                ]
+            )
+
             self._tasks.clear()
             self._run_info.clear()
             self._pending_tasks.clear()
-            logger.info("Task manager shutdown complete")
+
+        await self._drain_release_tasks()
+        await self._close_arq_pool()
+        logger.info("Task manager shutdown complete")
 
 
 # Singleton instance

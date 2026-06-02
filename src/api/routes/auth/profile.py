@@ -13,6 +13,10 @@ from src.kernel.schemas.user import TokenPayload, User, UserUpdate
 
 router = APIRouter()
 logger = get_logger(__name__)
+MAX_USER_METADATA_LIST_ITEMS = 100
+MAX_PINNED_MODEL_IDS = 10
+MAX_PINNED_PRESET_IDS = 10
+MAX_FAVORITE_PRESET_IDS = 100
 
 
 class AvatarUpdateRequest(BaseModel):
@@ -31,6 +35,24 @@ class MetadataUpdateRequest(BaseModel):
     """Request schema for updating user metadata (partial merge)"""
 
     metadata: dict
+
+
+def _validate_bounded_string_list(
+    values: object,
+    *,
+    field_name: str,
+    max_items: int = MAX_USER_METADATA_LIST_ITEMS,
+) -> None:
+    if not isinstance(values, list) or not all(isinstance(item, str) for item in values):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid {field_name}: must be a list of strings.",
+        )
+    if len(values) > max_items:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Too many {field_name}: maximum {max_items} allowed.",
+        )
 
 
 @router.post("/update-avatar")
@@ -139,50 +161,41 @@ async def update_user_metadata(
 
     # Validate disabled_tools if provided
     if "disabled_tools" in request.metadata:
-        disabled_tools = request.metadata["disabled_tools"]
-        if not isinstance(disabled_tools, list) or not all(
-            isinstance(t, str) for t in disabled_tools
-        ):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Invalid disabled_tools: must be a list of strings.",
-            )
+        _validate_bounded_string_list(
+            request.metadata["disabled_tools"],
+            field_name="disabled_tools",
+        )
 
     # Validate pinned_model_ids if provided
     if "pinned_model_ids" in request.metadata:
-        pinned = request.metadata["pinned_model_ids"]
-        if not isinstance(pinned, list) or not all(isinstance(m, str) for m in pinned):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Invalid pinned_model_ids: must be a list of strings.",
-            )
-        if len(pinned) > 10:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Too many pinned models: maximum 10 allowed.",
-            )
+        _validate_bounded_string_list(
+            request.metadata["pinned_model_ids"],
+            field_name="pinned_model_ids",
+            max_items=MAX_PINNED_MODEL_IDS,
+        )
 
     # Validate pinned_preset_ids if provided
     if "pinned_preset_ids" in request.metadata:
-        pinned = request.metadata["pinned_preset_ids"]
-        if not isinstance(pinned, list) or not all(isinstance(m, str) for m in pinned):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Invalid pinned_preset_ids: must be a list of strings.",
-            )
-        if len(pinned) > 10:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Too many pinned presets: maximum 10 allowed.",
-            )
+        _validate_bounded_string_list(
+            request.metadata["pinned_preset_ids"],
+            field_name="pinned_preset_ids",
+            max_items=MAX_PINNED_PRESET_IDS,
+        )
 
     # Validate favorite_preset_ids if provided
     if "favorite_preset_ids" in request.metadata:
-        favs = request.metadata["favorite_preset_ids"]
-        if not isinstance(favs, list) or not all(isinstance(f, str) for f in favs):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Invalid favorite_preset_ids: must be a list of strings.",
+        _validate_bounded_string_list(
+            request.metadata["favorite_preset_ids"],
+            field_name="favorite_preset_ids",
+            max_items=MAX_FAVORITE_PRESET_IDS,
+        )
+
+    # Validate user skill preference lists if provided
+    for field_name in ("disabled_skills", "pinned_skill_names", "favorite_skill_names"):
+        if field_name in request.metadata:
+            _validate_bounded_string_list(
+                request.metadata[field_name],
+                field_name=field_name,
             )
 
     updated_user = await storage.update_metadata(current_user.sub, request.metadata)

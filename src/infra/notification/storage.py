@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import timezone
 from enum import Enum
 from typing import Optional
 
@@ -19,6 +18,12 @@ from src.kernel.schemas.notification import (
 )
 
 logger = get_logger(__name__)
+
+NOTIFICATION_LIST_LIMIT_MAX = 100
+
+
+def _bounded_limit(limit: int) -> int:
+    return min(max(int(limit), 1), NOTIFICATION_LIST_LIMIT_MAX)
 
 
 class NotificationStorage:
@@ -83,6 +88,7 @@ class NotificationStorage:
     async def list_notifications(
         self, skip: int = 0, limit: int = 50
     ) -> tuple[list[Notification], int]:
+        limit = _bounded_limit(limit)
         total = await self.collection.count_documents({})
         cursor = self.collection.find().sort("created_at", -1).skip(skip).limit(limit)
         items = []
@@ -135,33 +141,60 @@ class NotificationStorage:
     async def get_active_notifications(self, user_id: str, limit: int = 5) -> list[Notification]:
         """Get active notifications that the user hasn't dismissed, sorted by created_at desc."""
         now = utc_now()
+        limit = _bounded_limit(limit)
 
-        dismissed = await self.dismissal_collection.distinct(
-            "notification_id", {"user_id": user_id}
-        )
+        pipeline = [
+            {
+                "$match": {
+                    "is_active": True,
+                    "$and": [
+                        {
+                            "$or": [
+                                {"start_time": {"$exists": False}},
+                                {"start_time": None},
+                                {"start_time": {"$lte": now}},
+                            ]
+                        },
+                        {
+                            "$or": [
+                                {"end_time": {"$exists": False}},
+                                {"end_time": None},
+                                {"end_time": {"$gte": now}},
+                            ]
+                        },
+                    ],
+                }
+            },
+            {"$sort": {"created_at": -1}},
+            {
+                "$lookup": {
+                    "from": "notification_dismissals",
+                    "let": {"notification_id": {"$toString": "$_id"}},
+                    "pipeline": [
+                        {
+                            "$match": {
+                                "$expr": {
+                                    "$and": [
+                                        {"$eq": ["$notification_id", "$$notification_id"]},
+                                        {"$eq": ["$user_id", user_id]},
+                                    ]
+                                }
+                            }
+                        },
+                        {"$limit": 1},
+                    ],
+                    "as": "dismissals",
+                }
+            },
+            {"$match": {"dismissals": {"$eq": []}}},
+            {"$limit": limit},
+        ]
 
-        query: dict = {
-            "is_active": True,
-        }
-        if dismissed:
-            query["_id"] = {"$nin": [ObjectId(d) for d in dismissed]}
-
-        cursor = self.collection.find(query).sort("created_at", -1).limit(limit)
+        cursor = self.collection.aggregate(pipeline)
         results = []
         async for doc in cursor:
-            start = doc.get("start_time")
-            end = doc.get("end_time")
-            if start:
-                if start.tzinfo is None:
-                    start = start.replace(tzinfo=timezone.utc)
-                if start > now:
-                    continue
-            if end:
-                if end.tzinfo is None:
-                    end = end.replace(tzinfo=timezone.utc)
-                if end < now:
-                    continue
             doc["id"] = str(doc.pop("_id"))
+            doc.pop("dismissals", None)
             results.append(Notification.model_validate(doc))
         return results
 

@@ -11,6 +11,8 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
+from src.infra.async_utils import run_blocking_io
+
 # Known binary file extensions (files that should go to S3, not MongoDB text storage)
 BINARY_EXTENSIONS: set[str] = {
     # Images
@@ -208,6 +210,11 @@ def parse_binary_ref(content: str) -> Optional[SkillBinaryRef]:
     except (json.JSONDecodeError, Exception):
         pass
     return None
+
+
+async def parse_binary_ref_async(content: str) -> Optional[SkillBinaryRef]:
+    """Detect and parse a binary reference off the event loop."""
+    return await run_blocking_io(parse_binary_ref, content)
 
 
 def guess_mime_type(filename: str) -> str:

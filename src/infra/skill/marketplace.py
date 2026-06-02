@@ -1,4 +1,4 @@
-# src/infra/skill/marketplace.py
+import re
 from typing import TYPE_CHECKING, Any, Optional
 
 from bson import ObjectId
@@ -22,6 +22,11 @@ from src.kernel.config import settings
 logger = get_logger(__name__)
 
 MAX_ZIP_SIZE = 10 * 1024 * 1024  # 10MB
+MARKETPLACE_FILE_COPY_BATCH_SIZE = 25
+MARKETPLACE_FILES_PER_SKILL_LIMIT = 100
+MARKETPLACE_USER_PUBLISHED_LIMIT = 1000
+MARKETPLACE_TAG_SCAN_LIMIT = 1000
+MARKETPLACE_TAG_LIST_LIMIT = 200
 
 
 if TYPE_CHECKING:
@@ -149,10 +154,11 @@ class MarketplaceStorage:
         if tags:
             query["tags"] = {"$all": tags}
         if search:
+            safe_search = re.escape(search)
             search_or = [
-                {"skill_name": {"$regex": search, "$options": "i"}},
-                {"description": {"$regex": search, "$options": "i"}},
-                {"tags": {"$elemMatch": {"$regex": search, "$options": "i"}}},
+                {"skill_name": {"$regex": safe_search, "$options": "i"}},
+                {"description": {"$regex": safe_search, "$options": "i"}},
+                {"tags": {"$elemMatch": {"$regex": safe_search, "$options": "i"}}},
             ]
             if "$or" in query:
                 # 合并 visibility $or 和 search $or
@@ -160,22 +166,30 @@ class MarketplaceStorage:
             else:
                 query["$or"] = search_or
 
-        # 使用 $lookup 一次获取文件数量，避免 N+1 查询
+        # Page marketplace metadata first, then count files without materializing
+        # every file document into the aggregation result.
         pipeline: list[dict[str, Any]] = [
             {"$match": query},
-            {
-                "$lookup": {
-                    "from": SKILL_MARKETPLACE_FILES_COLLECTION,
-                    "localField": "skill_name",
-                    "foreignField": "skill_name",
-                    "as": "_files",
-                }
-            },
-            {"$addFields": {"_file_count": {"$size": "$_files"}}},
-            {"$unset": "_files"},
             {"$sort": {"updated_at": -1}},
             {"$skip": skip},
             {"$limit": limit},
+            {
+                "$lookup": {
+                    "from": SKILL_MARKETPLACE_FILES_COLLECTION,
+                    "let": {"skill": "$skill_name"},
+                    "pipeline": [
+                        {"$match": {"$expr": {"$eq": ["$skill_name", "$$skill"]}}},
+                        {"$count": "count"},
+                    ],
+                    "as": "_file_count_docs",
+                }
+            },
+            {
+                "$addFields": {
+                    "_file_count": {"$ifNull": [{"$first": "$_file_count_docs.count"}, 0]}
+                }
+            },
+            {"$unset": "_file_count_docs"},
         ]
 
         docs = []
@@ -347,11 +361,34 @@ class MarketplaceStorage:
     # 发布状态查询
     # ==========================================
 
-    async def get_user_published_skills(self, user_id: str) -> dict[str, dict[str, Any]]:
+    async def get_user_published_skills(
+        self,
+        user_id: str,
+        *,
+        skill_names: list[str] | None = None,
+    ) -> dict[str, dict[str, Any]]:
         """获取用户已发布的 Skill 状态 {skill_name: {is_active, ...}}"""
         collection = self._get_meta_collection()
+        query: dict[str, Any] = {"created_by": user_id}
+        limit = MARKETPLACE_USER_PUBLISHED_LIMIT
+        if skill_names is not None:
+            names: list[str] = []
+            seen: set[str] = set()
+            for name in skill_names:
+                if not isinstance(name, str) or not name or name in seen:
+                    continue
+                seen.add(name)
+                names.append(name)
+                if len(names) >= MARKETPLACE_USER_PUBLISHED_LIMIT:
+                    break
+            if not names:
+                return {}
+            query["skill_name"] = {"$in": names}
+            limit = len(names)
+
         result: dict[str, dict[str, Any]] = {}
-        async for doc in collection.find({"created_by": user_id}):
+        cursor = collection.find(query, {"skill_name": 1, "is_active": 1}).limit(limit)
+        async for doc in cursor:
             result[doc["skill_name"]] = {
                 "is_active": doc.get("is_active", True),
             }
@@ -365,9 +402,40 @@ class MarketplaceStorage:
         """获取商城 Skill 所有文件"""
         collection = self._get_files_collection()
         files: dict[str, str] = {}
-        async for doc in collection.find({"skill_name": skill_name}):
+        cursor = collection.find(
+            {"skill_name": skill_name},
+            {"_id": 0, "file_path": 1, "content": 1},
+        ).limit(MARKETPLACE_FILES_PER_SKILL_LIMIT)
+        async for doc in cursor:
             files[doc["file_path"]] = doc["content"]
         return files
+
+    async def iter_marketplace_file_batches(
+        self,
+        skill_name: str,
+        *,
+        batch_size: int = MARKETPLACE_FILE_COPY_BATCH_SIZE,
+    ):
+        """Yield marketplace files in bounded batches without materializing all contents."""
+        collection = self._get_files_collection()
+        size = max(1, int(batch_size))
+        cursor = (
+            collection.find(
+                {"skill_name": skill_name},
+                {"_id": 0, "file_path": 1, "content": 1},
+            )
+            .sort("file_path", 1)
+            .limit(MARKETPLACE_FILES_PER_SKILL_LIMIT)
+            .batch_size(size)
+        )
+        batch: dict[str, str] = {}
+        async for doc in cursor:
+            batch[doc["file_path"]] = doc.get("content", "")
+            if len(batch) >= size:
+                yield batch
+                batch = {}
+        if batch:
+            yield batch
 
     async def get_marketplace_file(self, skill_name: str, file_path: str) -> Optional[str]:
         """获取商城 Skill 单个文件"""
@@ -397,21 +465,24 @@ class MarketplaceStorage:
         """批量同步商城 Skill 文件"""
         if not files:
             return
+        if len(files) > MARKETPLACE_FILES_PER_SKILL_LIMIT:
+            raise ValueError(
+                f"Marketplace skill contains too many files "
+                f"(max {MARKETPLACE_FILES_PER_SKILL_LIMIT})"
+            )
         collection = self._get_files_collection()
         now = utc_now_iso()
 
-        from pymongo import DeleteOne, UpdateOne
+        from pymongo import UpdateOne
 
-        existing_paths: set[str] = set()
-        async for doc in collection.find({"skill_name": skill_name}, {"file_path": 1}):
-            existing_paths.add(doc["file_path"])
-
-        new_paths = set(files.keys())
-        removed_paths = existing_paths - new_paths
+        await collection.delete_many(
+            {
+                "skill_name": skill_name,
+                "file_path": {"$nin": list(files.keys())},
+            }
+        )
 
         operations: list = []
-        for path in removed_paths:
-            operations.append(DeleteOne({"skill_name": skill_name, "file_path": path}))
         for file_path, content in files.items():
             operations.append(
                 UpdateOne(
@@ -431,7 +502,10 @@ class MarketplaceStorage:
         """列出商城 Skill 所有文件路径"""
         collection = self._get_files_collection()
         paths = []
-        async for doc in collection.find({"skill_name": skill_name}, {"file_path": 1}):
+        cursor = collection.find({"skill_name": skill_name}, {"file_path": 1}).limit(
+            MARKETPLACE_FILES_PER_SKILL_LIMIT
+        )
+        async for doc in cursor:
             paths.append(doc["file_path"])
         return paths
 
@@ -443,9 +517,16 @@ class MarketplaceStorage:
         """获取所有不重复的标签"""
         collection = self._get_meta_collection()
         tags = set()
-        async for doc in collection.find({"is_active": {"$ne": False}}, {"tags": 1}):
+        cursor = collection.find({"is_active": {"$ne": False}}, {"tags": 1}).limit(
+            MARKETPLACE_TAG_SCAN_LIMIT
+        )
+        async for doc in cursor:
             for tag in doc.get("tags", []):
+                if not isinstance(tag, str) or not tag:
+                    continue
                 tags.add(tag)
+                if len(tags) >= MARKETPLACE_TAG_LIST_LIMIT:
+                    return sorted(tags)
         return sorted(list(tags))
 
     async def close(self):

@@ -34,6 +34,7 @@ else:
 
 from langchain.tools import tool  # noqa: E402
 
+from src.infra.async_utils import run_blocking_io
 from src.infra.logging import get_logger
 from src.infra.tool.backend_utils import (
     get_backend_from_runtime,
@@ -46,6 +47,21 @@ logger = get_logger(__name__)
 
 # mcporter command timeout (seconds)
 _MCPORTER_TIMEOUT = 60
+_MCPORTER_ERROR_OUTPUT_MAX_CHARS = 8000
+
+
+def _truncate_tool_output(output: Any) -> str:
+    text = str(output)
+    if len(text) <= _MCPORTER_ERROR_OUTPUT_MAX_CHARS:
+        return text
+    omitted = len(text) - _MCPORTER_ERROR_OUTPUT_MAX_CHARS
+    return text[:_MCPORTER_ERROR_OUTPUT_MAX_CHARS] + (
+        f"... truncated, {omitted} more character(s) omitted"
+    )
+
+
+async def _json_dumps_result(data: dict[str, Any]) -> str:
+    return await run_blocking_io(json.dumps, data, ensure_ascii=False)
 
 
 # ── MongoDB persistence helpers ───────────────────────────────
@@ -120,7 +136,7 @@ async def sandbox_mcp_add(
     The server will be automatically restored when the sandbox is rebuilt."""
     backend = get_backend_from_runtime(runtime)
     if backend is None:
-        return json.dumps({"error": "No sandbox backend available"})
+        return await _json_dumps_result({"error": "No sandbox backend available"})
 
     user_id = get_user_id_from_runtime(runtime) or "unknown"
     env_key_list = [k.strip() for k in env_keys.split(",") if k.strip()] if env_keys else []
@@ -131,20 +147,22 @@ async def sandbox_mcp_add(
         cmd = f"mcporter config add {shlex.quote(server_name)} --stdio {shlex.quote(command)}{env_flags}"
         result = await backend.aexecute(cmd, timeout=_MCPORTER_TIMEOUT)
         if result.exit_code != 0:
-            return json.dumps({"error": f"mcporter failed: {result.output}"})
+            return await _json_dumps_result(
+                {"error": f"mcporter failed: {_truncate_tool_output(result.output)}"}
+            )
 
         # Persist to MongoDB
         ok = await _persist_server_to_mongodb(user_id, server_name, command, env_key_list)
         if not ok:
-            return json.dumps(
+            return await _json_dumps_result(
                 {"error": "Server registered in sandbox but failed to persist to database"}
             )
 
         invalidate_sandbox_mcp_prompt_cache(user_id)
         await publish_tool_cache_invalidation("sandbox_mcp_prompt", user_id=user_id)
     except Exception as e:
-        return json.dumps({"error": f"Failed to add server: {e}"})
-    return json.dumps(
+        return await _json_dumps_result({"error": f"Failed to add server: {e}"})
+    return await _json_dumps_result(
         {
             "success": True,
             "message": f"Server '{server_name}' added to sandbox and saved",
@@ -171,7 +189,7 @@ async def sandbox_mcp_update(
     Changes are persisted to the database and applied to the sandbox."""
     backend = get_backend_from_runtime(runtime)
     if backend is None:
-        return json.dumps({"error": "No sandbox backend available"})
+        return await _json_dumps_result({"error": "No sandbox backend available"})
 
     user_id = get_user_id_from_runtime(runtime) or "unknown"
     env_key_list = [k.strip() for k in env_keys.split(",") if k.strip()] if env_keys else None
@@ -184,7 +202,9 @@ async def sandbox_mcp_update(
         storage = MCPStorage()
         existing = await storage.get_user_server(server_name, user_id)
         if not existing:
-            return json.dumps({"error": f"Server '{server_name}' not found in database"})
+            return await _json_dumps_result(
+                {"error": f"Server '{server_name}' not found in database"}
+            )
 
         resolved_command = command or existing.command or ""
         resolved_env_keys = env_key_list if env_key_list is not None else (existing.env_keys or [])
@@ -203,7 +223,9 @@ async def sandbox_mcp_update(
             old_env = await build_env_flags(user_id, existing.env_keys or [])
             restore_cmd = f"mcporter config add {shlex.quote(server_name)} --stdio {shlex.quote(existing.command or '')}{old_env}"
             await backend.aexecute(restore_cmd, timeout=_MCPORTER_TIMEOUT)
-            return json.dumps({"error": f"mcporter update failed: {result.output}"})
+            return await _json_dumps_result(
+                {"error": f"mcporter update failed: {_truncate_tool_output(result.output)}"}
+            )
 
         # Persist to MongoDB
         from src.kernel.schemas.mcp import MCPServerUpdate
@@ -214,13 +236,15 @@ async def sandbox_mcp_update(
         )
         updated = await storage.update_user_server(server_name, update, user_id)
         if not updated:
-            return json.dumps({"error": "mcporter updated but failed to persist to database"})
+            return await _json_dumps_result(
+                {"error": "mcporter updated but failed to persist to database"}
+            )
 
         invalidate_sandbox_mcp_prompt_cache(user_id)
         await publish_tool_cache_invalidation("sandbox_mcp_prompt", user_id=user_id)
     except Exception as e:
-        return json.dumps({"error": f"Failed to update server: {e}"})
-    return json.dumps(
+        return await _json_dumps_result({"error": f"Failed to update server: {e}"})
+    return await _json_dumps_result(
         {
             "success": True,
             "message": f"Server '{server_name}' updated in sandbox and saved",
@@ -240,7 +264,7 @@ async def sandbox_mcp_remove(
     The server will no longer be restored when the sandbox is rebuilt."""
     backend = get_backend_from_runtime(runtime)
     if backend is None:
-        return json.dumps({"error": "No sandbox backend available"})
+        return await _json_dumps_result({"error": "No sandbox backend available"})
 
     user_id = get_user_id_from_runtime(runtime) or "unknown"
 
@@ -255,7 +279,7 @@ async def sandbox_mcp_remove(
         if result.exit_code != 0 and deleted:
             invalidate_sandbox_mcp_prompt_cache(user_id)
             await publish_tool_cache_invalidation("sandbox_mcp_prompt", user_id=user_id)
-            return json.dumps(
+            return await _json_dumps_result(
                 {
                     "success": True,
                     "message": f"Server '{server_name}' removed from database (was not in sandbox)",
@@ -263,13 +287,15 @@ async def sandbox_mcp_remove(
             )
 
         if result.exit_code != 0:
-            return json.dumps({"error": f"mcporter failed: {result.output}"})
+            return await _json_dumps_result(
+                {"error": f"mcporter failed: {_truncate_tool_output(result.output)}"}
+            )
 
         invalidate_sandbox_mcp_prompt_cache(user_id)
         await publish_tool_cache_invalidation("sandbox_mcp_prompt", user_id=user_id)
     except Exception as e:
-        return json.dumps({"error": f"Failed to remove server: {e}"})
-    return json.dumps(
+        return await _json_dumps_result({"error": f"Failed to remove server: {e}"})
+    return await _json_dumps_result(
         {
             "success": True,
             "message": f"Server '{server_name}' removed from sandbox and database",

@@ -10,7 +10,7 @@ Model 配置路由
 - 批量导入模型
 """
 
-from fastapi import APIRouter, Body, Depends
+from fastapi import APIRouter, Body, Depends, HTTPException
 
 from src.api.deps import require_permissions
 from src.infra.agent.model_storage import get_model_storage
@@ -30,6 +30,15 @@ from src.kernel.types import Permission
 
 router = APIRouter()
 logger = get_logger(__name__)
+MODEL_BATCH_MAX_ITEMS = 200
+
+
+def _reject_oversized_model_batch(count: int) -> None:
+    if count > MODEL_BATCH_MAX_ITEMS:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Cannot process more than {MODEL_BATCH_MAX_ITEMS} models at once",
+        )
 
 
 # ============================================
@@ -61,14 +70,14 @@ async def list_available_models(
     """获取当前用户可用模型（仅启用模型，按角色授权过滤，返回公开字段）"""
     logger.info("[Model] list_available_models called")
     storage = get_model_storage()
-    models = await storage.list_models(include_disabled=False)
 
     from src.infra.agent.model_access import resolve_user_allowed_model_ids
 
     allowed_model_ids = await resolve_user_allowed_model_ids(user)
     if allowed_model_ids is not None:
-        allowed_set = set(allowed_model_ids)
-        models = [m for m in models if m.id in allowed_set or m.value in allowed_set]
+        models = await storage.list_enabled_by_ids_or_values(allowed_model_ids)
+    else:
+        models = await storage.list_models(include_disabled=False)
 
     logger.info(f"[Model] Found {len(models)} visible models for user_id={user.sub}")
 
@@ -152,6 +161,7 @@ async def reorder_models(
     _: TokenPayload = Depends(require_permissions(Permission.MODEL_ADMIN.value)),
 ):
     """批量更新模型顺序"""
+    _reject_oversized_model_batch(len(model_ids))
     storage = get_model_storage()
 
     models = await storage.reorder(model_ids)
@@ -302,6 +312,7 @@ async def import_models(
     _: TokenPayload = Depends(require_permissions(Permission.MODEL_ADMIN.value)),
 ):
     """批量导入模型（upsert）"""
+    _reject_oversized_model_batch(len(models))
     storage = get_model_storage()
 
     config_models = [ModelConfig(**m.model_dump()) for m in models]
@@ -341,17 +352,14 @@ async def batch_create_models(
     models = body.get("models", [])
 
     if not models or not isinstance(models, list):
-        from fastapi import HTTPException
-
         raise HTTPException(status_code=400, detail="models must be a non-empty list")
+    _reject_oversized_model_batch(len(models))
 
     # Validate provider if provided
     raw_provider = shared.get("provider")
     provider = None
     if raw_provider:
         if not isinstance(raw_provider, str) or not raw_provider.strip():
-            from fastapi import HTTPException
-
             raise HTTPException(
                 status_code=400,
                 detail=f"Invalid provider '{raw_provider}'. Must be a non-empty string.",

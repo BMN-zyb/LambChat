@@ -9,6 +9,7 @@ from httpx import ASGITransport, AsyncClient
 from src.api import deps as api_deps
 from src.api.routes import team as team_route
 from src.kernel.schemas.team import (
+    TeamCreate,
     TeamListResponse,
     TeamPreferenceUpdate,
     TeamResponse,
@@ -24,6 +25,17 @@ def _fake_user() -> TokenPayload:
         roles=["user"],
         permissions=["chat:write"],
     )
+
+
+def test_team_create_rejects_too_many_members() -> None:
+    with pytest.raises(ValueError):
+        TeamCreate(
+            name="Large team",
+            members=[
+                {"persona_preset_id": f"preset-{index}", "role_name": f"Role {index}"}
+                for index in range(21)
+            ],
+        )
 
 
 def _team(team_id: str = "team-1") -> TeamResponse:

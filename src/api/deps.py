@@ -8,6 +8,7 @@ from typing import Optional
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
+from src.infra.async_utils import run_blocking_io
 from src.infra.auth.jwt import verify_token
 from src.infra.logging import get_logger
 from src.infra.role.storage import RoleStorage
@@ -79,6 +80,10 @@ async def _get_user_roles_and_permissions(user_roles: list[str]) -> tuple[list[s
     return roles, list(permissions)
 
 
+async def _verify_token_async(token: str) -> TokenPayload:
+    return await run_blocking_io(verify_token, token)
+
+
 async def get_current_user(
     request: Request,
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
@@ -101,7 +106,7 @@ async def get_current_user(
         payload = (
             parsed.model_copy(deep=True)
             if isinstance(parsed, TokenPayload)
-            else verify_token(token)
+            else await _verify_token_async(token)
         )
         return payload
     except Exception:
@@ -143,7 +148,7 @@ async def get_current_user_required(
         payload = (
             parsed.model_copy(deep=True)
             if isinstance(parsed, TokenPayload)
-            else verify_token(token)
+            else await _verify_token_async(token)
         )
         user_id = payload.sub
 
@@ -204,7 +209,7 @@ async def get_current_user_from_websocket(
         )
 
     try:
-        payload = verify_token(token)
+        payload = await _verify_token_async(token)
         user_id = payload.sub
 
         if not user_id:

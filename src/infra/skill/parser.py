@@ -6,10 +6,12 @@ Supports YAML frontmatter with fallback to markdown-style extraction.
 """
 
 import re
+from itertools import islice
 from typing import Optional
 
 # 允许的 skill name 字符：字母、数字、下划线、中文、连字符、点
 _SKILL_NAME_ALLOWED = re.compile(r"^[\w\u4e00-\u9fff\-.]+$")
+_FRONTMATTER_MAX_BYTES = 64 * 1024
 
 
 def sanitize_skill_name(name: str) -> str:
@@ -34,6 +36,19 @@ def sanitize_skill_name(name: str) -> str:
     return name or "unnamed-skill"
 
 
+def _iter_first_lines(content: str, limit: int):
+    start = 0
+    for _ in range(limit):
+        if start >= len(content):
+            return
+        end = content.find("\n", start)
+        if end == -1:
+            yield content[start:]
+            return
+        yield content[start:end].rstrip("\r")
+        start = end + 1
+
+
 def parse_skill_md(content: str) -> tuple[Optional[str], str, list[str]]:
     """
     Parse SKILL.md content to extract name, description, and tags.
@@ -56,13 +71,12 @@ def parse_skill_md(content: str) -> tuple[Optional[str], str, list[str]]:
     description = ""
     tags: list[str] = []
 
-    lines = content.splitlines()
-
     # Try YAML frontmatter
     if content.startswith("---"):
-        parts = content.split("---", 2)
-        if len(parts) >= 3:
-            frontmatter_text = parts[1].strip()
+        search_end = min(len(content), _FRONTMATTER_MAX_BYTES)
+        closing = content.find("\n---", 3, search_end)
+        if closing != -1:
+            frontmatter_text = content[3:closing].strip()
             try:
                 import yaml
 
@@ -79,7 +93,7 @@ def parse_skill_md(content: str) -> tuple[Optional[str], str, list[str]]:
                 pass
 
     # Fallback: scan first 20 lines for name/description
-    for line in lines[:20]:
+    for line in islice(_iter_first_lines(content, 20), 20):
         stripped = line.strip()
 
         # name: (only if not already set from frontmatter)

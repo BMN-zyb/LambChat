@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Annotated, Any
 
 from langchain_core.tools import BaseTool, InjectedToolArg
 
+from src.infra.async_utils import run_blocking_io
 from src.infra.envvar.storage import EnvVarStorage
 from src.infra.tool.backend_utils import get_backend_from_runtime, get_user_id_from_runtime
 from src.infra.tool.cache_pubsub import publish_tool_cache_invalidation
@@ -33,8 +34,8 @@ from langchain.tools import tool  # noqa: E402
 _ENV_KEY_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
-def _json(data: dict[str, Any]) -> str:
-    return json.dumps(data, ensure_ascii=False)
+async def _json_dumps_result(data: dict[str, Any]) -> str:
+    return await run_blocking_io(json.dumps, data, ensure_ascii=False, default=str)
 
 
 def _get_user_id(runtime: ToolRuntime) -> str | None:
@@ -46,7 +47,7 @@ async def _sync_envvar_change(user_id: str, backend: Any | None) -> None:
     invalidate_env_var_prompt_cache(user_id)
     await publish_tool_cache_invalidation("env_var_prompt", user_id=user_id)
     if backend is not None:
-        await ensure_sandbox_mcp(backend, user_id)
+        await ensure_sandbox_mcp(backend, user_id, force_rebuild=True)
 
 
 def _validate_key(key: str) -> str | None:
@@ -72,14 +73,14 @@ async def env_var_list(
     Values are always masked and plaintext secrets are never returned."""
     user_id = _get_user_id(runtime)
     if not user_id:
-        return _json({"error": "No user context available"})
+        return await _json_dumps_result({"error": "No user context available"})
 
     try:
         variables = await EnvVarStorage().list_vars(user_id)
     except Exception as e:
-        return _json({"error": f"Failed to list variables: {e}"})
+        return await _json_dumps_result({"error": f"Failed to list variables: {e}"})
     masked = [_masked_var(variable) for variable in variables]
-    return _json({"variables": masked, "count": len(masked)})
+    return await _json_dumps_result({"variables": masked, "count": len(masked)})
 
 
 @tool
@@ -93,19 +94,19 @@ async def env_var_set(
     returned; responses contain only a masked value."""
     user_id = _get_user_id(runtime)
     if not user_id:
-        return _json({"error": "No user context available"})
+        return await _json_dumps_result({"error": "No user context available"})
 
     validation_error = _validate_key(key)
     if validation_error:
-        return _json({"error": validation_error})
+        return await _json_dumps_result({"error": validation_error})
 
     try:
         variable = await EnvVarStorage().set_var(user_id, key, value)
         backend = get_backend_from_runtime(runtime)
         await _sync_envvar_change(user_id, backend)
     except Exception as e:
-        return _json({"error": f"Failed to save variable: {e}"})
-    return _json(
+        return await _json_dumps_result({"error": f"Failed to save variable: {e}"})
+    return await _json_dumps_result(
         {
             "success": True,
             "message": f"Environment variable '{key}' saved",
@@ -122,21 +123,23 @@ async def env_var_delete(
     """Delete one environment variable for the current user by key."""
     user_id = _get_user_id(runtime)
     if not user_id:
-        return _json({"error": "No user context available"})
+        return await _json_dumps_result({"error": "No user context available"})
 
     validation_error = _validate_key(key)
     if validation_error:
-        return _json({"error": validation_error})
+        return await _json_dumps_result({"error": validation_error})
 
     try:
         deleted = await EnvVarStorage().delete_var(user_id, key)
     except Exception as e:
-        return _json({"error": f"Failed to delete variable: {e}"})
+        return await _json_dumps_result({"error": f"Failed to delete variable: {e}"})
     if not deleted:
-        return _json({"error": f"Environment variable '{key}' not found"})
+        return await _json_dumps_result({"error": f"Environment variable '{key}' not found"})
     backend = get_backend_from_runtime(runtime)
     await _sync_envvar_change(user_id, backend)
-    return _json({"success": True, "message": f"Environment variable '{key}' deleted"})
+    return await _json_dumps_result(
+        {"success": True, "message": f"Environment variable '{key}' deleted"}
+    )
 
 
 @tool
@@ -147,15 +150,15 @@ async def env_var_delete_all(
     user explicitly asks to clear all environment variables."""
     user_id = _get_user_id(runtime)
     if not user_id:
-        return _json({"error": "No user context available"})
+        return await _json_dumps_result({"error": "No user context available"})
 
     try:
         count = await EnvVarStorage().delete_all_vars(user_id)
         backend = get_backend_from_runtime(runtime)
         await _sync_envvar_change(user_id, backend)
     except Exception as e:
-        return _json({"error": f"Failed to delete all variables: {e}"})
-    return _json(
+        return await _json_dumps_result({"error": f"Failed to delete all variables: {e}"})
+    return await _json_dumps_result(
         {
             "success": True,
             "message": f"Deleted {count} environment variable(s)",

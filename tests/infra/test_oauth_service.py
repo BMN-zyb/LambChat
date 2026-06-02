@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import base64
 import builtins
 import importlib
+import json
 import sys
 
 
@@ -81,3 +83,48 @@ async def test_oauth_service_closes_cached_clients() -> None:
     assert google_client.close_calls == 1
     assert apple_client.close_calls == 1
     assert service._oauth_clients == {}
+
+
+async def test_apple_user_info_offloads_token_header_decode(monkeypatch) -> None:
+    from src.infra.auth import oauth as oauth_module
+    from src.infra.auth.oauth import OAuthService
+
+    calls: list[str] = []
+    header = base64.urlsafe_b64encode(json.dumps({"kid": "kid-1"}).encode()).decode().rstrip("=")
+    id_token = f"{header}.payload.signature"
+
+    class _FakeJwksResponse:
+        def json(self):
+            return {"keys": [{"kid": "kid-1", "kty": "RSA"}]}
+
+    class _FakeAsyncClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def get(self, url: str):
+            assert url == "https://appleid.apple.com/auth/keys"
+            return _FakeJwksResponse()
+
+    def fake_decode(_id_token: str, _jwk: dict, _client_id: str) -> dict:
+        return {"sub": "apple-user-1", "email": "apple@example.com"}
+
+    async def fake_run_blocking_io(func, *args, **kwargs):
+        calls.append(getattr(func, "__name__", ""))
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(oauth_module.httpx, "AsyncClient", _FakeAsyncClient)
+    monkeypatch.setattr(oauth_module, "_decode_apple_identity_token", fake_decode)
+    monkeypatch.setattr(oauth_module, "run_blocking_io", fake_run_blocking_io)
+    monkeypatch.setattr(oauth_module.settings, "OAUTH_APPLE_CLIENT_ID", "com.example.web")
+
+    user_info = await OAuthService()._get_apple_user_info({"id_token": id_token})
+
+    assert calls == ["_decode_apple_token_header", "fake_decode"]
+    assert user_info is not None
+    assert user_info.email == "apple@example.com"

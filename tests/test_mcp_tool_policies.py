@@ -1,6 +1,9 @@
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
+
+from src.infra.mcp.storage_operations import StorageOperations
 
 
 def test_mcp_tool_policy_schema_preserves_allowed_roles_and_quotas() -> None:
@@ -140,3 +143,108 @@ async def test_internal_image_generate_tool_infos_include_supported_parameters(
         assert params[name]["description"]
     assert "runtime" not in params
     assert "mask_url" not in params
+
+
+class _AsyncCursor:
+    def __init__(self, docs: list[dict[str, Any]]) -> None:
+        self._docs = docs
+
+    async def __aiter__(self):
+        for doc in self._docs:
+            yield doc
+
+
+class _FakeCollection:
+    def __init__(self, docs: list[dict[str, Any]]) -> None:
+        self._docs = docs
+
+    def find(self, query: dict[str, Any]):
+        return _AsyncCursor(
+            [
+                doc
+                for doc in self._docs
+                if all(doc.get(key) == value for key, value in query.items())
+            ]
+        )
+
+
+class _BulkPolicyStorage(StorageOperations):
+    def __init__(self) -> None:
+        self.bulk_calls: list[list[str]] = []
+
+    async def _get_user_preferences(self, user_id: str) -> dict[str, bool]:
+        return {}
+
+    def _get_system_collection(self) -> _FakeCollection:
+        return _FakeCollection(
+            [
+                {"name": "alpha", "transport": "sse", "enabled": True},
+                {"name": "beta", "transport": "sse", "enabled": True},
+            ]
+        )
+
+    def _get_user_collection(self) -> _FakeCollection:
+        return _FakeCollection([])
+
+    def _doc_to_config_dict(self, doc: dict[str, Any]) -> dict[str, Any]:
+        return {"transport": doc["transport"]}
+
+    async def list_tool_policies(self, server_name: str):
+        raise AssertionError("get_effective_config should use bulk policy loading")
+
+    async def list_tool_policies_for_servers(self, server_names: list[str]):
+        self.bulk_calls.append(server_names)
+        from src.kernel.schemas.mcp import MCPToolPolicy
+
+        return {
+            "alpha": {
+                "search": MCPToolPolicy(
+                    server_name="alpha",
+                    tool_name="search",
+                    disabled=True,
+                )
+            }
+        }
+
+
+@pytest.mark.asyncio
+async def test_effective_config_loads_system_tool_policies_in_bulk() -> None:
+    storage = _BulkPolicyStorage()
+
+    config = await storage.get_effective_config("user-1")
+
+    assert storage.bulk_calls == [["alpha", "beta"]]
+    assert config["mcpServers"]["alpha"]["tool_policies"]["search"]["disabled"] is True
+    assert "tool_policies" not in config["mcpServers"]["beta"]
+
+
+class _LimitedEffectiveConfigStorage(StorageOperations):
+    async def _get_user_preferences(self, user_id: str) -> dict[str, bool]:
+        return {}
+
+    def _get_system_collection(self) -> _FakeCollection:
+        return _FakeCollection(
+            [{"name": f"system-{index}", "transport": "sse", "enabled": True} for index in range(5)]
+        )
+
+    def _get_user_collection(self) -> _FakeCollection:
+        return _FakeCollection([])
+
+    def _doc_to_config_dict(self, doc: dict[str, Any]) -> dict[str, Any]:
+        return {"transport": doc["transport"]}
+
+    async def list_tool_policies_for_servers(self, server_names: list[str]):
+        return {}
+
+
+@pytest.mark.asyncio
+async def test_effective_config_caps_loaded_servers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.kernel.config import settings
+
+    monkeypatch.setattr(settings, "MCP_EFFECTIVE_CONFIG_MAX_SERVERS", 2)
+    storage = _LimitedEffectiveConfigStorage()
+    config = await storage.get_effective_config("user-1")
+
+    assert list(config["mcpServers"]) == ["system-0", "system-1"]

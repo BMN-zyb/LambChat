@@ -4,8 +4,10 @@
 
 import uuid
 from copy import deepcopy
+from dataclasses import dataclass, field
 from typing import List, Optional
 
+from src.infra.async_utils import run_blocking_io
 from src.infra.logging import get_logger
 from src.infra.session.storage import SessionStorage
 from src.infra.session.trace_storage import get_trace_storage
@@ -28,6 +30,22 @@ from src.kernel.schemas.session import (
 )
 
 logger = get_logger(__name__)
+
+SESSION_ATTACHMENT_EVENT_SCAN_LIMIT = 1000
+SESSION_FORK_TRACE_INSERT_BATCH_SIZE = 25
+
+
+@dataclass
+class SessionForkCloneResult:
+    copied_trace_count: int = 0
+    checkpoint_messages: list[object] = field(default_factory=list)
+    _compat_docs: list[dict] = field(default_factory=list, repr=False)
+
+    def __len__(self) -> int:
+        return self.copied_trace_count
+
+    def __iter__(self):
+        return iter(self._compat_docs)
 
 
 class SessionManager:
@@ -77,7 +95,8 @@ class SessionManager:
         limit: int = 100,
     ) -> List[dict]:
         """获取会话事件（从 traces 聚合）"""
-        return await self.trace_storage.get_session_events(session_id, since_seq, limit)
+        del since_seq
+        return await self.trace_storage.get_session_events(session_id, max_events=limit)
 
     async def get_session_traces(
         self,
@@ -106,7 +125,12 @@ class SessionManager:
 
     async def _collect_user_attachment_keys(self, session_id: str) -> list[str]:
         """Collect unique attachment keys from persisted user messages in a session."""
-        events = await self.trace_storage.get_session_events(session_id)
+        events = await self.trace_storage.get_session_events(
+            session_id,
+            event_types=["user:message"],
+            completed_only=False,
+            max_events=SESSION_ATTACHMENT_EVENT_SCAN_LIMIT,
+        )
         keys: set[str] = set()
         for event in events:
             if event.get("event_type") != "user:message":
@@ -323,23 +347,27 @@ class SessionManager:
             )
 
         try:
-            cloned_traces = await self._clone_history_to_session(
+            needs_checkpoint_seed = (
+                copied_checkpoint_count == 0 and checkpoint_clone_error is not None
+            )
+            clone_result = await self._clone_history_to_session(
                 source_session=source_session,
                 target_session=new_session,
                 target=target,
                 user_id=user_id,
+                collect_checkpoint_messages=needs_checkpoint_seed,
             )
-            if copied_checkpoint_count == 0 and checkpoint_clone_error is not None:
+            if needs_checkpoint_seed:
                 copied_checkpoint_count = await seed_checkpoint_from_messages(
                     new_session.id,
-                    build_messages_from_trace_events(cloned_traces),
+                    clone_result.checkpoint_messages,
                 )
             await self.storage.rebuild_search_index(new_session.id)
             return {
                 "session": new_session,
                 "source_session_id": source_session.id,
                 "source_message_id": message_id,
-                "copied_trace_count": len(cloned_traces),
+                "copied_trace_count": clone_result.copied_trace_count,
                 "copied_checkpoint_count": copied_checkpoint_count,
             }
         except Exception as exc:
@@ -353,49 +381,92 @@ class SessionManager:
         target_session: Session,
         target: dict,
         user_id: str,
-    ) -> list[dict]:
+        collect_checkpoint_messages: bool = False,
+    ) -> SessionForkCloneResult:
+        async def _flush_batch() -> None:
+            if batch:
+                await self.trace_storage.collection.insert_many(list(batch))
+                batch.clear()
+
         cursor = self.trace_storage.collection.find(
             {"session_id": source_session.id},
             {"_id": 0},
         ).sort("started_at", 1)
-        cloned_docs: list[dict] = []
+        result = SessionForkCloneResult()
+        batch: list[dict] = []
         async for trace in cursor:
             run_id = trace.get("run_id")
             if not run_id:
                 continue
-            if run_id in target["completed_run_ids"]:
-                cloned_docs.append(self._build_cloned_trace_doc(trace, target_session.id, user_id))
-            elif run_id == target["run_id"] and target["target_type"] == "user":
-                cloned_docs.append(
-                    self._build_partial_user_trace_doc(
+            cloned_doc = None
+            if run_id == target["run_id"]:
+                if target["target_type"] == "user":
+                    cloned_doc = await run_blocking_io(
+                        self._build_partial_user_trace_doc,
                         trace,
                         target["user_event"],
                         target_session.id,
                         user_id,
                     )
+                elif target["target_type"] == "assistant":
+                    cloned_doc = await run_blocking_io(
+                        self._build_cloned_trace_doc,
+                        trace,
+                        target_session.id,
+                        user_id,
+                    )
+            elif target.get("completed_run_ids") is not None:
+                if run_id in target["completed_run_ids"]:
+                    cloned_doc = await run_blocking_io(
+                        self._build_cloned_trace_doc,
+                        trace,
+                        target_session.id,
+                        user_id,
+                    )
+            else:
+                cloned_doc = await run_blocking_io(
+                    self._build_cloned_trace_doc,
+                    trace,
+                    target_session.id,
+                    user_id,
                 )
-                break
-            elif run_id == target["run_id"] and target["target_type"] == "assistant":
-                cloned_docs.append(self._build_cloned_trace_doc(trace, target_session.id, user_id))
+
+            if cloned_doc is not None:
+                result.copied_trace_count += 1
+                if collect_checkpoint_messages:
+                    checkpoint_messages = await run_blocking_io(
+                        build_messages_from_trace_events,
+                        [cloned_doc],
+                    )
+                    result.checkpoint_messages.extend(checkpoint_messages)
+                batch.append(cloned_doc)
+                if len(batch) >= SESSION_FORK_TRACE_INSERT_BATCH_SIZE:
+                    await _flush_batch()
+
+            if run_id == target["run_id"] and target["target_type"] in {"user", "assistant"}:
                 break
 
-        if cloned_docs:
-            await self.trace_storage.collection.insert_many(cloned_docs)
-        return cloned_docs
+        await _flush_batch()
+        return result
 
     async def _resolve_fork_target(self, session_id: str, message_id: str) -> dict:
         cursor = self.trace_storage.collection.find(
             {"session_id": session_id},
-            {"_id": 0},
+            {
+                "_id": 0,
+                "trace_id": 1,
+                "run_id": 1,
+                "events.event_type": 1,
+                "events.data": 1,
+            },
         ).sort("started_at", 1)
-        traces = await cursor.to_list(length=None)
-        completed_run_ids: list[str] = []
+        completed_run_count = 0
 
-        for trace in traces:
+        async for trace in cursor:
             run_id = trace.get("run_id")
             if not isinstance(run_id, str) or not run_id:
                 continue
-            turn_index = len(completed_run_ids) + 1
+            turn_index = completed_run_count + 1
 
             for event in trace.get("events", []):
                 if event.get("event_type") != "user:message":
@@ -408,7 +479,7 @@ class SessionManager:
                         "run_id": run_id,
                         "trace_id": trace.get("trace_id"),
                         "user_event": event,
-                        "completed_run_ids": completed_run_ids,
+                        "completed_run_count": completed_run_count,
                         "turn_index": turn_index,
                     }
 
@@ -417,11 +488,11 @@ class SessionManager:
                     "target_type": "assistant",
                     "run_id": run_id,
                     "trace_id": trace.get("trace_id"),
-                    "completed_run_ids": [*completed_run_ids, run_id],
+                    "completed_run_count": completed_run_count + 1,
                     "turn_index": turn_index,
                 }
 
-            completed_run_ids.append(run_id)
+            completed_run_count += 1
 
         raise NotFoundError("message_not_found")
 

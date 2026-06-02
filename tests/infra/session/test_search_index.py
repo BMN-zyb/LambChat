@@ -490,6 +490,173 @@ async def test_rebuild_search_index_preserves_new_live_message() -> None:
 
 
 @pytest.mark.asyncio
+async def test_rebuild_search_index_uses_bounded_event_read() -> None:
+    now = _utc_now()
+    storage = SessionStorage()
+    storage.ensure_indexes_if_needed = _noop_async
+    storage._indexes_ensured = True
+    storage._collection = _FakeCollection(
+        docs=[
+            {
+                "_id": "session-1",
+                "session_id": "session-1",
+                "user_id": "user-1",
+                "name": "Parser planning",
+                "message_search_terms": [],
+                "search_terms": [],
+                "search_text": "",
+                "latest_user_message": "",
+                "search_index_version": 1,
+                "search_index_updated_at": now,
+                "created_at": now,
+                "updated_at": now,
+                "is_active": True,
+                "agent_id": "search",
+                "metadata": {},
+            }
+        ]
+    )
+
+    class _TraceStorage:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        async def get_session_events(self, *_args, **kwargs):
+            self.calls.append(kwargs)
+            return [
+                {"data": {"content": "older historical question"}},
+            ]
+
+    trace_storage = _TraceStorage()
+
+    import src.infra.session.trace_storage as trace_storage_module
+
+    original_get_trace_storage = trace_storage_module.get_trace_storage
+    trace_storage_module.get_trace_storage = lambda: trace_storage
+    try:
+        rebuilt = await storage.rebuild_search_index("session-1")
+    finally:
+        trace_storage_module.get_trace_storage = original_get_trace_storage
+
+    assert rebuilt is True
+    assert trace_storage.calls == [
+        {
+            "event_types": ["user:message"],
+            "completed_only": False,
+            "max_events": 1000,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_rebuild_search_index_offloads_backfilled_index_build(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = _utc_now()
+    storage = SessionStorage()
+    storage.ensure_indexes_if_needed = _noop_async
+    storage._indexes_ensured = True
+    storage._collection = _FakeCollection(
+        docs=[
+            {
+                "_id": "session-1",
+                "session_id": "session-1",
+                "user_id": "user-1",
+                "name": "Parser planning",
+                "message_search_terms": [],
+                "search_terms": [],
+                "search_text": "",
+                "latest_user_message": "",
+                "search_index_version": 1,
+                "search_index_updated_at": now,
+                "created_at": now,
+                "updated_at": now,
+                "is_active": True,
+                "agent_id": "search",
+                "metadata": {},
+            }
+        ]
+    )
+
+    class _TraceStorage:
+        async def get_session_events(self, *_args, **_kwargs):
+            return [
+                {"data": {"content": "first historical question"}},
+                {"data": {"content": "second historical question"}},
+            ]
+
+    import src.infra.session.storage as storage_module
+    import src.infra.session.trace_storage as trace_storage_module
+
+    offloaded: list[str] = []
+
+    async def fake_run_blocking_io(func, /, *args, **kwargs):
+        offloaded.append(func.__name__)
+        return func(*args, **kwargs)
+
+    original_get_trace_storage = trace_storage_module.get_trace_storage
+    trace_storage_module.get_trace_storage = lambda: _TraceStorage()
+    monkeypatch.setattr(storage_module, "run_blocking_io", fake_run_blocking_io, raising=False)
+    try:
+        rebuilt = await storage.rebuild_search_index("session-1")
+    finally:
+        trace_storage_module.get_trace_storage = original_get_trace_storage
+
+    assert rebuilt is True
+    assert offloaded == ["build_backfilled_search_index"]
+
+
+@pytest.mark.asyncio
+async def test_backfill_search_indexes_clamps_batch_size() -> None:
+    class _BackfillCursor:
+        def __init__(self) -> None:
+            self.limit_value: int | None = None
+            self.to_list_length: int | None = None
+
+        def sort(self, *_args):
+            return self
+
+        def limit(self, value: int):
+            self.limit_value = value
+            return self
+
+        async def to_list(self, length: int | None = None):
+            self.to_list_length = length
+            cap = length or 0
+            return [
+                {"_id": f"session-{index}", "session_id": f"session-{index}"}
+                for index in range(cap)
+            ]
+
+    class _BackfillCollection:
+        def __init__(self) -> None:
+            self.cursor = _BackfillCursor()
+
+        def find(self, *_args):
+            return self.cursor
+
+    storage = SessionStorage()
+    storage.ensure_indexes_if_needed = _noop_async
+    storage._indexes_ensured = True
+    storage._collection = _BackfillCollection()
+
+    calls: list[str] = []
+
+    async def _fake_rebuild(session_id: str) -> bool:
+        calls.append(session_id)
+        return True
+
+    storage.rebuild_search_index = _fake_rebuild  # type: ignore[method-assign]
+
+    rebuilt = await storage.backfill_search_indexes(batch_size=10_000)
+
+    assert rebuilt == storage.SEARCH_BACKFILL_BATCH_MAX
+    assert len(calls) == storage.SEARCH_BACKFILL_BATCH_MAX
+    assert storage.collection.cursor.limit_value == storage.SEARCH_BACKFILL_BATCH_MAX
+    assert storage.collection.cursor.to_list_length == storage.SEARCH_BACKFILL_BATCH_MAX
+
+
+@pytest.mark.asyncio
 async def test_session_indexes_are_initialized_once_across_instances() -> None:
     shared_collection = _FakeCollection(docs=[])
 

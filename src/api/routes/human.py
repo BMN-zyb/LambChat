@@ -5,7 +5,7 @@ Human Input 路由
 
 支持分布式部署：
 - 审批数据存储在 MongoDB
-- 使用 Redis Stream 实现跨进程通知
+- 使用 Redis Pub/Sub 实现跨进程响应唤醒
 - 自动降级为 MongoDB 轮询（Redis 不可用时）
 """
 
@@ -13,11 +13,13 @@ import asyncio
 import json
 import time
 import uuid
-from typing import Callable, Dict, List, Optional
+from collections import OrderedDict
+from typing import Callable, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from src.api.deps import require_permissions
+from src.infra.async_utils import run_blocking_io
 from src.infra.logging import get_logger
 from src.infra.storage.mongodb import (
     ApprovalResponse,
@@ -69,9 +71,10 @@ async def _notify_approval_created(session_id: str) -> None:
 # ============================================================================
 
 # 单进程内使用 asyncio.Event 加速（可选优化）
-# 分布式环境下会同时使用 Redis Stream 作为备用
+# 分布式环境下会同时使用 Redis Pub/Sub + MongoDB 轮询作为备用
 # 存储 (event, created_at) 以支持 TTL 清理
-_local_events: Dict[str, tuple[asyncio.Event, float]] = {}
+HUMAN_LOCAL_EVENT_CACHE_MAX_ENTRIES = 512
+_local_events: OrderedDict[str, tuple[asyncio.Event, float]] = OrderedDict()
 
 # MongoDB 存储实例
 _approval_storage = get_approval_storage()
@@ -80,6 +83,21 @@ _approval_storage = get_approval_storage()
 # ============================================================================
 # 核心函数
 # ============================================================================
+
+
+def _touch_local_event(approval_id: str) -> tuple[asyncio.Event, float] | None:
+    entry = _local_events.get(approval_id)
+    if entry is None:
+        return None
+    _local_events.move_to_end(approval_id)
+    return entry
+
+
+def _store_local_event(approval_id: str, entry: tuple[asyncio.Event, float]) -> None:
+    _local_events[approval_id] = entry
+    _local_events.move_to_end(approval_id)
+    while len(_local_events) > HUMAN_LOCAL_EVENT_CACHE_MAX_ENTRIES:
+        _local_events.popitem(last=False)
 
 
 async def create_approval(
@@ -118,7 +136,7 @@ async def create_approval(
     await _approval_storage.create(approval)
 
     # 创建本地 Event（单进程优化）
-    _local_events[approval_id] = (asyncio.Event(), time.time())
+    _store_local_event(approval_id, (asyncio.Event(), time.time()))
 
     # 通知前端有新的审批请求
     await _notify_approval_created(session_id or "")
@@ -141,7 +159,7 @@ async def wait_for_response(approval_id: str, timeout: float = 300) -> Optional[
     Returns:
         ApprovalResponse 或 None (超时)
     """
-    local_event = _local_events.get(approval_id)
+    local_event = _touch_local_event(approval_id)
     event = local_event[0] if local_event else None
 
     if event:
@@ -167,6 +185,8 @@ async def wait_for_response(approval_id: str, timeout: float = 300) -> Optional[
             # 取消未完成的任务
             for task in pending:
                 task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
 
             # 获取结果（local_event.wait() 返回 True，需要从 MongoDB 获取实际响应）
             for task in done:
@@ -209,6 +229,7 @@ def _cleanup_stale_events(max_age: float = 3600) -> int:
 
 @router.get("/pending")
 async def get_pending_approvals(
+    limit: int = Query(100, ge=1, le=100, description="最大返回审批数量"),
     user: TokenPayload = Depends(require_permissions("chat:write")),
 ):
     """
@@ -217,7 +238,7 @@ async def get_pending_approvals(
     前端轮询此接口获取待审批的请求。只返回当前用户的审批。
     """
     _cleanup_stale_events()
-    pending = await _approval_storage.list_pending(user_id=user.sub)
+    pending = await _approval_storage.list_pending(user_id=user.sub, limit=limit)
     return {"approvals": [a.model_dump() for a in pending], "count": len(pending)}
 
 
@@ -241,7 +262,7 @@ async def respond_to_approval(
 
     # 解析 JSON 响应数据
     try:
-        response_data = json.loads(response) if response else {}
+        response_data = await run_blocking_io(json.loads, response) if response else {}
     except json.JSONDecodeError:
         response_data = {}
 
@@ -251,11 +272,11 @@ async def respond_to_approval(
     await _approval_storage.update_status(approval_id, status, approval_response)
 
     # 通知等待的 Agent（分布式支持）
-    # 1. 通过 Redis Stream 通知跨进程的 Agent
+    # 1. 通过 Redis Pub/Sub 通知跨进程的 Agent
     await notify_approval_response(approval_id, approval_response)
 
     # 2. 触发本地 Event（单进程内快速响应）
-    entry = _local_events.get(approval_id)
+    entry = _touch_local_event(approval_id)
     if entry:
         entry[0].set()
 

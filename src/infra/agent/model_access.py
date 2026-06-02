@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from src.kernel.schemas.user import TokenPayload
 
+ROLE_MODEL_ACCESS_LIMIT = 100
+
 
 async def resolve_user_allowed_model_ids(user: TokenPayload) -> list[str] | None:
     """Return allowed model IDs for this user, or None when unrestricted.
@@ -36,5 +38,7 @@ async def resolve_user_allowed_model_ids(user: TokenPayload) -> list[str] | None
             if model_id not in seen:
                 seen.add(model_id)
                 allowed.append(model_id)
+                if len(allowed) >= ROLE_MODEL_ACCESS_LIMIT:
+                    return allowed
 
     return allowed if has_restricted_role else None

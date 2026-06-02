@@ -236,12 +236,12 @@ async def update_role_agents(
 
         raise NotFoundError(f"角色 '{role_id}' 不存在")
 
-    await storage.set_role_agents(role_id, role.name, assignment.allowed_agents)
+    allowed_agents = await storage.set_role_agents(role_id, role.name, assignment.allowed_agents)
 
     return RoleAgentAssignmentResponse(
         role_id=role_id,
         role_name=role.name,
-        allowed_agents=assignment.allowed_agents,
+        allowed_agents=allowed_agents,
     )
 
 
@@ -291,12 +291,12 @@ async def update_role_models(
 
         raise NotFoundError(f"角色 '{role_id}' 不存在")
 
-    await storage.set_role_models(role_id, role.name, assignment.allowed_models)
+    allowed_models = await storage.set_role_models(role_id, role.name, assignment.allowed_models)
 
     return RoleModelAssignment(
         role_id=role_id,
         role_name=role.name,
-        allowed_models=assignment.allowed_models,
+        allowed_models=allowed_models,
         configured=True,
     )
 

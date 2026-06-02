@@ -8,16 +8,19 @@ from __future__ import annotations
 
 import io
 import os
+import shutil
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import BinaryIO, Optional
 
 from src.infra.async_utils import run_blocking_io
 from src.infra.logging import get_logger
-from src.infra.storage.s3.base import S3StorageBackend
+from src.infra.storage.s3.base import LIST_OBJECTS_LIMIT, S3StorageBackend
 from src.infra.storage.s3.types import S3Config, UploadResult
 from src.infra.utils.datetime import utc_now
 
 logger = get_logger(__name__)
+UPLOAD_COPY_CHUNK_SIZE = 1024 * 1024
 
 
 class LocalStorageBackend(S3StorageBackend):
@@ -46,14 +49,18 @@ class LocalStorageBackend(S3StorageBackend):
         file_path = self._get_file_path(key)
         file_path.parent.mkdir(parents=True, exist_ok=True)
 
-        content = await run_blocking_io(file.read)
-        file_size = len(content)
-
-        def _write():
+        def _write_stream() -> int:
+            current_pos = file.tell()
             with open(file_path, "wb") as f:
-                f.write(content)
+                shutil.copyfileobj(file, f, length=UPLOAD_COPY_CHUNK_SIZE)
+            file_size = file.tell() - current_pos
+            try:
+                file.seek(current_pos)
+            except (OSError, ValueError):
+                pass
+            return file_size
 
-        await run_blocking_io(_write)
+        file_size = await run_blocking_io(_write_stream)
 
         return UploadResult(
             key=key,
@@ -76,6 +83,13 @@ class LocalStorageBackend(S3StorageBackend):
         file_path = self._get_file_path(key)
 
         def _read():
+            size = file_path.stat().st_size
+            if size > self.config.internal_max_upload_size:
+                max_mb = self.config.internal_max_upload_size / (1024 * 1024)
+                raise ValueError(
+                    f"File size ({size / (1024 * 1024):.1f}MB) exceeds "
+                    f"internal download limit ({max_mb:.0f}MB)"
+                )
             with open(file_path, "rb") as f:
                 return f.read()
 
@@ -84,9 +98,71 @@ class LocalStorageBackend(S3StorageBackend):
         except FileNotFoundError:
             raise FileNotFoundError(f"Object {key} not found")
 
+    async def download_to_file(
+        self,
+        key: str,
+        file: BinaryIO,
+        *,
+        chunk_size: int = 1024 * 1024,
+    ) -> int:
+        file_path = self._get_file_path(key)
+
+        def _copy() -> int:
+            with open(file_path, "rb") as source:
+                shutil.copyfileobj(source, file, length=chunk_size)
+            size = file.tell()
+            file.seek(0)
+            return size
+
+        try:
+            return await run_blocking_io(_copy)
+        except FileNotFoundError:
+            raise FileNotFoundError(f"Object {key} not found")
+
     async def get_size(self, key: str) -> int:
         file_path = self._get_file_path(key)
         return await run_blocking_io(lambda: file_path.stat().st_size)
+
+    async def download_range(self, key: str, start: int, end: int) -> bytes:
+        file_path = self._get_file_path(key)
+        length = end - start + 1
+        if length <= 0:
+            return b""
+        if length > self.config.internal_max_upload_size:
+            max_mb = self.config.internal_max_upload_size / (1024 * 1024)
+            raise ValueError(
+                f"Range size ({length / (1024 * 1024):.1f}MB) exceeds "
+                f"internal download limit ({max_mb:.0f}MB)"
+            )
+
+        def _read_range() -> bytes:
+            with open(file_path, "rb") as f:
+                f.seek(max(0, start))
+                return f.read(length)
+
+        try:
+            return await run_blocking_io(_read_range)
+        except FileNotFoundError:
+            raise FileNotFoundError(f"Object {key} not found")
+
+    async def download_stream(
+        self, key: str, chunk_size: int = 1024 * 1024
+    ) -> AsyncIterator[bytes]:
+        file_path = self._get_file_path(key)
+        chunk_size = max(1, int(chunk_size))
+        try:
+            source = await run_blocking_io(open, file_path, "rb")
+        except FileNotFoundError:
+            raise FileNotFoundError(f"Object {key} not found")
+
+        try:
+            while True:
+                chunk = await run_blocking_io(source.read, chunk_size)
+                if not chunk:
+                    break
+                yield chunk
+        finally:
+            await run_blocking_io(source.close)
 
     async def delete(self, key: str) -> bool:
         file_path = self._get_file_path(key)
@@ -118,16 +194,18 @@ class LocalStorageBackend(S3StorageBackend):
 
     async def list_objects(self, prefix: str = "") -> list[str]:
         prefix_path = self._base_path / prefix
-        if not prefix_path.exists():
-            return []
 
         def _list():
+            if not prefix_path.exists():
+                return []
             objects = []
             for root, _dirs, files in os.walk(prefix_path):
-                for fname in files:
+                for fname in sorted(files):
                     full_path = Path(root) / fname
                     rel = full_path.relative_to(self._base_path)
                     objects.append(str(rel))
+                    if len(objects) >= LIST_OBJECTS_LIMIT:
+                        return objects
             return objects
 
         return await run_blocking_io(_list)

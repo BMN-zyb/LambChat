@@ -178,6 +178,47 @@ async def test_public_home_route_reuses_cached_index_html(
     assert read_count == 1
 
 
+def test_index_html_cache_is_bounded(tmp_path: Path) -> None:
+    api_main._INDEX_HTML_CACHE.clear()
+    previous_limit = api_main.INDEX_HTML_CACHE_MAX_ENTRIES
+    api_main.INDEX_HTML_CACHE_MAX_ENTRIES = 2
+    try:
+        for index in range(3):
+            static_dir = tmp_path / f"dist-{index}"
+            static_dir.mkdir()
+            index_file = static_dir / "index.html"
+            index_file.write_text(f"<!doctype html><div>{index}</div>", encoding="utf-8")
+
+            assert api_main._read_index_html(index_file) == f"<!doctype html><div>{index}</div>"
+
+        assert len(api_main._INDEX_HTML_CACHE) == 2
+    finally:
+        api_main.INDEX_HTML_CACHE_MAX_ENTRIES = previous_limit
+        api_main._INDEX_HTML_CACHE.clear()
+
+
+def test_read_index_html_rejects_oversized_file_before_reading(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    index_file = tmp_path / "index.html"
+    index_file.write_text("<!doctype html>", encoding="utf-8")
+    monkeypatch.setattr(api_main, "INDEX_HTML_MAX_BYTES", 8, raising=False)
+
+    def _fail_read_text(self, *args, **kwargs):
+        if self == index_file:
+            raise AssertionError("oversized index.html should not be read into memory")
+        return ""
+
+    monkeypatch.setattr(type(index_file), "read_text", _fail_read_text)
+    api_main._INDEX_HTML_CACHE.clear()
+
+    with pytest.raises(ValueError, match="index.html too large"):
+        api_main._read_index_html(index_file)
+
+    assert api_main._INDEX_HTML_CACHE == {}
+
+
 @pytest.mark.asyncio
 async def test_auth_spa_routes_are_noindexed_in_initial_html(
     monkeypatch: pytest.MonkeyPatch,
@@ -282,6 +323,38 @@ async def test_service_worker_is_served_without_auth(
     assert response.headers["cache-control"] == "no-cache"
     assert response.headers["content-type"].startswith("text/javascript")
     assert response.text == "self.__lambchat = true;\n"
+
+
+@pytest.mark.asyncio
+async def test_spa_static_file_metadata_check_runs_in_blocking_executor(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    static_dir = tmp_path / "dist"
+    static_dir.mkdir()
+    (static_dir / "index.html").write_text("<!doctype html><div id='root'></div>", encoding="utf-8")
+    (static_dir / "sw.js").write_text("self.__lambchat = true;\n", encoding="utf-8")
+    blocking_calls: list[str] = []
+
+    async def _fake_run_blocking_io(func, *args, **kwargs):
+        blocking_calls.append(func.__name__)
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(
+        api_main,
+        "resolve_frontend_target",
+        lambda _project_root, _frontend_dev_url: ("static", static_dir),
+    )
+    monkeypatch.setattr(api_main, "run_blocking_io", _fake_run_blocking_io)
+
+    app = api_main.create_app()
+    transport = ASGITransport(app=app)
+
+    async with AsyncClient(transport=transport, base_url="https://lambchat.com") as client:
+        response = await client.get("/sw.js")
+
+    assert response.status_code == 200
+    assert "_is_existing_file" in blocking_calls
 
 
 @pytest.mark.asyncio

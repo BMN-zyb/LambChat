@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import asyncio
+import json
+
 from src.agents.core.recommendations import (
     MAX_RECOMMEND_PROMPT_CHARS,
     MAX_RECOMMEND_PROMPT_TOKENS,
     build_recommend_prompt,
     count_recommend_prompt_tokens,
+    drain_recommend_background_tasks,
     format_history_context,
     format_history_from_messages,
     generate_recommend_questions,
@@ -114,6 +118,64 @@ async def test_generate_recommend_questions_includes_history_context(monkeypatch
     assert "先安装依赖再运行服务。" in prompt
     assert "那部署怎么做？" in prompt
     assert questions == ["问题一？", "问题二？", "问题三？"]
+
+
+async def test_generate_recommend_questions_offloads_json_parsing(monkeypatch) -> None:
+    model = _FakeModel()
+    calls = []
+
+    async def fake_get_model(**kwargs):
+        return model
+
+    async def fake_run_blocking_io(func, *args, **kwargs):
+        calls.append(func)
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr("src.infra.llm.client.LLMClient.get_model", fake_get_model)
+    monkeypatch.setattr("src.agents.core.recommendations.run_blocking_io", fake_run_blocking_io)
+
+    questions = await generate_recommend_questions("如何准备半程马拉松？")
+
+    assert calls == [build_recommend_prompt, json.loads]
+    assert questions == ["问题一？", "问题二？", "问题三？"]
+
+
+async def test_schedule_recommend_questions_offloads_history_formatting(monkeypatch) -> None:
+    calls = []
+    presenter = _FakePresenter()
+
+    async def fake_run_blocking_io(func, *args, **kwargs):
+        calls.append(func)
+        return func(*args, **kwargs)
+
+    async def fake_generate_recommend_questions(
+        user_input: str,
+        output_text: str = "",
+        history_context: str = "",
+    ):
+        assert history_context
+        return ["问题一？", "问题二？", "问题三？"]
+
+    monkeypatch.setattr("src.agents.core.recommendations.run_blocking_io", fake_run_blocking_io)
+    monkeypatch.setattr(
+        "src.agents.core.recommendations.generate_recommend_questions",
+        fake_generate_recommend_questions,
+    )
+
+    task = schedule_recommend_questions(
+        presenter,
+        "当前问题",
+        output_text="当前结果",
+        messages=[
+            {"role": "user", "content": "历史问题"},
+            {"role": "assistant", "content": "历史结果"},
+        ],
+    )
+
+    await task
+
+    assert calls == [format_history_from_messages]
+    assert presenter.questions == ["问题一？", "问题二？", "问题三？"]
 
 
 def test_build_recommend_prompt_stays_under_token_budget() -> None:
@@ -243,6 +305,77 @@ async def test_recommendation_node_emits_llm_followup_questions(monkeypatch) -> 
     assert presenter.questions is None
     await task
     assert presenter.questions == ["问题一？", "问题二？", "问题三？"]
+
+
+async def test_recommendation_background_tasks_are_bounded(monkeypatch) -> None:
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+    calls: list[str] = []
+
+    async def fake_generate_recommend_questions(
+        user_input: str,
+        output_text: str = "",
+        history_context: str = "",
+    ):
+        calls.append(user_input)
+        first_started.set()
+        await release_first.wait()
+        return [f"{user_input}？"]
+
+    monkeypatch.setattr(
+        "src.agents.core.recommendations.settings.RECOMMEND_QUESTIONS_MAX_BACKGROUND_TASKS",
+        1,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "src.agents.core.recommendations.generate_recommend_questions",
+        fake_generate_recommend_questions,
+    )
+
+    first_presenter = _FakePresenter()
+    second_presenter = _FakePresenter()
+    first_task = schedule_recommend_questions(first_presenter, "第一个问题")
+    await first_started.wait()
+
+    second_task = schedule_recommend_questions(second_presenter, "第二个问题")
+    await second_task
+
+    assert calls == ["第一个问题"]
+    assert second_presenter.questions is None
+
+    release_first.set()
+    await first_task
+    assert first_presenter.questions == ["第一个问题？"]
+
+
+async def test_drain_recommend_background_tasks_cancels_pending_tasks(monkeypatch) -> None:
+    started = asyncio.Event()
+    cleanup_finished = False
+
+    async def fake_generate_recommend_questions(
+        user_input: str,
+        output_text: str = "",
+        history_context: str = "",
+    ):
+        nonlocal cleanup_finished
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cleanup_finished = True
+
+    monkeypatch.setattr(
+        "src.agents.core.recommendations.generate_recommend_questions",
+        fake_generate_recommend_questions,
+    )
+
+    task = schedule_recommend_questions(_FakePresenter(), "长任务")
+    await started.wait()
+
+    await drain_recommend_background_tasks()
+
+    assert task.cancelled() is True
+    assert cleanup_finished is True
 
 
 def test_langgraph_agents_do_not_block_on_recommendation_node() -> None:

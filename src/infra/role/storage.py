@@ -5,9 +5,11 @@
 """
 
 import json
+import re
 from datetime import datetime
 from typing import Any, Optional
 
+from src.infra.async_utils import run_blocking_io
 from src.infra.logging import get_logger
 from src.infra.storage.redis import create_redis_client
 from src.infra.utils.datetime import to_iso, utc_now
@@ -22,6 +24,9 @@ logger = get_logger(__name__)
 _ROLE_OBJ_CACHE_PREFIX = "role:obj:"
 _ROLE_OBJ_VERSION_PREFIX = "role:obj_ver:"
 _ROLE_OBJ_CACHE_TTL = 300  # 5 分钟
+ROLE_ALLOWED_AGENTS_LIMIT = 100
+ROLE_LIST_LIMIT_MAX = 200
+ROLE_BATCH_LOOKUP_LIMIT = 100
 _role_cache_redis = None
 
 
@@ -40,7 +45,7 @@ def _role_to_cache_dict(role: Role) -> dict:
         "name": role.name,
         "description": role.description,
         "permissions": [p if isinstance(p, str) else p.value for p in role.permissions],
-        "allowed_agents": role.allowed_agents,
+        "allowed_agents": _bounded_allowed_agents(role.allowed_agents),
         "limits": role.limits.model_dump() if role.limits else None,
         "is_system": role.is_system,
         "created_at": to_iso(role.created_at)
@@ -56,6 +61,43 @@ def _cache_dict_to_role(data: dict | None) -> Role | None:
     """将缓存 dict 反序列化为 Role 对象。"""
     if data is None:
         return None
+    _normalize_role_dict(data)
+    return Role(**data)
+
+
+def _bounded_allowed_agents(allowed_agents: list[str] | None) -> list[str]:
+    if not allowed_agents:
+        return []
+    bounded = []
+    seen = set()
+    for agent_id in allowed_agents:
+        if agent_id in seen:
+            continue
+        seen.add(agent_id)
+        bounded.append(agent_id)
+        if len(bounded) >= ROLE_ALLOWED_AGENTS_LIMIT:
+            break
+    return bounded
+
+
+def _bounded_list_limit(limit: int) -> int:
+    return min(max(int(limit), 1), ROLE_LIST_LIMIT_MAX)
+
+
+def _bounded_unique_strings(values: list[str], limit: int) -> list[str]:
+    bounded: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if not isinstance(value, str) or not value or value in seen:
+            continue
+        seen.add(value)
+        bounded.append(value)
+        if len(bounded) >= limit:
+            break
+    return bounded
+
+
+def _normalize_role_dict(data: dict) -> dict:
     if data.get("limits"):
         data["limits"] = RoleLimits(**data["limits"])
     if isinstance(data.get("created_at"), str):
@@ -65,7 +107,8 @@ def _cache_dict_to_role(data: dict | None) -> Role | None:
     # 还原权限字符串为 Permission 枚举，与 DB 路径保持一致
     if isinstance(data.get("permissions"), list):
         data["permissions"] = _parse_permissions_static(data["permissions"])
-    return Role(**data)
+    data["allowed_agents"] = _bounded_allowed_agents(data.get("allowed_agents"))
+    return data
 
 
 def _parse_permissions_static(permissions: list[str]) -> list[Permission]:
@@ -175,8 +218,7 @@ class RoleStorage:
             return None
 
         role_dict["id"] = str(role_dict.pop("_id"))
-        role_dict["permissions"] = self._parse_permissions(role_dict.get("permissions", []))
-        return Role(**role_dict)
+        return Role(**_normalize_role_dict(role_dict))
 
     async def get_by_name(self, name: str) -> Optional[Role]:
         """
@@ -199,7 +241,8 @@ class RoleStorage:
             cached = await redis.get(cache_key)
             if cached is not None:
                 logger.debug(f"[Role Cache] Hit for role {name}")
-                return _cache_dict_to_role(json.loads(cached))
+                cached_data = await run_blocking_io(json.loads, cached)
+                return _cache_dict_to_role(cached_data)
         except Exception as e:
             logger.warning(f"[Role Cache] Redis get failed for role {name}: {e}")
 
@@ -211,8 +254,7 @@ class RoleStorage:
             result = None
         else:
             role_dict["id"] = str(role_dict.pop("_id"))
-            role_dict["permissions"] = self._parse_permissions(role_dict.get("permissions", []))
-            result = Role(**role_dict)
+            result = Role(**_normalize_role_dict(role_dict))
 
         # 写入缓存（CAS: 写入前重新检查版本号，避免 TOCTOU）
         try:
@@ -221,7 +263,10 @@ class RoleStorage:
             current_version = current_version or "0"
             if current_version == version:
                 cache_key = f"{_ROLE_OBJ_CACHE_PREFIX}{name}:v{current_version}"
-                cache_data = json.dumps(_role_to_cache_dict(result) if result else None)
+                cache_data = await run_blocking_io(
+                    json.dumps,
+                    _role_to_cache_dict(result) if result else None,
+                )
                 await redis.set(cache_key, cache_data, ex=_ROLE_OBJ_CACHE_TTL)
             else:
                 logger.debug(f"[Role Cache] Version changed for role {name}, skip stale write")
@@ -283,8 +328,7 @@ class RoleStorage:
             raise NotFoundError(f"角色 '{role_id}' 不存在")
 
         result["id"] = str(result.pop("_id"))
-        result["permissions"] = self._parse_permissions(result.get("permissions", []))
-        role = Role(**result)
+        role = Role(**_normalize_role_dict(result))
 
         # 写操作后自动失效缓存
         await self.invalidate_cache(existing.name)
@@ -349,11 +393,13 @@ class RoleStorage:
         Returns:
             角色列表
         """
+        limit = _bounded_list_limit(limit)
         query: dict[str, Any] = {}
         if q:
+            escaped_q = re.escape(q)
             query["$or"] = [
-                {"name": {"$regex": q, "$options": "i"}},
-                {"description": {"$regex": q, "$options": "i"}},
+                {"name": {"$regex": escaped_q, "$options": "i"}},
+                {"description": {"$regex": escaped_q, "$options": "i"}},
             ]
 
         cursor = self.collection.find(query).sort("name", 1).skip(skip).limit(limit)
@@ -361,8 +407,7 @@ class RoleStorage:
 
         async for role_dict in cursor:
             role_dict["id"] = str(role_dict.pop("_id"))
-            role_dict["permissions"] = self._parse_permissions(role_dict.get("permissions", []))
-            roles.append(Role(**role_dict))
+            roles.append(Role(**_normalize_role_dict(role_dict)))
 
         return roles
 
@@ -370,9 +415,10 @@ class RoleStorage:
         """Count roles matching an optional search query."""
         query: dict[str, Any] = {}
         if q:
+            escaped_q = re.escape(q)
             query["$or"] = [
-                {"name": {"$regex": q, "$options": "i"}},
-                {"description": {"$regex": q, "$options": "i"}},
+                {"name": {"$regex": escaped_q, "$options": "i"}},
+                {"description": {"$regex": escaped_q, "$options": "i"}},
             ]
         return await self.collection.count_documents(query)
 
@@ -388,14 +434,20 @@ class RoleStorage:
         """
         from bson import ObjectId
 
-        object_ids = [ObjectId(rid) for rid in role_ids]
+        object_ids: list[ObjectId] = []
+        for role_id in _bounded_unique_strings(role_ids, ROLE_BATCH_LOOKUP_LIMIT):
+            try:
+                object_ids.append(ObjectId(role_id))
+            except Exception:
+                continue
+        if not object_ids:
+            return []
         cursor = self.collection.find({"_id": {"$in": object_ids}})
         roles = []
 
         async for role_dict in cursor:
             role_dict["id"] = str(role_dict.pop("_id"))
-            role_dict["permissions"] = self._parse_permissions(role_dict.get("permissions", []))
-            roles.append(Role(**role_dict))
+            roles.append(Role(**_normalize_role_dict(role_dict)))
 
         return roles
 
@@ -409,6 +461,7 @@ class RoleStorage:
         Returns:
             角色列表
         """
+        names = _bounded_unique_strings(names, ROLE_BATCH_LOOKUP_LIMIT)
         if not names:
             return []
         roles = []

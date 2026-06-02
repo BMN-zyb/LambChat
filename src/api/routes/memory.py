@@ -2,14 +2,19 @@
 Memory API router - list and manage stored memories
 """
 
+import json
+import re
 import uuid
 from typing import Any, Optional
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
+from fastapi.responses import StreamingResponse
 
 from src.api.deps import get_current_user_required
+from src.infra.async_utils.blocking import run_blocking_io
 from src.infra.memory.client.types import MemoryType
 from src.infra.utils.datetime import parse_iso, to_iso, utc_now, utc_now_iso
+from src.kernel.config import settings
 from src.kernel.schemas.user import TokenPayload
 
 router = APIRouter()
@@ -17,6 +22,9 @@ router = APIRouter()
 _VALID_MEMORY_TYPES = {mt.value for mt in MemoryType}
 _VALID_SOURCES = {"manual", "auto_retained", "imported", "consolidated"}
 _MEMORY_EXPORT_VERSION = 1
+_DEFAULT_MEMORY_IMPORT_CONTENT_MAX_CHARS = 64_000
+_DEFAULT_MEMORY_IMPORT_TOTAL_CONTENT_MAX_CHARS = 2_000_000
+_DEFAULT_MEMORY_EXPORT_CONTENT_MAX_CHARS = 64_000
 
 
 async def _get_backend():
@@ -46,6 +54,65 @@ def _clean_text(value: Any, max_length: int | None = None) -> str:
     return text
 
 
+def _get_memory_import_content_max_chars() -> int:
+    value = getattr(
+        settings,
+        "NATIVE_MEMORY_IMPORT_CONTENT_MAX_CHARS",
+        _DEFAULT_MEMORY_IMPORT_CONTENT_MAX_CHARS,
+    )
+    try:
+        return max(1, int(value))
+    except (TypeError, ValueError):
+        return _DEFAULT_MEMORY_IMPORT_CONTENT_MAX_CHARS
+
+
+def _get_memory_import_total_content_max_chars() -> int:
+    value = getattr(
+        settings,
+        "NATIVE_MEMORY_IMPORT_TOTAL_CONTENT_MAX_CHARS",
+        _DEFAULT_MEMORY_IMPORT_TOTAL_CONTENT_MAX_CHARS,
+    )
+    try:
+        return max(1, int(value))
+    except (TypeError, ValueError):
+        return _DEFAULT_MEMORY_IMPORT_TOTAL_CONTENT_MAX_CHARS
+
+
+def _get_memory_export_content_max_chars() -> int:
+    value = getattr(
+        settings,
+        "NATIVE_MEMORY_EXPORT_CONTENT_MAX_CHARS",
+        _DEFAULT_MEMORY_EXPORT_CONTENT_MAX_CHARS,
+    )
+    try:
+        return max(1, int(value))
+    except (TypeError, ValueError):
+        return _DEFAULT_MEMORY_EXPORT_CONTENT_MAX_CHARS
+
+
+def _validate_memory_content_size(content: str) -> None:
+    max_chars = _get_memory_import_content_max_chars()
+    if len(content) > max_chars:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Memory content too large (max {max_chars} characters)",
+        )
+
+
+def _validate_memory_import_total_content_size(raw_memories: list[Any]) -> None:
+    max_chars = _get_memory_import_total_content_max_chars()
+    total_chars = 0
+    for raw in raw_memories:
+        if not isinstance(raw, dict):
+            continue
+        total_chars += len(str(raw.get("content") or "").strip())
+        if total_chars > max_chars:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Memory import content too large (max {max_chars} total characters)",
+            )
+
+
 def _memory_projection() -> dict[str, int]:
     return {
         "memory_id": 1,
@@ -64,6 +131,10 @@ def _memory_projection() -> dict[str, int]:
         "accessed_at": 1,
         "access_count": 1,
     }
+
+
+def _json_iterencode_chunks(encoder: json.JSONEncoder, value: Any) -> list[str]:
+    return list(encoder.iterencode(value))
 
 
 @router.get("/")
@@ -90,7 +161,7 @@ async def list_memories(
         query_filter["memory_type"] = memory_type
 
     if search:
-        search_regex = {"$regex": search, "$options": "i"}
+        search_regex = {"$regex": re.escape(search), "$options": "i"}
         query_filter["$or"] = [
             {"title": search_regex},
             {"summary": search_regex},
@@ -166,6 +237,7 @@ async def create_memory(
     content = _clean_text(payload.get("content"))
     if len(content) < 5:
         raise HTTPException(status_code=400, detail="Memory content must be at least 5 characters")
+    _validate_memory_content_size(content)
 
     memory_id = uuid.uuid4().hex
     title = _clean_text(payload.get("title") or "New memory", 80)
@@ -266,6 +338,7 @@ async def update_memory(
             raise HTTPException(
                 status_code=400, detail="Memory content must be at least 5 characters"
             )
+        _validate_memory_content_size(content)
 
         content_fields = await build_content_fields(backend, user.sub, memory_id, content)
         update["content"] = content_fields.get("content", content)
@@ -323,11 +396,24 @@ async def export_memories(
     if hasattr(cursor, "sort"):
         cursor = cursor.sort("updated_at", -1)
 
-    memories: list[dict[str, Any]] = []
-    async for doc in cursor:
-        content = await hydrate_memory_text(backend, doc)
-        memories.append(
-            {
+    encoder = json.JSONEncoder(ensure_ascii=False, separators=(",", ":"))
+    exported_at = utc_now_iso()
+
+    async def stream_export():
+        yield f'{{"version":{_MEMORY_EXPORT_VERSION},"exported_at":'
+        for chunk in encoder.iterencode(exported_at):
+            yield chunk
+        yield ',"memories":['
+
+        first = True
+        async for doc in cursor:
+            content = await hydrate_memory_text(backend, doc)
+            content_original_chars = len(content)
+            max_content_chars = _get_memory_export_content_max_chars()
+            content_truncated = content_original_chars > max_content_chars
+            if content_truncated:
+                content = content[:max_content_chars]
+            item = {
                 "memory_id": doc["memory_id"],
                 "title": doc.get("title", ""),
                 "summary": doc.get("summary", ""),
@@ -341,13 +427,23 @@ async def export_memories(
                 "accessed_at": to_iso(doc.get("accessed_at")),
                 "access_count": doc.get("access_count", 0),
             }
-        )
+            if content_truncated:
+                item["content_truncated"] = True
+                item["content_original_chars"] = content_original_chars
+            if first:
+                first = False
+            else:
+                yield ","
+            for chunk in await run_blocking_io(_json_iterencode_chunks, encoder, item):
+                yield chunk
 
-    return {
-        "version": _MEMORY_EXPORT_VERSION,
-        "exported_at": utc_now_iso(),
-        "memories": memories,
-    }
+        yield "]}"
+
+    return StreamingResponse(
+        stream_export(),
+        media_type="application/json",
+        headers={"Content-Disposition": 'attachment; filename="lambchat-memory-export.json"'},
+    )
 
 
 @router.post("/import")
@@ -368,6 +464,7 @@ async def import_memories(
         raise HTTPException(status_code=400, detail="memories must be a list")
     if len(raw_memories) > 1000:
         raise HTTPException(status_code=400, detail="Cannot import more than 1000 memories at once")
+    _validate_memory_import_total_content_size(raw_memories)
 
     created = 0
     overwritten = 0
@@ -389,6 +486,7 @@ async def import_memories(
             raise HTTPException(
                 status_code=400, detail="Memory content must be at least 5 characters"
             )
+        _validate_memory_content_size(content)
 
         memory_id = _clean_text(raw.get("memory_id")) or uuid.uuid4().hex
         title = _clean_text(raw.get("title") or "Imported memory", 80)

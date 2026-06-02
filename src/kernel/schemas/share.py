@@ -115,3 +115,5 @@ class SharedContentResponse(BaseModel):
     owner: SharedContentOwner
     share_type: ShareType
     run_ids: Optional[list[str]] = None
+    events_limited: bool = False
+    events_limit: Optional[int] = None

@@ -715,11 +715,23 @@ class SessionSandboxManager:
                 self._cache.move_to_end(user_id)  # LRU: mark as recently used
                 sandbox_id, backend, provider_obj = self._cache[user_id]
                 try:
-                    if self._e2b_adapter.sandbox_is_running(provider_obj):
-                        self._e2b_adapter.extend_timeout(provider_obj, settings.E2B_TIMEOUT)
+                    is_running = await run_blocking_io(
+                        self._e2b_adapter.sandbox_is_running,
+                        provider_obj,
+                    )
+                    if is_running:
+                        await run_blocking_io(
+                            self._e2b_adapter.extend_timeout,
+                            provider_obj,
+                            settings.E2B_TIMEOUT,
+                        )
                         await self._save_binding(user_id, sandbox_id, "running")
                         await ensure_sandbox_mcp(backend, user_id)
-                        return backend, self._e2b_adapter.get_work_dir(provider_obj)
+                        work_dir = await run_blocking_io(
+                            self._e2b_adapter.get_work_dir,
+                            provider_obj,
+                        )
+                        return backend, work_dir
                 except Exception as e:
                     logger.warning(f"[E2B] Cache hit but sandbox {sandbox_id} unhealthy: {e}")
                 del self._cache[user_id]
@@ -733,16 +745,27 @@ class SessionSandboxManager:
                 )
                 if provider_obj:
                     try:
-                        self._e2b_adapter.extend_timeout(provider_obj, settings.E2B_TIMEOUT)
+                        await run_blocking_io(
+                            self._e2b_adapter.extend_timeout,
+                            provider_obj,
+                            settings.E2B_TIMEOUT,
+                        )
                         backend = self._build_composite_backend(provider_obj, user_id)
                         self._cache[user_id] = (metadata_sandbox_id, backend, provider_obj)
                         self._evict_if_needed()
-                        info = self._e2b_adapter.get_sandbox_info(provider_obj)
+                        info = await run_blocking_io(
+                            self._e2b_adapter.get_sandbox_info,
+                            provider_obj,
+                        )
                         await self._save_binding(
                             user_id, metadata_sandbox_id, info.get("state", "running")
                         )
                         await ensure_sandbox_mcp(backend, user_id)
-                        return backend, self._e2b_adapter.get_work_dir(provider_obj)
+                        work_dir = await run_blocking_io(
+                            self._e2b_adapter.get_work_dir,
+                            provider_obj,
+                        )
+                        return backend, work_dir
                     except Exception as e:
                         logger.warning(f"[E2B] Failed to reconnect {metadata_sandbox_id}: {e}")
 

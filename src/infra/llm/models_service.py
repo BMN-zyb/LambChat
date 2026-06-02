@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 from typing import Any, Optional
 
+from src.infra.async_utils import run_blocking_io
 from src.infra.logging import get_logger
 from src.kernel.config import settings
 
@@ -22,6 +23,7 @@ logger = get_logger(__name__)
 # Redis cache key and TTL
 _MODELS_CACHE_KEY = "models:available"
 _MODELS_CACHE_TTL = 300  # 5 minutes default TTL
+_MODELS_CACHE_MAX_SIZE = 500
 
 # In-memory cache (per-process)
 _memory_cache: Optional[list[dict[str, Any]]] = None
@@ -34,7 +36,7 @@ _API_KEY_CACHE_MAX_SIZE = 500  # Prevent unbounded growth
 def set_memory_cache(models: list[dict[str, Any]]) -> None:
     """Update the in-memory cache directly."""
     global _memory_cache
-    _memory_cache = models
+    _memory_cache = models[:_MODELS_CACHE_MAX_SIZE]
 
 
 def clear_memory_cache() -> None:
@@ -125,9 +127,9 @@ async def get_available_models() -> list[dict[str, Any]]:
         cached = await redis_client.get(_MODELS_CACHE_KEY)
         if cached:
             logger.debug("[LLMModels] Cache hit: Redis")
-            model_list = json.loads(cached)
-            _memory_cache = model_list
-            return model_list
+            model_list = await run_blocking_io(json.loads, cached)
+            set_memory_cache(model_list)
+            return _memory_cache or []
     except Exception as e:
         logger.debug(f"[LLMModels] Redis read failed: {e}")
 
@@ -140,7 +142,7 @@ def _strip_api_keys(model_list: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
     Returns new dicts to avoid mutating the caller's data.
     """
-    return [{**m, "api_key": None} for m in model_list]
+    return [{**m, "api_key": None} for m in model_list[:_MODELS_CACHE_MAX_SIZE]]
 
 
 async def _write_to_caches(model_list: list[dict[str, Any]]) -> None:
@@ -155,7 +157,8 @@ async def _write_to_caches(model_list: list[dict[str, Any]]) -> None:
 
         redis_client = get_redis_client()
         ttl = getattr(settings, "LLM_MODELS_CACHE_TTL", _MODELS_CACHE_TTL)
-        await redis_client.set(_MODELS_CACHE_KEY, json.dumps(stripped), ex=ttl)
+        serialized = await run_blocking_io(json.dumps, stripped)
+        await redis_client.set(_MODELS_CACHE_KEY, serialized, ex=ttl)
         logger.debug(f"[LLMModels] Cached {len(stripped)} models (TTL={ttl}s)")
     except Exception as e:
         logger.debug(f"[LLMModels] Redis write failed: {e}")
@@ -178,7 +181,7 @@ async def _fetch_from_db(*, raise_on_error: bool = True) -> list[dict[str, Any]]
         model_list = [m.model_dump() for m in models]
 
         # Populate in-process api_key cache from DB results
-        for m, raw in zip(models, model_list):
+        for m in models[:_MODELS_CACHE_MAX_SIZE]:
             if m.api_key:
                 _api_key_cache[m.value] = m.api_key
 

@@ -27,10 +27,30 @@ logger = get_logger(__name__)
 
 # 支持的语言白名单
 SUPPORTED_LANGUAGES = frozenset(["en", "zh", "ja", "ko"])
+SESSION_EVENT_TYPE_FILTER_LIMIT = 100
+SESSION_EVENT_RESPONSE_LIMIT_MAX = 1000
+SESSION_RAW_TRACE_RESPONSE_LIMIT_MAX = 20
+SESSION_RAW_TRACE_EVENTS_LIMIT_MAX = 200
 
 
 class MessageCheckpointCreatePayload(BaseModel):
     name: str | None = None
+
+
+def _parse_event_types_filter(event_types: str | None) -> list[str] | None:
+    if not event_types:
+        return None
+    parsed: list[str] = []
+    seen = set()
+    for raw_type in event_types.split(","):
+        event_type = raw_type.strip()
+        if not event_type or event_type in seen:
+            continue
+        seen.add(event_type)
+        parsed.append(event_type)
+        if len(parsed) >= SESSION_EVENT_TYPE_FILTER_LIMIT:
+            break
+    return parsed or None
 
 
 def _is_retryable_error(error: Exception) -> bool:
@@ -261,6 +281,12 @@ async def get_session_events(
     exclude_run_id: Optional[str] = Query(
         None, description="排除的 Run ID（用于排除正在运行的 run）"
     ),
+    limit: int = Query(
+        1000,
+        ge=1,
+        le=SESSION_EVENT_RESPONSE_LIMIT_MAX,
+        description="最大返回事件数",
+    ),
     user: TokenPayload = Depends(get_current_user_required),
 ):
     """
@@ -286,19 +312,22 @@ async def get_session_events(
     dual_writer = get_dual_writer()
 
     # 解析事件类型过滤
-    types_list = None
-    if event_types:
-        types_list = [t.strip() for t in event_types.split(",") if t.strip()]
+    types_list = _parse_event_types_filter(event_types)
 
     # 重要：completed_only=True，确保正在运行的 trace 中的事件不要被返回，而是单独去请求/stream接口，避免重复返回事件，导致前端消息重复显示。
     # 否则刷新页面时，当前 run 的 user:message 事件会丢失，导致消息合并
+    events_probe_limit = limit + 1
     events = await dual_writer.read_session_events(
         session_id,
         types_list,
         run_id=run_id,
         exclude_run_id=exclude_run_id,
         completed_only=True,
+        max_events=events_probe_limit,
     )
+    events_limited = len(events) > limit
+    if events_limited:
+        events = events[:limit]
 
     # 获取 session 的 current_run_id 用于响应
     current_run_id = session.metadata.get("current_run_id") if session.metadata else None
@@ -307,13 +336,15 @@ async def get_session_events(
         "events": events,
         "session_id": session_id,
         "run_id": run_id or current_run_id,
+        "events_limited": events_limited,
+        "events_limit": limit,
     }
 
 
 @router.get("/{session_id}/runs")
 async def get_session_runs(
     session_id: str,
-    limit: int = Query(50, description="最大返回数量"),
+    limit: int = Query(50, ge=1, le=100, description="最大返回数量"),
     trace_id: Optional[str] = Query(None, description="精确 trace ID 过滤"),
     user: TokenPayload = Depends(get_current_user_required),
 ):
@@ -344,15 +375,14 @@ async def get_session_runs(
         current_trace_id = trace.get("trace_id")
         user_message = None
         if run_id and current_trace_id:
-            events = await trace_storage.get_trace_events(trace_id=current_trace_id)
-            for event in events:
-                if event.get("event_type") == "user:message":
-                    data = event.get("data", {})
-                    user_message = data.get("content") or data.get("message") or ""
-                    if user_message:
-                        if len(user_message) > 20:
-                            user_message = user_message[:17] + "..."
-                        break
+            event = await trace_storage.get_first_trace_event(
+                trace_id=current_trace_id,
+                event_types=["user:message"],
+            )
+            data = event.get("data", {}) if event else {}
+            user_message = data.get("content") or data.get("message") or ""
+            if user_message and len(user_message) > 20:
+                user_message = user_message[:17] + "..."
 
         return {
             "run_id": run_id,
@@ -411,10 +441,22 @@ async def get_session_traces(
 @router.get("/{session_id}/raw-traces")
 async def get_session_raw_traces(
     session_id: str,
+    limit: int = Query(
+        20,
+        ge=1,
+        le=SESSION_RAW_TRACE_RESPONSE_LIMIT_MAX,
+        description="最大返回 trace 数",
+    ),
+    events_limit: int = Query(
+        200,
+        ge=1,
+        le=SESSION_RAW_TRACE_EVENTS_LIMIT_MAX,
+        description="每个 trace 最多返回最近事件数",
+    ),
     user: TokenPayload = Depends(get_current_user_required),
 ):
     """
-    获取会话的原始 traces 数据（包含 events）
+    获取会话的原始 traces 数据（包含最近 events）
     """
     from src.infra.session.trace_storage import get_trace_storage
 
@@ -427,11 +469,23 @@ async def get_session_raw_traces(
 
     trace_storage = get_trace_storage()
 
-    # 直接查询 MongoDB
-    cursor = trace_storage.collection.find({"session_id": session_id}, {"_id": 0})
-    traces = await cursor.to_list(length=100)
+    cursor = (
+        trace_storage.collection.find(
+            {"session_id": session_id},
+            {"_id": 0, "events": {"$slice": -events_limit}},
+        )
+        .sort("started_at", -1)
+        .limit(limit)
+    )
+    traces = await cursor.to_list(length=limit)
 
-    return {"session_id": session_id, "traces": traces, "count": len(traces)}
+    return {
+        "session_id": session_id,
+        "traces": traces,
+        "count": len(traces),
+        "limit": limit,
+        "events_limit": events_limit,
+    }
 
 
 @router.patch("/{session_id}/status")

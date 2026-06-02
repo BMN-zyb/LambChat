@@ -44,6 +44,9 @@ _DEFAULT_TIMEOUT = 30 * 60
 
 # 中文路径临时文件目录
 _TEMP_DIR = "/tmp/__daytona_transfer__"
+SANDBOX_DOWNLOAD_MAX_BYTES = 50 * 1024 * 1024
+SANDBOX_UPLOAD_MAX_BYTES = 50 * 1024 * 1024
+SANDBOX_BATCH_FILES_LIMIT = 100
 
 
 def _needs_ascii_bridge(path: str) -> bool:
@@ -179,13 +182,33 @@ class DaytonaBackend(BaseSandbox):
         对含中文的路径：先用 shell cp 到 ASCII 临时路径，通过 SDK 下载，再 rm 临时文件。
         纯 ASCII 路径直接走 SDK，不做任何额外处理。
         """
+        if len(paths) > SANDBOX_BATCH_FILES_LIMIT:
+            return [
+                FileDownloadResponse(path=path, content=None, error="too_many_files")
+                for path in paths
+            ]
+
+        oversized_paths = set()
+        for path in paths:
+            if not path.startswith("/"):
+                continue
+            size = self._file_size(path)
+            if size is not None and size > SANDBOX_DOWNLOAD_MAX_BYTES:
+                oversized_paths.add(path)
+                logger.warning(
+                    "Skipping Daytona download for large file %s: %s bytes > %s",
+                    path,
+                    size,
+                    SANDBOX_DOWNLOAD_MAX_BYTES,
+                )
+
         # 原始路径 -> 临时路径的映射（仅中文路径）
         bridge_map: dict[str, str] = {}
         # 最终传给 SDK 的路径（中文路径已被替换为临时路径）
         sdk_path_map: dict[str, str] = {}  # 原始路径 -> SDK 实际使用的路径
 
         for path in paths:
-            if not path.startswith("/"):
+            if not path.startswith("/") or path in oversized_paths:
                 continue
             if _needs_ascii_bridge(path):
                 tmp = _temp_path(path)
@@ -206,7 +229,7 @@ class DaytonaBackend(BaseSandbox):
         download_requests: list[FileDownloadRequest] = []
         valid_paths: list[str] = []  # 没有在 cp 阶段失败的路径
         for path in paths:
-            if not path.startswith("/") or path in copy_errors:
+            if not path.startswith("/") or path in copy_errors or path in oversized_paths:
                 continue
             sdk_path = sdk_path_map[path]
             download_requests.append(FileDownloadRequest(source=sdk_path))
@@ -248,6 +271,11 @@ class DaytonaBackend(BaseSandbox):
                     FileDownloadResponse(path=path, content=None, error="invalid_path")
                 )
                 continue
+            if path in oversized_paths:
+                responses.append(
+                    FileDownloadResponse(path=path, content=None, error="file_not_found")
+                )
+                continue
             if path in copy_errors:
                 responses.append(
                     FileDownloadResponse(path=path, content=None, error="file_not_found")
@@ -268,6 +296,15 @@ class DaytonaBackend(BaseSandbox):
 
         return responses
 
+    def _file_size(self, path: str) -> int | None:
+        result = self.execute(f"stat -c %s {shlex.quote(path)}", timeout=30)
+        if result.exit_code != 0:
+            return None
+        try:
+            return int(str(result.output).strip().splitlines()[0])
+        except (IndexError, ValueError):
+            return None
+
     async def adownload_files(self, paths: list[str]) -> list[FileDownloadResponse]:
         """异步下载文件（通过线程池，避免阻塞事件循环）"""
         return await run_blocking_io(self.download_files, paths)
@@ -278,8 +315,19 @@ class DaytonaBackend(BaseSandbox):
         对含中文的路径：先通过 SDK 上传到 ASCII 临时路径，再用 shell mv 到中文路径。
         纯 ASCII 路径直接走 SDK，不做任何额外处理。
         """
+        if len(files) > SANDBOX_BATCH_FILES_LIMIT:
+            return [
+                FileUploadResponse(path=path, error="too_many_files") for path, _content in files
+            ]
+
+        oversized_paths = {
+            path
+            for path, content in files
+            if path.startswith("/") and len(content) > SANDBOX_UPLOAD_MAX_BYTES
+        }
+
         for path, _content in files:
-            if path.startswith("/"):
+            if path.startswith("/") and path not in oversized_paths:
                 self._ensure_parent_dir(path)
 
         # 原始路径 -> 临时路径的映射（仅中文路径）
@@ -291,6 +339,8 @@ class DaytonaBackend(BaseSandbox):
 
         for path, content in files:
             if not path.startswith("/"):
+                continue
+            if path in oversized_paths:
                 continue
             if _needs_ascii_bridge(path):
                 tmp = _temp_path(path)
@@ -334,10 +384,19 @@ class DaytonaBackend(BaseSandbox):
             if not path.startswith("/"):
                 responses.append(FileUploadResponse(path=path, error="invalid_path"))
                 continue
+            if path in oversized_paths:
+                responses.append(FileUploadResponse(path=path, error="file_too_large"))
+                continue
             error_str = upload_errors.get(path) or rename_errors.get(path)
             # 类型转换：确保 error 是允许的类型
             final_error: (
-                Literal["file_not_found", "permission_denied", "is_directory", "invalid_path"]
+                Literal[
+                    "file_not_found",
+                    "permission_denied",
+                    "is_directory",
+                    "invalid_path",
+                    "file_too_large",
+                ]
                 | None
             ) = None
             if error_str:

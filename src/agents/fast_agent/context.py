@@ -195,6 +195,20 @@ class FastAgentContext:
         except Exception as e:
             logger.warning(f"[FastAgentContext] Failed to load internal tools: {e}")
 
+        try:
+            from src.infra.tool.env_var_tool import get_env_var_tools
+
+            existing_tool_names = {getattr(tool, "name", "") for tool in self.tools}
+            env_var_tools = [
+                tool
+                for tool in get_env_var_tools()
+                if getattr(tool, "name", "") not in existing_tool_names
+            ]
+            self.tools.extend(env_var_tools)
+            logger.info(f"[FastAgentContext] Added {len(env_var_tools)} env var tools")
+        except Exception as e:
+            logger.warning(f"[FastAgentContext] Failed to load env var tools: {e}")
+
         # Memory 工具（原生 MongoDB 后端）
         if settings.ENABLE_MEMORY:
             try:

@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Callable, Dict, Optional, Tuple
 
+from src.infra.async_utils import run_blocking_io
 from src.infra.session.storage import SessionUpdate
 from src.infra.storage.redis import get_redis_client
 from src.infra.task.constants import HEARTBEAT_TIMEOUT
@@ -30,6 +31,18 @@ QUEUE_TIMEOUT = 300  # 5 minutes max wait in queue
 USER_LOCK_TTL = 5
 USER_LOCK_WAIT_SECONDS = 5.0
 USER_LOCK_POLL_INTERVAL = 0.05
+QUEUE_SCAN_PAGE_SIZE = 100
+QUEUE_ENTRY_MAX_BYTES = 2 * 1024 * 1024
+QUEUE_REWRITE_CHUNK_SIZE = 100
+
+
+async def _queue_json_dumps(value: Any) -> str:
+    return await run_blocking_io(json.dumps, value, ensure_ascii=False)
+
+
+async def _queue_json_loads(value: Any) -> Any:
+    return await run_blocking_io(json.loads, value)
+
 
 # ---------------------------------------------------------------------------
 # Executor registry — maps string keys to callables so queued tasks can be
@@ -72,6 +85,14 @@ class ConcurrencyResponse:
     queue_length: int = 0
 
 
+@dataclass
+class _DequeuedTask:
+    user_id: str
+    run_id: str
+    session_id: str
+    queue_data: dict[str, Any]
+
+
 class UserConcurrencyLimiter:
     """Redis-based per-user chat concurrency limiter.
 
@@ -102,6 +123,19 @@ class UserConcurrencyLimiter:
     @staticmethod
     def _lock_key(user_id: str) -> str:
         return f"chat:lock:{user_id}"
+
+    async def _iter_queue_entries(self, queue_key: str, page_size: int = QUEUE_SCAN_PAGE_SIZE):
+        start = 0
+        while True:
+            end = start + page_size - 1
+            entries = await self.redis.lrange(queue_key, start, end)
+            if not entries:
+                return
+            for entry in entries:
+                yield entry
+            if len(entries) < page_size:
+                return
+            start += page_size
 
     async def get_user_limits(self, roles: list[str]) -> Tuple[Optional[int], Optional[int]]:
         """Get effective concurrency limits from user's roles (most permissive wins).
@@ -169,14 +203,16 @@ class UserConcurrencyLimiter:
     async def _release_user_lock(self, lock_key: str, token: str) -> None:
         """Release a per-user Redis mutex if we still own it."""
         try:
-            current = await self.redis.get(lock_key)
-        except Exception:
-            current = None
-        if current is None or current == token:
-            try:
-                await self.redis.delete(lock_key)
-            except Exception as e:
-                logger.warning(f"Failed to release concurrency lock {lock_key}: {e}")
+            lua_script = """
+            if redis.call("get", KEYS[1]) == ARGV[1] then
+                return redis.call("del", KEYS[1])
+            else
+                return 0
+            end
+            """
+            await self.redis.eval(lua_script, 1, lock_key, token)
+        except Exception as e:
+            logger.warning(f"Failed to release concurrency lock {lock_key}: {e}")
 
     async def _queue_task_locked(
         self,
@@ -199,7 +235,7 @@ class UserConcurrencyLimiter:
                     queue_length=queue_length,
                 )
 
-        entry = json.dumps(
+        entry = await _queue_json_dumps(
             {
                 "run_id": run_id,
                 "session_id": session_id,
@@ -208,6 +244,21 @@ class UserConcurrencyLimiter:
                 "task_context": task_context or {},
             }
         )
+        entry_size = len(entry.encode("utf-8"))
+        if entry_size > QUEUE_ENTRY_MAX_BYTES:
+            logger.warning(
+                "Rejecting oversized queued task context: user=%s run=%s size=%s max=%s",
+                user_id,
+                run_id,
+                entry_size,
+                QUEUE_ENTRY_MAX_BYTES,
+            )
+            return ConcurrencyResponse(
+                result=ConcurrencyResult.REJECTED_QUEUE,
+                max_concurrent=max_concurrent or 0,
+                active_count=active_count,
+                queue_length=await self.redis.llen(self._queue_key(user_id)),
+            )
         await self.redis.rpush(self._queue_key(user_id), entry)
         queue_length = await self.redis.llen(self._queue_key(user_id))
         logger.info(
@@ -287,16 +338,32 @@ class UserConcurrencyLimiter:
 
     async def release(self, user_id: str, run_id: str, dequeue: bool = True) -> None:
         """Release a concurrency slot and trigger next queued task."""
+        dequeued_task: _DequeuedTask | None = None
         try:
             lock_key, token = await self._acquire_user_lock(user_id)
             try:
-                await self.redis.zrem(self._active_key(user_id), run_id)
+                await self._release_active_slot_locked(user_id, run_id)
                 if dequeue:
-                    await self._try_dequeue_next_locked(user_id)
+                    dequeued_task = await self._try_dequeue_next_locked(
+                        user_id,
+                        dispatch=False,
+                    )
             finally:
                 await self._release_user_lock(lock_key, token)
+
+            if dequeued_task is not None:
+                await self._dispatch_queued_task(
+                    dequeued_task.user_id,
+                    dequeued_task.run_id,
+                    dequeued_task.session_id,
+                    dequeued_task.queue_data,
+                )
         except Exception as e:
             logger.error(f"Concurrency release error: {e}")
+
+    async def _release_active_slot_locked(self, user_id: str, run_id: str) -> None:
+        """Release an active slot while the caller already holds the per-user lock."""
+        await self.redis.zrem(self._active_key(user_id), run_id)
 
     async def refresh(self, user_id: str, run_id: str) -> None:
         """Refresh heartbeat timestamp for an active task.
@@ -314,16 +381,30 @@ class UserConcurrencyLimiter:
 
     async def _try_dequeue_next(self, user_id: str) -> None:
         """Try to dequeue next valid (non-expired) task from queue."""
+        dequeued_task: _DequeuedTask | None = None
         try:
             lock_key, token = await self._acquire_user_lock(user_id)
             try:
-                await self._try_dequeue_next_locked(user_id)
+                dequeued_task = await self._try_dequeue_next_locked(user_id, dispatch=False)
             finally:
                 await self._release_user_lock(lock_key, token)
+
+            if dequeued_task is not None:
+                await self._dispatch_queued_task(
+                    dequeued_task.user_id,
+                    dequeued_task.run_id,
+                    dequeued_task.session_id,
+                    dequeued_task.queue_data,
+                )
         except Exception as e:
             logger.error(f"Dequeue error: {e}")
 
-    async def _try_dequeue_next_locked(self, user_id: str) -> None:
+    async def _try_dequeue_next_locked(
+        self,
+        user_id: str,
+        *,
+        dispatch: bool = True,
+    ) -> _DequeuedTask | None:
         """Try to dequeue the next queued task while holding the per-user lock."""
         queue_key = self._queue_key(user_id)
         attempts = 0
@@ -331,15 +412,25 @@ class UserConcurrencyLimiter:
             attempts += 1
             entry = await self.redis.lpop(queue_key)
             if entry is None:
-                return
+                return None
 
-            data = json.loads(entry)
+            try:
+                data = await _queue_json_loads(entry)
+            except (json.JSONDecodeError, TypeError) as exc:
+                logger.warning("Discarding corrupt queued task entry: %s", exc)
+                continue
+            if not isinstance(data, dict):
+                logger.warning("Discarding non-object queued task entry: %r", data)
+                continue
             if time.time() - data.get("queued_at", 0) > QUEUE_TIMEOUT:
                 logger.info(f"Discarding expired queued task: run={data.get('run_id')}")
                 continue
 
-            run_id = data["run_id"]
-            session_id = data["session_id"]
+            run_id = data.get("run_id")
+            session_id = data.get("session_id")
+            if not run_id or not session_id:
+                logger.warning("Discarding queued task entry missing run_id or session_id")
+                continue
 
             max_concurrent, _ = await self.get_user_limits_from_cache(user_id)
             if max_concurrent is not None:
@@ -347,12 +438,21 @@ class UserConcurrencyLimiter:
                 active_count = await self._get_active_count(user_id)
                 if active_count >= max_concurrent:
                     await self.redis.lpush(queue_key, entry)
-                    return
+                    return None
 
             await self.redis.zadd(self._active_key(user_id), {run_id: time.time()})
             logger.info(f"Task dequeued: user={user_id}, run={run_id}")
-            await self._dispatch_queued_task(user_id, run_id, session_id, data)
-            return
+            if dispatch:
+                await self._dispatch_queued_task(user_id, run_id, session_id, data)
+                return None
+            return _DequeuedTask(
+                user_id=user_id,
+                run_id=run_id,
+                session_id=session_id,
+                queue_data=data,
+            )
+
+        return None
 
     async def get_user_limits_from_cache(self, user_id: str) -> Tuple[Optional[int], Optional[int]]:
         """Get limits (cache not implemented, delegates to get_user_limits with empty roles).
@@ -452,7 +552,7 @@ class UserConcurrencyLimiter:
                         f"No executor registered for key '{task_ctx['executor_key']}' "
                         f"(run={run_id})"
                     )
-                    await self.release(user_id, run_id)
+                    await self._release_active_slot_locked(user_id, run_id)
                     return
                 dispatch_user_id = queue_data.get("user_id", user_id)
                 agent_id = task_ctx["agent_id"]
@@ -471,7 +571,7 @@ class UserConcurrencyLimiter:
                 pending = task_manager.pop_pending_task(run_id)
                 if pending is None:
                     logger.warning(f"No pending task found for queued run: {run_id}")
-                    await self.release(user_id, run_id)
+                    await self._release_active_slot_locked(user_id, run_id)
                     return
                 executor_fn = pending["executor"]
                 dispatch_user_id = user_id
@@ -492,7 +592,7 @@ class UserConcurrencyLimiter:
                 executor = task_manager._executor
                 if executor is None:
                     logger.error("No executor available for queued task %s", run_id)
-                    await self.release(user_id, run_id)
+                    await self._release_active_slot_locked(user_id, run_id)
                     return
 
                 # Ensure session record exists in MongoDB before executing
@@ -541,16 +641,18 @@ class UserConcurrencyLimiter:
 
         except Exception as e:
             logger.error(f"Failed to dispatch queued task: {e}")
-            await self.release(user_id, run_id)
+            await self._release_active_slot_locked(user_id, run_id)
 
     async def get_queue_position(self, user_id: str, run_id: str) -> int:
         """Get current queue position for a run_id. Returns 0 if not in queue."""
         try:
-            entries = await self.redis.lrange(self._queue_key(user_id), 0, -1)
-            for i, entry in enumerate(entries):
-                data = json.loads(entry)
+            queue_key = self._queue_key(user_id)
+            position = 0
+            async for entry in self._iter_queue_entries(queue_key):
+                position += 1
+                data = await _queue_json_loads(entry)
                 if data.get("run_id") == run_id:
-                    return i + 1
+                    return position
             return 0
         except Exception:
             return 0
@@ -558,20 +660,16 @@ class UserConcurrencyLimiter:
     async def remove_from_queue(self, user_id: str, session_id: str) -> int:
         """Remove queued tasks matching session_id. Returns count removed."""
         try:
-            queue_key = self._queue_key(user_id)
-            entries = await self.redis.lrange(queue_key, 0, -1)
-            to_keep = []
-            removed = 0
-            removed_run_ids = []
-            for entry in entries:
-                data = json.loads(entry)
-                if data.get("session_id") == session_id:
-                    removed += 1
-                    removed_run_ids.append(data.get("run_id"))
-                else:
-                    to_keep.append(entry)
+            lock_key, token = await self._acquire_user_lock(user_id)
+            try:
+                removed, removed_run_ids = await self._remove_from_queue_locked(
+                    user_id,
+                    session_id,
+                )
+            finally:
+                await self._release_user_lock(lock_key, token)
+
             if removed:
-                await redis_delete_and_repush(self.redis, queue_key, to_keep)
                 logger.info(f"Removed {removed} queued tasks for session {session_id}")
                 # 更新 MongoDB session 状态
                 try:
@@ -602,12 +700,52 @@ class UserConcurrencyLimiter:
             logger.warning(f"Failed to remove from queue: {e}")
             return 0
 
+    async def _remove_from_queue_locked(
+        self, user_id: str, session_id: str
+    ) -> tuple[int, list[Any]]:
+        """Remove queued tasks while the caller holds the per-user lock."""
+        tmp_key: str | None = None
+        try:
+            queue_key = self._queue_key(user_id)
+            removed = 0
+            removed_run_ids = []
+            tmp_key = f"{queue_key}:rewrite:{uuid.uuid4().hex}"
+            keep_buffer: list[str] = []
+            wrote_keep_entries = False
 
-async def redis_delete_and_repush(redis, key: str, entries: list[str]) -> None:
-    """Delete a Redis list key and repopulate with filtered entries."""
-    await redis.delete(key)
-    if entries:
-        await redis.rpush(key, *entries)
+            async def _flush_keep_buffer() -> None:
+                nonlocal wrote_keep_entries
+                if not keep_buffer:
+                    return
+                await self.redis.rpush(tmp_key, *keep_buffer)
+                keep_buffer.clear()
+                wrote_keep_entries = True
+
+            async for entry in self._iter_queue_entries(queue_key):
+                data = await _queue_json_loads(entry)
+                if data.get("session_id") == session_id:
+                    removed += 1
+                    removed_run_ids.append(data.get("run_id"))
+                else:
+                    keep_buffer.append(entry)
+                    if len(keep_buffer) >= QUEUE_REWRITE_CHUNK_SIZE:
+                        await _flush_keep_buffer()
+            if removed:
+                await _flush_keep_buffer()
+                if wrote_keep_entries:
+                    await self.redis.rename(tmp_key, queue_key)
+                    tmp_key = None
+                else:
+                    await self.redis.delete(queue_key)
+                    tmp_key = None
+            return removed, removed_run_ids
+        except Exception:
+            if tmp_key:
+                try:
+                    await self.redis.delete(tmp_key)
+                except Exception:
+                    pass
+            raise
 
 
 # Singleton

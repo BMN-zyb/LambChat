@@ -12,6 +12,7 @@ from src.infra.logging import get_logger
 logger = get_logger(__name__)
 
 _CACHE_TTL = 300
+_MAX_PROMPT_CACHE_ENTRIES = 500
 _env_var_prompt_cache: dict[str, tuple[tuple[str, ...], float]] = {}
 
 
@@ -70,3 +71,19 @@ def _cleanup_stale_cache() -> None:
     stale = [user_id for user_id, (_, ts) in _env_var_prompt_cache.items() if now - ts > _CACHE_TTL]
     for user_id in stale:
         del _env_var_prompt_cache[user_id]
+    _cleanup_excess_prompt_cache_entries()
+
+
+def _cleanup_excess_prompt_cache_entries() -> int:
+    max_entries = max(int(_MAX_PROMPT_CACHE_ENTRIES), 1)
+    if len(_env_var_prompt_cache) <= max_entries:
+        return 0
+
+    to_remove = len(_env_var_prompt_cache) - max_entries
+    oldest = sorted(
+        _env_var_prompt_cache.items(),
+        key=lambda item: item[1][1],
+    )[:to_remove]
+    for user_id, _entry in oldest:
+        _env_var_prompt_cache.pop(user_id, None)
+    return len(oldest)

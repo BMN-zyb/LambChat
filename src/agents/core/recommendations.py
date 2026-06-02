@@ -6,11 +6,13 @@ import asyncio
 import json
 import math
 import re
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from langchain_core.runnables import RunnableConfig
 
 from src.agents.core.base import get_presenter
+from src.infra.async_utils import run_blocking_io
 from src.infra.logging import get_logger
 from src.kernel.config import settings
 
@@ -23,8 +25,76 @@ _TOKEN_ENCODING_NAME = "cl100k_base"
 _CURRENT_USER_MAX_CHARS = 2000
 _CURRENT_OUTPUT_MAX_CHARS = 4000
 _HISTORY_MAX_CHARS = 32000
+_DEFAULT_RECOMMEND_BACKGROUND_TASKS = 8
 _token_encoding: Any | None = None
 _token_encoding_loaded = False
+_recommend_background_tasks: set[asyncio.Task[None]] = set()
+
+
+async def _noop_recommend_task() -> None:
+    return None
+
+
+def _get_recommend_background_task_limit() -> int:
+    try:
+        value = int(
+            getattr(
+                settings,
+                "RECOMMEND_QUESTIONS_MAX_BACKGROUND_TASKS",
+                _DEFAULT_RECOMMEND_BACKGROUND_TASKS,
+            )
+        )
+    except (TypeError, ValueError):
+        return _DEFAULT_RECOMMEND_BACKGROUND_TASKS
+    return max(0, value)
+
+
+def _schedule_recommend_background_task(
+    task_factory: Callable[[], Awaitable[None]],
+    *,
+    failure_level: str = "warning",
+) -> asyncio.Task[None]:
+    limit = _get_recommend_background_task_limit()
+    if limit <= 0 or len(_recommend_background_tasks) >= limit:
+        logger.debug(
+            "Skipping recommended question background task because %s tasks are active "
+            "and the limit is %s",
+            len(_recommend_background_tasks),
+            limit,
+        )
+        return asyncio.create_task(_noop_recommend_task())
+
+    task = asyncio.create_task(task_factory())
+    _recommend_background_tasks.add(task)
+
+    def log_failure(done_task: asyncio.Task[None]) -> None:
+        _recommend_background_tasks.discard(done_task)
+        if done_task.cancelled():
+            return
+        try:
+            done_task.result()
+        except Exception as exc:
+            message = "Recommended question background task failed: %s"
+            if failure_level == "debug":
+                logger.debug(message, exc)
+            else:
+                logger.warning(message, exc)
+
+    task.add_done_callback(log_failure)
+    return task
+
+
+async def drain_recommend_background_tasks() -> None:
+    """Cancel and await pending recommendation tasks during process shutdown."""
+    if not _recommend_background_tasks:
+        return
+
+    tasks = list(_recommend_background_tasks)
+    for task in tasks:
+        if not task.done():
+            task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
+    _recommend_background_tasks.difference_update(tasks)
 
 
 def _compact_topic(user_input: str, max_len: int = 24) -> str:
@@ -230,7 +300,9 @@ def format_history_context(
     snippets: list[str] = []
     remaining = max_chars
     recent_turns = [turn for turn in turns if turn["question"] or turn["answer"]]
-    for turn_number, turn in reversed(list(enumerate(recent_turns, start=1))):
+    for index in range(len(recent_turns) - 1, -1, -1):
+        turn_number = index + 1
+        turn = recent_turns[index]
         question = _clip_text(turn["question"], 1200)
         answer = _clip_text(turn["answer"], 1800)
         snippet = f"Turn {turn_number}\nQuestion: {question}\nResult: {answer}".strip()
@@ -322,13 +394,13 @@ def _extract_text(content: Any) -> str:
     return str(content).strip()
 
 
-def _parse_questions(raw_text: str) -> list[str]:
+async def _parse_questions(raw_text: str) -> list[str]:
     text = raw_text.strip().strip("`")
     if text.startswith("json"):
         text = text[4:].strip()
 
     try:
-        parsed = json.loads(text)
+        parsed = await run_blocking_io(json.loads, text)
     except json.JSONDecodeError:
         parsed = None
 
@@ -377,7 +449,12 @@ async def generate_recommend_questions(
     """Generate follow-up questions using the same model config as session titles."""
     from src.infra.llm.client import LLMClient
 
-    prompt = build_recommend_prompt(user_input, output_text, history_context)
+    prompt = await run_blocking_io(
+        build_recommend_prompt,
+        user_input,
+        output_text,
+        history_context,
+    )
 
     try:
         model = await LLMClient.get_model(
@@ -388,7 +465,7 @@ async def generate_recommend_questions(
             max_retries=settings.LLM_MAX_RETRIES,
         )
         response = await _ainvoke_with_retry(model, prompt)
-        questions = _parse_questions(_extract_text(response.content))
+        questions = await _parse_questions(_extract_text(response.content))
         if questions:
             return questions
     except Exception as exc:
@@ -419,13 +496,14 @@ def schedule_recommend_questions(
     user_input: str,
     output_text: str = "",
     messages: list[Any] | None = None,
-) -> asyncio.Task:
+) -> asyncio.Task[None]:
     """Start recommendation generation in the background without blocking chat."""
 
     async def run() -> None:
         if getattr(presenter, "recommend_questions_recorded", False):
             return
-        history_context = format_history_from_messages(
+        history_context = await run_blocking_io(
+            format_history_from_messages,
             messages or [],
             current_user_input=user_input,
             current_output=output_text,
@@ -438,18 +516,7 @@ def schedule_recommend_questions(
         if questions:
             await presenter.emit_recommend_questions(questions)
 
-    task = asyncio.create_task(run())
-
-    def log_failure(done_task: asyncio.Task) -> None:
-        if done_task.cancelled():
-            return
-        try:
-            done_task.result()
-        except Exception as exc:
-            logger.warning("Recommended question background task failed: %s", exc)
-
-    task.add_done_callback(log_failure)
-    return task
+    return _schedule_recommend_background_task(run)
 
 
 def schedule_recommend_questions_from_state(
@@ -457,7 +524,7 @@ def schedule_recommend_questions_from_state(
     user_input: str,
     inner_graph: Any,
     inner_config: Any,
-) -> asyncio.Task:
+) -> asyncio.Task[None]:
     """Best-effort concurrent recommendation scheduling from existing graph state."""
 
     async def run() -> None:
@@ -480,15 +547,4 @@ def schedule_recommend_questions_from_state(
         except Exception as exc:
             logger.debug("Failed to schedule recommended questions: %s", exc)
 
-    task = asyncio.create_task(run())
-
-    def log_failure(done_task: asyncio.Task) -> None:
-        if done_task.cancelled():
-            return
-        try:
-            done_task.result()
-        except Exception as exc:
-            logger.debug("Recommended question state task failed: %s", exc)
-
-    task.add_done_callback(log_failure)
-    return task
+    return _schedule_recommend_background_task(run, failure_level="debug")

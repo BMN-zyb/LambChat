@@ -10,6 +10,7 @@ from src.api import deps as api_deps
 from src.api.routes import persona_preset as persona_preset_route
 from src.kernel.schemas.persona_preset import (
     PersonaPreset,
+    PersonaPresetCreate,
     PersonaPresetPreferenceUpdate,
     PersonaPresetScope,
     PersonaPresetStatus,
@@ -138,3 +139,27 @@ async def test_update_persona_preset_preference_route(
     payload = response.json()
     assert payload["id"] == "preset-1"
     assert payload["is_favorite"] is True
+
+
+@pytest.mark.asyncio
+async def test_batch_create_persona_presets_rejects_too_many_items(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeManager:
+        async def batch_create_presets(self, *args, **kwargs):
+            raise AssertionError("oversized batch should be rejected before manager call")
+
+    monkeypatch.setattr(persona_preset_route, "_manager", lambda: _FakeManager())
+
+    app = FastAPI()
+    app.include_router(persona_preset_route.router, prefix="/api/persona-presets")
+    app.dependency_overrides[api_deps.get_current_user_required] = lambda: _fake_user(
+        "persona_preset:write"
+    )
+
+    item = PersonaPresetCreate(name="Preset", system_prompt="Prompt").model_dump(mode="json")
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post("/api/persona-presets/batch", json=[item] * 101)
+
+    assert response.status_code == 422

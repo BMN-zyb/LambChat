@@ -1,8 +1,15 @@
 import asyncio
+import json
 from contextlib import contextmanager
 from types import SimpleNamespace
 
 import pytest
+
+
+class _Runtime:
+    def __init__(self, user_id: str | None) -> None:
+        context = SimpleNamespace(user_id=user_id) if user_id is not None else None
+        self.config = {"configurable": {"context": context}}
 
 
 def test_all_memory_tools_excludes_consolidation_tool():
@@ -20,6 +27,73 @@ def test_native_memory_guide_does_not_advertise_consolidation_tool():
     from src.infra.memory.client.types import NATIVE_MEMORY_GUIDE
 
     assert "memory_consolidate" not in NATIVE_MEMORY_GUIDE
+
+
+@pytest.mark.asyncio
+async def test_memory_recall_offloads_result_json(monkeypatch):
+    from src.infra.memory import tools as memory_tools
+
+    calls: list[object] = []
+
+    class FakeBackend:
+        async def recall(self, user_id: str, query: str, max_results: int, memory_types):
+            assert user_id == "u1"
+            assert query == "project"
+            assert max_results == 5
+            assert memory_types is None
+            return {
+                "success": True,
+                "memories": [
+                    {
+                        "memory_id": f"m-{index}",
+                        "content": "large memory text " * 100,
+                    }
+                    for index in range(5)
+                ],
+            }
+
+    async def fake_get_backend():
+        return FakeBackend()
+
+    async def fake_run_blocking_io(func, *args, **kwargs):
+        calls.append(func)
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(memory_tools, "_get_backend", fake_get_backend)
+    monkeypatch.setattr(memory_tools, "run_blocking_io", fake_run_blocking_io, raising=False)
+
+    result = json.loads(
+        await memory_tools.memory_recall.coroutine(
+            "project",
+            runtime=_Runtime("u1"),
+        )
+    )
+
+    assert result["success"] is True
+    assert json.dumps in calls
+
+
+@pytest.mark.asyncio
+async def test_memory_retain_offloads_error_result_json(monkeypatch):
+    from src.infra.memory import tools as memory_tools
+
+    calls: list[object] = []
+
+    async def fake_run_blocking_io(func, *args, **kwargs):
+        calls.append(func)
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(memory_tools, "run_blocking_io", fake_run_blocking_io, raising=False)
+
+    result = json.loads(
+        await memory_tools.memory_retain.coroutine(
+            "remember this",
+            runtime=_Runtime(None),
+        )
+    )
+
+    assert result == {"success": False, "error": "User not authenticated"}
+    assert json.dumps in calls
 
 
 @pytest.mark.asyncio
@@ -169,6 +243,87 @@ async def test_auto_memory_capture_detaches_langsmith_parent(monkeypatch):
         ("trace_kwargs", {"parent": False}),
         ("retain", ("u1", "hello")),
     ]
+
+
+@pytest.mark.asyncio
+async def test_schedule_auto_memory_capture_dedupes_running_task_per_user(monkeypatch):
+    from src.infra.memory import tools as memory_tools
+
+    release = asyncio.Event()
+    started = asyncio.Event()
+    calls: list[tuple[str, str]] = []
+
+    async def fake_detached(user_id: str, user_input: str) -> None:
+        calls.append((user_id, user_input))
+        started.set()
+        await release.wait()
+
+    monkeypatch.setattr(memory_tools, "_auto_retain_user_memory_detached", fake_detached)
+    memory_tools._background_tasks.clear()
+    memory_tools._auto_capture_tasks_by_user.clear()
+
+    memory_tools.schedule_auto_memory_capture("u1", "first large input")
+    await asyncio.wait_for(started.wait(), timeout=1)
+    memory_tools.schedule_auto_memory_capture("u1", "second large input")
+
+    assert len(memory_tools._background_tasks) == 1
+    assert len(memory_tools._auto_capture_tasks_by_user) == 1
+    assert calls == [("u1", "first large input")]
+
+    release.set()
+    await asyncio.gather(*list(memory_tools._background_tasks))
+    assert memory_tools._auto_capture_tasks_by_user == {}
+
+
+@pytest.mark.asyncio
+async def test_schedule_auto_memory_capture_limits_global_background_tasks(monkeypatch):
+    from src.infra.memory import tools as memory_tools
+
+    release = asyncio.Event()
+    started_users: list[str] = []
+
+    async def fake_detached(user_id: str, user_input: str) -> None:
+        started_users.append(user_id)
+        await release.wait()
+
+    monkeypatch.setattr(memory_tools, "_auto_retain_user_memory_detached", fake_detached)
+    monkeypatch.setattr(memory_tools.settings, "NATIVE_MEMORY_AUTO_CAPTURE_MAX_TASKS", 2)
+    memory_tools._background_tasks.clear()
+    memory_tools._auto_capture_tasks_by_user.clear()
+
+    memory_tools.schedule_auto_memory_capture("u1", "first")
+    memory_tools.schedule_auto_memory_capture("u2", "second")
+    memory_tools.schedule_auto_memory_capture("u3", "third")
+    await asyncio.sleep(0)
+
+    assert len(memory_tools._background_tasks) == 2
+    assert set(memory_tools._auto_capture_tasks_by_user) == {"u1", "u2"}
+    assert started_users == ["u1", "u2"]
+
+    release.set()
+    await asyncio.gather(*list(memory_tools._background_tasks))
+    assert memory_tools._auto_capture_tasks_by_user == {}
+
+
+@pytest.mark.asyncio
+async def test_schedule_auto_memory_capture_truncates_large_inputs(monkeypatch):
+    from src.infra.memory import tools as memory_tools
+
+    calls: list[tuple[str, str]] = []
+
+    async def fake_detached(user_id: str, user_input: str) -> None:
+        calls.append((user_id, user_input))
+
+    monkeypatch.setattr(memory_tools, "_auto_retain_user_memory_detached", fake_detached)
+    monkeypatch.setattr(memory_tools.settings, "NATIVE_MEMORY_AUTO_CAPTURE_INPUT_MAX_CHARS", 12)
+    memory_tools._background_tasks.clear()
+    memory_tools._auto_capture_tasks_by_user.clear()
+
+    memory_tools.schedule_auto_memory_capture("u1", "abcdefghijklmnopqrstuvwxyz")
+
+    await asyncio.gather(*list(memory_tools._background_tasks))
+
+    assert calls == [("u1", "abcdefghijkl\n\n[truncated from 26 chars for auto memory capture]")]
 
 
 @pytest.mark.asyncio

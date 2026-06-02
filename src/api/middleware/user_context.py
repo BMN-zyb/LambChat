@@ -3,8 +3,10 @@
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 
+from src.infra.async_utils import run_blocking_io
 from src.infra.auth.jwt import verify_token
 from src.infra.backend.context import clear_user_context, set_user_context
+from src.infra.logging.context import TraceContext
 
 
 class UserContextMiddleware(BaseHTTPMiddleware):
@@ -24,7 +26,7 @@ class UserContextMiddleware(BaseHTTPMiddleware):
         if auth_header and auth_header.startswith("Bearer "):
             token = auth_header[7:]  # Remove "Bearer " prefix
             try:
-                payload = verify_token(token)
+                payload = await run_blocking_io(verify_token, token)
                 request.state.auth_payload = payload
                 user_id = str(payload.sub) if payload.sub else None
             except Exception:
@@ -33,7 +35,16 @@ class UserContextMiddleware(BaseHTTPMiddleware):
         try:
             if user_id:
                 set_user_context(user_id, session_id)
+            request.state.logging_user_id = user_id
+            request.state.logging_session_id = session_id
+            TraceContext.set_request_context(
+                request_id=getattr(request.state, "request_id", None),
+                session_id=session_id,
+                user_id=user_id,
+                trace_id=getattr(request.state, "trace_id", None),
+            )
             response = await call_next(request)
             return response
         finally:
             clear_user_context()
+            TraceContext.clear_request_context()

@@ -12,6 +12,7 @@ from typing import Dict, Optional, Set
 
 from fastapi import WebSocket
 
+from src.infra.async_utils.blocking import run_blocking_io
 from src.infra.logging import get_logger
 from src.infra.pubsub_hub import get_pubsub_hub
 from src.infra.storage.redis import create_redis_client
@@ -23,15 +24,70 @@ WS_ROUTE_PREFIX = "ws:route"
 WS_DELIVERY_CHANNEL_PREFIX = "ws:deliver"
 WS_ROUTE_TTL_SECONDS = 60
 WS_ROUTE_REFRESH_INTERVAL = 20
+WS_ROUTE_SCAN_LIMIT = 100
+WS_MESSAGE_MAX_BYTES = 256 * 1024
 
 
-async def _scan_redis_keys(redis_client, pattern: str, *, count: int = 100) -> list[str]:
+async def _json_dumps_message(message: dict) -> str:
+    return await run_blocking_io(json.dumps, message, ensure_ascii=False)
+
+
+async def _json_dumps_delivery(payload: dict) -> str:
+    return await run_blocking_io(json.dumps, payload)
+
+
+async def _json_loads_delivery(raw_value: str) -> dict:
+    return await run_blocking_io(json.loads, raw_value)
+
+
+def _json_size_bytes(value: str) -> int:
+    return len(value.encode("utf-8"))
+
+
+async def _json_dumps_message_limited(message: dict, *, label: str) -> str | None:
+    serialized = await _json_dumps_message(message)
+    size = _json_size_bytes(serialized)
+    if size > WS_MESSAGE_MAX_BYTES:
+        logger.warning(
+            "Dropping oversized WebSocket %s message: %s bytes > %s",
+            label,
+            size,
+            WS_MESSAGE_MAX_BYTES,
+        )
+        return None
+    return serialized
+
+
+async def _json_dumps_delivery_limited(payload: dict) -> str | None:
+    serialized = await _json_dumps_delivery(payload)
+    size = _json_size_bytes(serialized)
+    if size > WS_MESSAGE_MAX_BYTES:
+        logger.warning(
+            "Dropping oversized WebSocket delivery payload: %s bytes > %s",
+            size,
+            WS_MESSAGE_MAX_BYTES,
+        )
+        return None
+    return serialized
+
+
+async def _scan_redis_keys(
+    redis_client,
+    pattern: str,
+    *,
+    count: int = 100,
+    limit: int = WS_ROUTE_SCAN_LIMIT,
+) -> list[str]:
     """Collect matching Redis keys with SCAN to avoid blocking Redis."""
     cursor: int | str = 0
     keys: list[str] = []
     while True:
         cursor, batch = await redis_client.scan(cursor=cursor, match=pattern, count=count)
-        keys.extend(str(key) for key in batch)
+        for key in batch:
+            keys.append(str(key))
+            if len(keys) >= limit:
+                logger.warning("WebSocket route scan limit reached: %s", limit)
+                return keys
         if int(cursor) == 0:
             return keys
 
@@ -83,7 +139,7 @@ class ConnectionManager:
                 connection_count = len(self._connections[user_id])
                 if connection_count == 0:
                     del self._connections[user_id]
-                    self._stop_route_refresh_task(user_id)
+                    await self._stop_route_refresh_task(user_id)
         await self._sync_route_registration(user_id, connection_count)
         logger.info(f"WebSocket disconnected: user_id={user_id}")
 
@@ -104,10 +160,15 @@ class ConnectionManager:
 
         sent_count = 0
         disconnected = set()
+        json_str = (
+            await _json_dumps_message_limited(message, label="broadcast") if all_connections else ""
+        )
+        if all_connections and json_str is None:
+            return 0
 
         for user_id, ws in all_connections:
             try:
-                await ws.send_text(json.dumps(message, ensure_ascii=False))
+                await ws.send_text(json_str)
                 sent_count += 1
             except Exception as e:
                 logger.warning(f"Failed to broadcast to WebSocket: {e}")
@@ -155,7 +216,7 @@ class ConnectionManager:
         应在应用关闭时调用
         """
         self._running = False
-        self._cancel_all_route_refresh_tasks()
+        await self._cancel_all_route_refresh_tasks()
         await self._remove_all_route_registrations()
         await self._close_redis()
 
@@ -169,7 +230,7 @@ class ConnectionManager:
 
     async def _handle_pubsub_message(self, message: dict) -> None:
         try:
-            data = json.loads(message["data"])
+            data = await _json_loads_delivery(message["data"])
             await self._handle_broadcast_message(data)
         except json.JSONDecodeError:
             logger.warning(f"Invalid WebSocket broadcast message: {message['data']}")
@@ -199,7 +260,9 @@ class ConnectionManager:
         if not message:
             return 0
 
-        json_str = json.dumps(message, ensure_ascii=False)
+        json_str = await _json_dumps_message_limited(message, label="local")
+        if json_str is None:
+            return 0
         sent_count = 0
 
         async with self._lock:
@@ -238,7 +301,7 @@ class ConnectionManager:
                 connections.discard(ws)
                 if not connections:
                     del self._connections[user_id]
-                    self._stop_route_refresh_task(user_id)
+                    await self._stop_route_refresh_task(user_id)
                     users_to_unregister.add(user_id)
         return users_to_unregister
 
@@ -255,14 +318,16 @@ class ConnectionManager:
         """
         try:
             redis_client = self._get_redis()
-            route_keys = await _scan_redis_keys(redis_client, f"{WS_ROUTE_PREFIX}:{user_id}:*")
-            payload = json.dumps(
+            payload = await _json_dumps_delivery_limited(
                 {
                     "user_id": user_id,
                     "message": message,
                     "source_instance_id": self._instance_id,
                 }
             )
+            if payload is None:
+                return 0
+            route_keys = await _scan_redis_keys(redis_client, f"{WS_ROUTE_PREFIX}:{user_id}:*")
 
             published = 0
             for route_key in sorted(route_keys):
@@ -335,14 +400,18 @@ class ConnectionManager:
 
         self._route_refresh_tasks[user_id] = asyncio.create_task(_refresh_loop())
 
-    def _stop_route_refresh_task(self, user_id: str) -> None:
+    async def _stop_route_refresh_task(self, user_id: str) -> None:
         task = self._route_refresh_tasks.pop(user_id, None)
         if task and not task.done():
             task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
-    def _cancel_all_route_refresh_tasks(self) -> None:
+    async def _cancel_all_route_refresh_tasks(self) -> None:
         for user_id in list(self._route_refresh_tasks.keys()):
-            self._stop_route_refresh_task(user_id)
+            await self._stop_route_refresh_task(user_id)
 
     async def _remove_all_route_registrations(self) -> None:
         user_ids = list(self._connections.keys())

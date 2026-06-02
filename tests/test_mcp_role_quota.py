@@ -1,3 +1,4 @@
+import json
 from typing import Any
 
 import pytest
@@ -122,6 +123,7 @@ async def test_mcp_tool_wrapper_returns_quota_error_without_calling_original(
     from src.infra.tool.mcp_client import MCPToolWithRetry
 
     calls: list[str] = []
+    dump_calls: list[object] = []
 
     async def fake_check_and_consume(*args: Any, **kwargs: Any) -> MCPQuotaResult:
         calls.append("quota")
@@ -133,9 +135,18 @@ async def test_mcp_tool_wrapper_returns_quota_error_without_calling_original(
             reset_at="2026-04-23T00:00:00+00:00",
         )
 
+    async def fake_run_blocking_io(func, /, *args: Any, **kwargs: Any):
+        dump_calls.append(func)
+        return func(*args, **kwargs)
+
     monkeypatch.setattr(
         "src.infra.mcp.quota.check_and_consume_mcp_quota",
         fake_check_and_consume,
+    )
+    monkeypatch.setattr(
+        "src.infra.mcp.quota.run_blocking_io",
+        fake_run_blocking_io,
+        raising=False,
     )
 
     tool = MCPToolWithRetry(
@@ -150,6 +161,7 @@ async def test_mcp_tool_wrapper_returns_quota_error_without_calling_original(
     result = await tool._arun(query="hello")
 
     assert calls == ["quota"]
+    assert dump_calls == [json.dumps]
     assert "MCP quota exceeded" in result
     assert "github" in result
 

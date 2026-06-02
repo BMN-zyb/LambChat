@@ -7,7 +7,7 @@
 
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from src.api.deps import require_permissions
@@ -29,6 +29,9 @@ def sanitize_file_path(path: str) -> str:
 
 
 router = APIRouter()
+MARKETPLACE_SKILL_MAX_FILES = 100
+MARKETPLACE_SKILL_MAX_FILE_CHARS = 256_000
+MARKETPLACE_SKILL_MAX_TOTAL_CHARS = 1_000_000
 
 
 def get_marketplace_storage() -> MarketplaceStorage:
@@ -55,6 +58,51 @@ class SetActiveRequest(BaseModel):
     is_active: bool
 
 
+def _validate_marketplace_files_payload(files: dict[str, str]) -> None:
+    if len(files) > MARKETPLACE_SKILL_MAX_FILES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Marketplace skill contains too many files (max {MARKETPLACE_SKILL_MAX_FILES})",
+        )
+
+    total_chars = 0
+    for path, content in files.items():
+        safe_path = sanitize_file_path(path)
+        if safe_path != path:
+            raise HTTPException(status_code=400, detail=f"Invalid file path: {path}")
+        content_chars = len(str(content))
+        if content_chars > MARKETPLACE_SKILL_MAX_FILE_CHARS:
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    "Marketplace skill file is too large "
+                    f"(max {MARKETPLACE_SKILL_MAX_FILE_CHARS} characters)"
+                ),
+            )
+        total_chars += content_chars
+        if total_chars > MARKETPLACE_SKILL_MAX_TOTAL_CHARS:
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    "Marketplace skill files are too large "
+                    f"(max {MARKETPLACE_SKILL_MAX_TOTAL_CHARS} total characters)"
+                ),
+            )
+
+
+async def _copy_marketplace_files_to_user_skill(
+    *,
+    name: str,
+    user_id: str,
+    marketplace: MarketplaceStorage,
+    storage: SkillStorage,
+) -> int:
+    copied = 0
+    async for batch in marketplace.iter_marketplace_file_batches(name):
+        copied += await storage.upsert_skill_files_batch(name, batch, user_id)
+    return copied
+
+
 # ==========================================
 # 用户商城 API
 # ==========================================
@@ -65,7 +113,7 @@ async def list_marketplace_skills(
     tags: Optional[str] = None,
     search: Optional[str] = None,
     skip: int = 0,
-    limit: int = 50,
+    limit: int = Query(50, ge=1, le=100),
     user: TokenPayload = Depends(require_permissions("marketplace:read")),
     marketplace: MarketplaceStorage = Depends(get_marketplace_storage),
 ):
@@ -101,6 +149,7 @@ async def create_marketplace_skill(
     """在商店创建 Skill（仅发布，不写入用户本地）"""
     if not data.files:
         raise HTTPException(status_code=400, detail="Skill must have at least one file")
+    _validate_marketplace_files_payload(data.files)
 
     from src.infra.skill.parser import sanitize_skill_name
 
@@ -158,6 +207,7 @@ async def update_marketplace_skill(
 
     if not data.files:
         raise HTTPException(status_code=400, detail="Skill must have at least one file")
+    _validate_marketplace_files_payload(data.files)
 
     # 更新元数据
     from src.infra.skill.types import MarketplaceSkillUpdate
@@ -247,19 +297,25 @@ async def install_marketplace_skill(
             detail=f"Local manual skill '{name}' already exists. Rename or remove it before installing from marketplace.",
         )
 
-    # 3. 获取商城文件并复制到用户目录
-    marketplace_files = await marketplace.get_marketplace_files(name)
-    if not marketplace_files:
+    # 3. 获取商城文件数量并分批复制到用户目录，避免一次性物化所有文件内容
+    file_paths = await marketplace.list_marketplace_file_paths(name)
+    if not file_paths:
         raise HTTPException(status_code=400, detail="Marketplace skill has no files")
 
     # 4. 创建用户本地副本（利用 MongoDB unique index 防止竞态）
     try:
-        await storage.create_user_skill(
+        copied = await _copy_marketplace_files_to_user_skill(
+            name=name,
+            user_id=user.sub,
+            marketplace=marketplace,
+            storage=storage,
+        )
+        await storage.set_skill_meta(
             name,
-            marketplace_files,
             user.sub,
             installed_from=InstalledFrom.MARKETPLACE,
         )
+        await storage.invalidate_user_cache(user.sub)
     except Exception as e:
         err_msg = str(e).lower()
         if "duplicate" in err_msg or "already" in err_msg:
@@ -269,7 +325,7 @@ async def install_marketplace_skill(
     return {
         "message": f"Skill '{name}' installed successfully",
         "skill_name": name,
-        "file_count": len(marketplace_files),
+        "file_count": copied,
     }
 
 
@@ -299,8 +355,17 @@ async def update_from_marketplace(
             detail=f"Skill '{name}' is a manual skill and cannot be updated from marketplace.",
         )
 
-    marketplace_files = await marketplace.get_marketplace_files(name)
-    await storage.sync_skill_files(name, marketplace_files, user.sub)
+    file_paths = await marketplace.list_marketplace_file_paths(name)
+    if not file_paths:
+        raise HTTPException(status_code=400, detail="Marketplace skill has no files")
+
+    await storage.delete_skill_files(name, user.sub)
+    copied = await _copy_marketplace_files_to_user_skill(
+        name=name,
+        user_id=user.sub,
+        marketplace=marketplace,
+        storage=storage,
+    )
 
     # Update __meta__ doc (preserve installed_from and published_marketplace_name)
     await storage.set_skill_meta(
@@ -315,7 +380,7 @@ async def update_from_marketplace(
     return {
         "message": f"Skill '{name}' updated from marketplace",
         "skill_name": name,
-        "file_count": len(marketplace_files),
+        "file_count": copied,
     }
 
 

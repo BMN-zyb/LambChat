@@ -24,6 +24,31 @@ _ALLOW_EMPTY_STRING_SETTINGS = {
     "NATIVE_MEMORY_COMPACTION_MODEL_ID",
 }
 
+_CHECKPOINT_AFFECTED_SETTINGS = {
+    "CHECKPOINT_BACKEND",
+    "CHECKPOINT_PG_HOST",
+    "CHECKPOINT_PG_PORT",
+    "CHECKPOINT_PG_USER",
+    "CHECKPOINT_PG_PASSWORD",
+    "CHECKPOINT_PG_DB",
+    "CHECKPOINT_PG_POOL_MIN_SIZE",
+    "CHECKPOINT_PG_POOL_MAX_SIZE",
+}
+
+
+async def _reset_checkpoint_runtime_state(reason: str) -> None:
+    try:
+        from src.infra.storage.checkpoint import reset_checkpointer_runtime_state
+
+        await reset_checkpointer_runtime_state()
+        logger.info("[Settings] Checkpointer runtime state reset after %s", reason)
+    except Exception as exc:
+        logger.warning(
+            "[Settings] Failed to reset checkpointer runtime state after %s: %s",
+            reason,
+            exc,
+        )
+
 
 async def initialize_settings() -> None:
     """Initialize settings from database, importing from .env if needed.
@@ -118,11 +143,14 @@ async def refresh_settings(key: Optional[str] = None) -> None:
 
                 schedule_backend_reset()
                 logger.info(f"[Settings] Memory backend reset after setting '{key}' changed")
+            if key in _CHECKPOINT_AFFECTED_SETTINGS:
+                await _reset_checkpoint_runtime_state(f"setting '{key}' changed")
     else:
         # Refresh all settings
         all_settings = await _settings_service.get_all(admin_mode=True, mask_sensitive=False)
         any_llm_setting_changed = False
         any_memory_setting_changed = False
+        any_checkpoint_setting_changed = False
         for items in all_settings.values():
             for item in items:
                 if (
@@ -136,6 +164,8 @@ async def refresh_settings(key: Optional[str] = None) -> None:
                         any_llm_setting_changed = True
                     if item.key in memory_affected_settings:
                         any_memory_setting_changed = True
+                    if item.key in _CHECKPOINT_AFFECTED_SETTINGS:
+                        any_checkpoint_setting_changed = True
 
         # Clear LLM model cache if any affected setting changed
         if any_llm_setting_changed:
@@ -152,3 +182,6 @@ async def refresh_settings(key: Optional[str] = None) -> None:
 
             schedule_backend_reset()
             logger.info("[Settings] Memory backend reset after settings refresh")
+
+        if any_checkpoint_setting_changed:
+            await _reset_checkpoint_runtime_state("settings refresh")

@@ -78,7 +78,7 @@ class TaskStatusQueries:
             trace_storage = get_trace_storage()
             cursor = (
                 trace_storage.collection.find(
-                    {"run_id": run_id}, {"metadata": 1, "events": 1, "_id": 0}
+                    {"run_id": run_id}, {"metadata": 1, "trace_id": 1, "_id": 0}
                 )
                 .sort("started_at", -1)
                 .limit(1)
@@ -89,9 +89,13 @@ class TaskStatusQueries:
                 metadata = trace.get("metadata", {})
                 if metadata.get("error"):
                     return metadata.get("error")
-                events = trace.get("events", [])
-                for event in reversed(events):
-                    if event.get("event_type") == "error":
+                trace_id = trace.get("trace_id") or self.get_trace_id(run_id)
+                if trace_id:
+                    get_last_trace_event = getattr(trace_storage, "get_last_trace_event", None)
+                    if get_last_trace_event is None:
+                        get_last_trace_event = trace_storage.get_first_trace_event
+                    event = await get_last_trace_event(trace_id, ["error"])
+                    if event:
                         data = event.get("data", {})
                         return data.get("error")
         except Exception as e:

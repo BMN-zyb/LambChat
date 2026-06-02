@@ -9,6 +9,7 @@ import json
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 
 from src.api.deps import get_current_user_from_websocket
+from src.infra.async_utils import run_blocking_io
 from src.infra.logging import get_logger
 from src.infra.websocket import get_connection_manager
 from src.infra.websocket_rate_limiter import get_ws_rate_limiter
@@ -77,7 +78,7 @@ async def websocket_endpoint(
             logger.info("[WebSocket] Waiting for auth message from client")
             try:
                 auth_message = await websocket.receive_text()
-                auth_data = json.loads(auth_message)
+                auth_data = await run_blocking_io(json.loads, auth_message)
                 if auth_data.get("type") == "auth":
                     auth_token = auth_data.get("token")
                     logger.debug("[WebSocket] Received auth from message")
@@ -99,7 +100,8 @@ async def websocket_endpoint(
             await websocket.accept()
 
         # Send auth confirmation to client
-        await websocket.send_text(json.dumps({"type": "auth:ok"}))
+        auth_ok = await run_blocking_io(json.dumps, {"type": "auth:ok"})
+        await websocket.send_text(auth_ok)
     except WebSocketDisconnect:
         logger.info("[WebSocket] Client disconnected during auth")
         return

@@ -1,0 +1,192 @@
+from __future__ import annotations
+
+import asyncio
+import logging
+from types import SimpleNamespace
+
+import pytest
+
+from src.api import main as api_main
+
+
+@pytest.mark.asyncio
+async def test_schedule_models_cache_warmup_does_not_wait_for_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+    calls: list[str] = []
+
+    async def _slow_warm_models_cache() -> None:
+        calls.append("started")
+        started.set()
+        await release.wait()
+        calls.append("finished")
+
+    monkeypatch.setattr(api_main, "_warm_models_cache", _slow_warm_models_cache)
+    app = SimpleNamespace(state=SimpleNamespace())
+
+    task = api_main._schedule_models_cache_warmup(app)
+
+    await asyncio.wait_for(started.wait(), timeout=1)
+    assert task is app.state.models_preload_task
+    assert calls == ["started"]
+    assert task.done() is False
+
+    release.set()
+    await task
+    assert calls == ["started", "finished"]
+
+
+@pytest.mark.asyncio
+async def test_warm_models_cache_logs_traceback_on_failure(
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _raise_from_refresh_models() -> list[dict[str, object]]:
+        raise RuntimeError("db unavailable")
+
+    monkeypatch.setattr(
+        "src.infra.llm.models_service.refresh_models",
+        _raise_from_refresh_models,
+    )
+
+    with caplog.at_level(logging.WARNING, logger="src.api.main"):
+        await api_main._warm_models_cache()
+
+    record = next(
+        record
+        for record in caplog.records
+        if record.message.startswith("Model cache warm-up failed:")
+    )
+    assert record.exc_info is not None
+
+
+@pytest.mark.asyncio
+async def test_initialize_startup_indexes_runs_independent_groups_concurrently(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    release = asyncio.Event()
+    started: list[str] = []
+    finished: list[str] = []
+
+    async def _slow_initialize(name: str) -> None:
+        started.append(name)
+        await release.wait()
+        finished.append(name)
+
+    monkeypatch.setattr(
+        api_main,
+        "_startup_index_initializers",
+        lambda: [
+            ("agent_config", lambda: _slow_initialize("agent_config")),
+            ("model_storage", lambda: _slow_initialize("model_storage")),
+            ("channel_storage", lambda: _slow_initialize("channel_storage")),
+        ],
+    )
+
+    task = asyncio.create_task(api_main._initialize_startup_indexes())
+
+    for _ in range(10):
+        if len(started) == 3:
+            break
+        await asyncio.sleep(0)
+
+    assert started == ["agent_config", "model_storage", "channel_storage"]
+    assert finished == []
+
+    release.set()
+    await task
+
+    assert finished == ["agent_config", "model_storage", "channel_storage"]
+
+
+@pytest.mark.asyncio
+async def test_schedule_startup_indexes_does_not_wait_for_index_initialization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+    calls: list[str] = []
+
+    async def _slow_initialize_startup_indexes() -> None:
+        calls.append("started")
+        started.set()
+        await release.wait()
+        calls.append("finished")
+
+    monkeypatch.setattr(
+        api_main,
+        "_initialize_startup_indexes",
+        _slow_initialize_startup_indexes,
+    )
+    app = SimpleNamespace(state=SimpleNamespace())
+
+    task = api_main._schedule_startup_indexes(app)
+
+    await asyncio.wait_for(started.wait(), timeout=1)
+    assert task is app.state.startup_indexes_task
+    assert calls == ["started"]
+    assert task.done() is False
+
+    release.set()
+    await task
+    assert calls == ["started", "finished"]
+
+
+@pytest.mark.asyncio
+async def test_schedule_stale_task_cleanup_does_not_wait_for_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+    calls: list[str] = []
+
+    async def _slow_cleanup_stale_tasks() -> None:
+        calls.append("started")
+        started.set()
+        await release.wait()
+        calls.append("finished")
+
+    monkeypatch.setattr(api_main, "_cleanup_stale_tasks", _slow_cleanup_stale_tasks)
+    app = SimpleNamespace(state=SimpleNamespace())
+
+    task = api_main._schedule_stale_task_cleanup(app)
+
+    await asyncio.wait_for(started.wait(), timeout=1)
+    assert task is app.state.stale_task_cleanup_task
+    assert calls == ["started"]
+    assert task.done() is False
+
+    release.set()
+    await task
+    assert calls == ["started", "finished"]
+
+
+@pytest.mark.asyncio
+async def test_cancel_background_tasks_awaits_task_cleanup() -> None:
+    cleanup_finished = False
+    started = asyncio.Event()
+
+    async def _long_running_task() -> None:
+        nonlocal cleanup_finished
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cleanup_finished = True
+
+    task = asyncio.create_task(_long_running_task())
+    await asyncio.wait_for(started.wait(), timeout=1)
+
+    app = SimpleNamespace(state=SimpleNamespace(cleanup_task=task))
+
+    await api_main._cancel_background_tasks(app, "cleanup_task")
+
+    assert task.cancelled() is True
+    assert cleanup_finished is True
+
+
+@pytest.mark.asyncio
+async def test_shutdown_background_task_list_includes_feishu_task() -> None:
+    assert "feishu_task" in api_main._LIFESPAN_BACKGROUND_TASK_NAMES

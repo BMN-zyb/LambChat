@@ -4,8 +4,10 @@ import asyncio
 
 import pytest
 
+from src.infra.async_utils.background_tasks import BestEffortTaskLimiter
 from src.infra.storage.s3.service import get_storage_service, init_storage
 from src.infra.storage.s3.types import S3Config, S3Provider
+from src.infra.user import manager as user_manager_module
 from src.infra.user.manager import UserManager
 from src.kernel.config import settings
 
@@ -101,3 +103,44 @@ async def test_delete_user_uses_initialized_storage_when_s3_enabled(
     await asyncio.sleep(0)
 
     assert calls == ["user-1"]
+
+
+@pytest.mark.asyncio
+async def test_delete_user_s3_cleanup_tasks_are_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+    calls: list[str] = []
+
+    class _Storage:
+        _config = type("_Config", (), {"bucket_name": "bucket"})()
+
+        async def delete_user_files(self, user_id: str) -> int:
+            calls.append(user_id)
+            started.set()
+            await release.wait()
+            return 1
+
+    async def get_or_init_storage():
+        return _Storage()
+
+    monkeypatch.setattr(settings, "S3_ENABLED", True, raising=False)
+    monkeypatch.setattr("src.infra.user.manager.get_or_init_storage", get_or_init_storage)
+    monkeypatch.setattr(
+        user_manager_module,
+        "_s3_cleanup_tasks",
+        BestEffortTaskLimiter("test user S3 cleanup", max_tasks=1),
+    )
+
+    manager = UserManager()
+    manager.storage = _UserStorage()
+
+    assert await manager.delete_user("user-1") is True
+    await started.wait()
+    assert await manager.delete_user("user-2") is True
+    await asyncio.sleep(0)
+
+    assert calls == ["user-1"]
+
+    release.set()

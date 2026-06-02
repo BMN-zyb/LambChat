@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from src.api.deps import get_current_user_required, require_permissions
 from src.infra.agent.config_storage import get_agent_config_storage
+from src.infra.async_utils.blocking import run_blocking_io
 from src.infra.channel.channel_storage import ChannelStorage
 from src.infra.channel.pubsub import publish_channel_config_changed
 from src.infra.channel.registry import get_registry
@@ -29,6 +30,7 @@ from src.kernel.types import Permission
 logger = get_logger(__name__)
 
 router = APIRouter()
+CHANNEL_LIST_MAX_ITEMS = 200
 
 
 async def get_channel_storage() -> ChannelStorage:
@@ -44,8 +46,7 @@ async def _validate_agent_id(agent_id: str | None, user: TokenPayload) -> None:
     agent_storage = get_agent_config_storage()
 
     # Check agent is globally enabled
-    enabled_ids = set(await agent_storage.get_enabled_agent_ids())
-    if agent_id not in enabled_ids:
+    if not await agent_storage.is_agent_enabled(agent_id):
         raise HTTPException(status_code=400, detail=f"Agent '{agent_id}' is not available")
 
     # Check agent is allowed for user's roles
@@ -115,7 +116,7 @@ async def start_feishu_registration():
     try:
         from src.infra.channel.feishu.registration import start_registration
 
-        session = start_registration()
+        session = await run_blocking_io(start_registration, timeout=5.0)
         return session.to_dict(include_secret=False)
     except ImportError as e:
         raise HTTPException(
@@ -132,7 +133,7 @@ async def get_feishu_registration(session_id: str):
     """Poll a one-click Feishu app registration session."""
     from src.infra.channel.feishu.registration import get_registration
 
-    session = get_registration(session_id)
+    session = await run_blocking_io(get_registration, session_id, timeout=5.0)
     if not session:
         raise HTTPException(status_code=404, detail="Registration session not found")
     return session.to_dict(include_secret=session.status == "success")
@@ -146,7 +147,7 @@ async def cancel_feishu_registration(session_id: str):
     """Cancel a one-click Feishu app registration session."""
     from src.infra.channel.feishu.registration import cancel_registration
 
-    if not cancel_registration(session_id):
+    if not await run_blocking_io(cancel_registration, session_id, timeout=5.0):
         raise HTTPException(status_code=404, detail="Registration session not found")
     return {"cancelled": True}
 
@@ -162,6 +163,12 @@ async def list_user_channels(
 ):
     """List all configured channel instances for current user"""
     registry = get_registry()
+    total_configs = await storage.count_user_configs(user.sub)
+    if total_configs > CHANNEL_LIST_MAX_ITEMS:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Too many channel configurations to list at once (max {CHANNEL_LIST_MAX_ITEMS})",
+        )
     configs = await storage.list_user_configs(user.sub)
 
     responses = []
@@ -222,9 +229,14 @@ async def list_channel_instances(
     if not channel_class:
         raise HTTPException(status_code=404, detail=f"Unknown channel type: {channel_type}")
 
-    # Get all configs for this user and channel type
-    all_configs = await storage.list_user_configs(user.sub)
-    configs = [c for c in all_configs if c.get("channel_type") == channel_type.value]
+    total_configs = await storage.count_user_configs_by_type(user.sub, channel_type)
+    if total_configs > CHANNEL_LIST_MAX_ITEMS:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Too many channel configurations to list at once (max {CHANNEL_LIST_MAX_ITEMS})",
+        )
+
+    configs = await storage.list_user_configs_by_type(user.sub, channel_type)
 
     metadata = channel_class.get_metadata()
     responses = []
@@ -319,8 +331,8 @@ async def create_channel_instance(
                     max_channels = role.limits.max_channels
 
     if max_channels is not None and max_channels >= 0:
-        existing_channels = await storage.list_user_configs(user.sub)
-        if len(existing_channels) >= max_channels:
+        existing_channel_count = await storage.count_user_configs(user.sub)
+        if existing_channel_count >= max_channels:
             raise HTTPException(
                 status_code=400,
                 detail=f"Maximum channel limit ({max_channels}) reached. Please delete an existing channel before creating a new one.",

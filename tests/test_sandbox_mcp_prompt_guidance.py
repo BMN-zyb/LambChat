@@ -1,15 +1,19 @@
 import importlib.util
+import json
 from pathlib import Path
 
 import pytest
 
+from src.infra.tool import sandbox_mcp_prompt
 from src.infra.tool.deferred_manager import DeferredToolManager
 from src.infra.tool.sandbox_mcp_prompt import (
     _MAX_TOOLS_IN_PROMPT,
+    _cleanup_excess_prompt_cache_entries,
     _fetch_and_format,
     _format_tools_list,
     _format_tools_list_sections,
     _maybe_append_overflow_hint,
+    _sandbox_mcp_prompt_cache,
 )
 from src.infra.tool.tool_search_tool import ToolSearchTool
 
@@ -43,6 +47,39 @@ class _SearchArgsSchema(_FakeManager):
             "properties": {"title": {"type": "string"}},
             "required": ["title"],
         }
+
+
+@pytest.mark.asyncio
+async def test_sandbox_mcp_prompt_fetch_offloads_mcporter_json_parse(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = []
+
+    async def fake_run_blocking_io(func, *args, **kwargs):
+        calls.append(func)
+        return func(*args, **kwargs)
+
+    async def fake_is_mcporter_available(_backend) -> bool:
+        return True
+
+    class _Backend:
+        async def aexecute(self, command: str, timeout: int):
+            assert command == "mcporter list --json"
+            assert timeout == 15
+            return type(
+                "_Result",
+                (),
+                {"exit_code": 0, "output": '{"servers":[{"name":"github","tools":[]}]}'},
+            )()
+
+    monkeypatch.setattr(sandbox_mcp_prompt, "run_blocking_io", fake_run_blocking_io)
+    monkeypatch.setattr(sandbox_mcp_prompt, "_is_mcporter_available", fake_is_mcporter_available)
+
+    sections, total_count = await _fetch_and_format(_Backend())
+
+    assert calls == [json.loads]
+    assert sections == ()
+    assert total_count == 0
 
 
 def test_deferred_prompt_excludes_sandbox_mcp_from_search_tools() -> None:
@@ -225,6 +262,23 @@ def test_sandbox_mcp_prompt_discourages_repo_wide_grep_searches() -> None:
     assert "avoid repo-wide searches" in prompt
     assert "use `ls` or `glob` first" in prompt
     assert "narrow `path` before `grep`" in prompt
+
+
+def test_sandbox_mcp_prompt_cache_eviction_caps_users(monkeypatch: pytest.MonkeyPatch) -> None:
+    _sandbox_mcp_prompt_cache.clear()
+    monkeypatch.setattr(
+        "src.infra.tool.sandbox_mcp_prompt._MAX_PROMPT_CACHE_ENTRIES",
+        2,
+        raising=False,
+    )
+    _sandbox_mcp_prompt_cache["user-old"] = (("old",), 1, 1.0)
+    _sandbox_mcp_prompt_cache["user-mid"] = (("mid",), 1, 2.0)
+    _sandbox_mcp_prompt_cache["user-new"] = (("new",), 1, 3.0)
+
+    removed = _cleanup_excess_prompt_cache_entries()
+
+    assert removed == 1
+    assert list(_sandbox_mcp_prompt_cache) == ["user-mid", "user-new"]
 
 
 def test_builtin_grep_tool_description_discourages_global_search() -> None:

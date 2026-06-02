@@ -6,12 +6,19 @@
 
 from typing import Optional
 
+from src.infra.async_utils.background_tasks import BestEffortTaskLimiter
 from src.infra.auth.jwt import create_access_token, create_refresh_token
 from src.infra.role.storage import RoleStorage
 from src.infra.storage.s3.service import get_or_init_storage, get_s3_enabled
 from src.infra.user.storage import UserStorage
 from src.kernel.config import settings
 from src.kernel.schemas.user import Token, User, UserCreate, UserListResponse, UserUpdate
+
+_s3_cleanup_tasks = BestEffortTaskLimiter("user S3 cleanup", max_tasks=4)
+
+
+async def drain_s3_cleanup_tasks() -> None:
+    await _s3_cleanup_tasks.drain()
 
 
 class UserManager:
@@ -150,8 +157,6 @@ class UserManager:
         Returns:
             是否删除成功
         """
-        # Schedule S3 files deletion as background task (non-blocking)
-        import asyncio
 
         async def cleanup_s3_files(uid: str):
             """Background task to delete user's S3 files"""
@@ -166,9 +171,7 @@ class UserManager:
                 # Ignore S3 deletion errors - may not be configured
                 pass
 
-        # Run S3 cleanup in background (non-blocking)
-        task = asyncio.create_task(cleanup_s3_files(user_id))
-        task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+        _s3_cleanup_tasks.create_task(cleanup_s3_files(user_id))
 
         return await self.storage.delete(user_id)
 

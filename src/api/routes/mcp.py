@@ -34,6 +34,8 @@ logger = get_logger(__name__)
 router = APIRouter()
 admin_router = APIRouter()
 
+MCP_IMPORT_MAX_SERVERS = 100
+
 
 # Dependency to get MCPStorage
 async def get_mcp_storage() -> MCPStorage:
@@ -110,10 +112,12 @@ async def list_servers(
     storage: MCPStorage = Depends(get_mcp_storage),
 ):
     """Get all visible MCP servers (system + user's own)"""
+    storage_limit = skip + limit + 1
     servers = await storage.get_visible_servers(
         user.sub,
         is_admin=_is_admin(user),
         user_roles=user.roles,
+        limit=storage_limit,
     )
     if _is_admin(user):
         from src.infra.tool.internal_registry import build_internal_server_response
@@ -174,6 +178,12 @@ async def import_servers(
     """Import MCP servers from JSON configuration (requires transport-specific permission)"""
     # Check permissions for each server's transport type
     servers = data.get_servers()
+    if len(servers) > MCP_IMPORT_MAX_SERVERS:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Import contains too many MCP servers (max {MCP_IMPORT_MAX_SERVERS})",
+        )
+
     for server_name, server_config in servers.items():
         transport = server_config.get("transport", "streamable_http")
         if not _has_permission_for_transport(user, transport):
@@ -446,7 +456,12 @@ async def toggle_tool(
         # System-level: only creators can toggle
         user_server = await storage.get_user_server(name, user.sub)
         if user_server:
-            await storage.set_user_server_tool_disabled(name, tool_name, user.sub, not data.enabled)
+            try:
+                await storage.set_user_server_tool_disabled(
+                    name, tool_name, user.sub, not data.enabled
+                )
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
         else:
             system_server = await storage.get_system_server(name)
             if not system_server:
@@ -458,7 +473,10 @@ async def toggle_tool(
                     status_code=403, detail="Only the creator can toggle tools on this server"
                 )
 
-            await storage.set_system_tool_disabled(name, tool_name, not data.enabled)
+            try:
+                await storage.set_system_tool_disabled(name, tool_name, not data.enabled)
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
 
     status_text = "enabled" if data.enabled else "disabled"
     return MCPToolToggleResponse(
@@ -483,7 +501,13 @@ async def admin_list_servers(
     storage: MCPStorage = Depends(get_mcp_storage),
 ):
     """Get all MCP servers (admin view - includes all system servers, bypasses role filter)"""
-    servers = await storage.get_visible_servers(user.sub, is_admin=True, user_roles=user.roles)
+    storage_limit = skip + limit + 1
+    servers = await storage.get_visible_servers(
+        user.sub,
+        is_admin=True,
+        user_roles=user.roles,
+        limit=storage_limit,
+    )
     from src.infra.tool.internal_registry import build_internal_server_response
 
     servers.append(build_internal_server_response())
@@ -688,7 +712,10 @@ async def admin_toggle_tool(
             updated_by=user.sub,
         )
     else:
-        await storage.set_system_tool_disabled(name, tool_name, not data.enabled)
+        try:
+            await storage.set_system_tool_disabled(name, tool_name, not data.enabled)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
 
     status_text = "enabled" if data.enabled else "disabled"
     return MCPToolToggleResponse(

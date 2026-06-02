@@ -8,6 +8,8 @@ from src.infra.utils.datetime import utc_now
 from src.kernel.config import settings
 from src.kernel.schemas.project import Project, ProjectCreate, ProjectUpdate
 
+PROJECT_LIST_LIMIT = 100
+
 
 class ProjectStorage:
     """
@@ -78,10 +80,14 @@ class ProjectStorage:
 
     async def list_projects(self, user_id: str) -> list[Project]:
         """List all projects for a user, sorted by sort_order."""
-        cursor = self.collection.find({"user_id": user_id}).sort("sort_order", 1)
+        cursor = (
+            self.collection.find({"user_id": user_id})
+            .sort("sort_order", 1)
+            .limit(PROJECT_LIST_LIMIT)
+        )
         projects = []
 
-        for project_dict in await cursor.to_list(length=100):
+        for project_dict in await cursor.to_list(length=PROJECT_LIST_LIMIT):
             project_dict["id"] = str(project_dict.pop("_id"))
             projects.append(Project(**project_dict))
 

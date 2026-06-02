@@ -4,14 +4,20 @@ GitHub Skills 导入 API
 提供从 GitHub 仓库预览和安装技能的功能。
 """
 
+import asyncio
+import codecs
+import io
 import re
-from typing import Any, Optional
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from typing import Any, Optional, TypeVar
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from src.api.deps import require_permissions
+from src.infra.async_utils import run_blocking_io
 from src.infra.logging import get_logger
 from src.infra.skill.parser import parse_skill_md
 from src.infra.skill.storage import SkillStorage
@@ -24,6 +30,77 @@ router = APIRouter()
 
 GITHUB_API = "https://api.github.com"
 GITHUB_RAW = "https://raw.githubusercontent.com"
+GITHUB_SCAN_CONCURRENCY = 8
+GITHUB_IMPORT_MAX_FILES = 500
+GITHUB_IMPORT_MAX_TOTAL_BYTES = 10 * 1024 * 1024
+GITHUB_INSTALL_MAX_SKILLS = 100
+
+T = TypeVar("T")
+
+
+@dataclass
+class _GitHubImportLimits:
+    file_count: int = 0
+    total_bytes: int = 0
+
+
+def _github_item_size(item: dict[str, Any]) -> int | None:
+    try:
+        size = int(item.get("size"))
+    except (TypeError, ValueError):
+        return None
+    return size if size >= 0 else None
+
+
+def _github_import_too_large_message() -> str:
+    max_mb = GITHUB_IMPORT_MAX_TOTAL_BYTES // (1024 * 1024)
+    return f"GitHub skill content too large (max {max_mb}MB)"
+
+
+def _bounded_requested_skill_names(skill_names: list[str]) -> list[str]:
+    bounded: list[str] = []
+    seen: set[str] = set()
+    for skill_name in skill_names:
+        if not isinstance(skill_name, str):
+            continue
+        normalized = skill_name.strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        bounded.append(normalized)
+        if len(bounded) > GITHUB_INSTALL_MAX_SKILLS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Cannot install more than {GITHUB_INSTALL_MAX_SKILLS} skills at once",
+            )
+    return bounded
+
+
+async def _gather_limited(
+    factories: list[Callable[[], Awaitable[T]]],
+    limit: int = GITHUB_SCAN_CONCURRENCY,
+) -> list[T]:
+    """Run awaitable factories with bounded concurrency while preserving order."""
+    if not factories:
+        return []
+
+    results: list[T | None] = [None] * len(factories)
+    next_index = 0
+    lock = asyncio.Lock()
+
+    async def _worker() -> None:
+        nonlocal next_index
+        while True:
+            async with lock:
+                if next_index >= len(factories):
+                    return
+                index = next_index
+                next_index += 1
+            results[index] = await factories[index]()
+
+    worker_count = min(max(1, limit), len(factories))
+    await asyncio.gather(*(_worker() for _ in range(worker_count)))
+    return [result for result in results if result is not None]
 
 
 class GitHubPreviewRequest(BaseModel):
@@ -126,6 +203,7 @@ async def fetch_all_files_recursive(
     branch: str,
     dir_path: str = "",
     prefix: str = "",
+    _limits: _GitHubImportLimits | None = None,
 ) -> dict[str, str]:
     """
     递归获取 GitHub 目录下所有文件内容
@@ -140,9 +218,9 @@ async def fetch_all_files_recursive(
     Returns:
         {相对文件路径: 文件内容}
     """
-    import asyncio
-
     files: dict[str, str] = {}
+    if _limits is None:
+        _limits = _GitHubImportLimits()
 
     try:
         contents = await fetch_github_dir(owner, repo, branch, dir_path)
@@ -161,17 +239,45 @@ async def fetch_all_files_recursive(
         elif item["type"] == "dir":
             dir_items.append(item)
 
+    _limits.file_count += len(file_tasks)
+    if _limits.file_count > GITHUB_IMPORT_MAX_FILES:
+        raise ValueError(f"GitHub skill contains too many files (max {GITHUB_IMPORT_MAX_FILES})")
+
+    for item in file_tasks:
+        known_size = _github_item_size(item)
+        if known_size is None:
+            continue
+        if _limits.total_bytes + known_size > GITHUB_IMPORT_MAX_TOTAL_BYTES:
+            raise ValueError(_github_import_too_large_message())
+        _limits.total_bytes += known_size
+
     # 并发获取所有文件内容
     if file_tasks:
 
         async def _fetch_file(item):
-            content = await fetch_github_file(owner, repo, branch, item["path"])
+            remaining_bytes = GITHUB_IMPORT_MAX_TOTAL_BYTES - _limits.total_bytes
+            content = await fetch_github_file(
+                owner,
+                repo,
+                branch,
+                item["path"],
+                max_bytes=max(0, remaining_bytes),
+            )
             rel_path = f"{prefix}{item['name']}" if prefix else item["name"]
-            return rel_path, content
+            return rel_path, content, _github_item_size(item)
 
-        results = await asyncio.gather(*[_fetch_file(item) for item in file_tasks])
-        for rel_path, content in results:
+        results = await _gather_limited(
+            [lambda item=item: _fetch_file(item) for item in file_tasks]
+        )
+        for rel_path, content, known_size in results:
             if content is not None:
+                actual_size = len(content.encode("utf-8"))
+                if known_size is None:
+                    _limits.total_bytes += actual_size
+                else:
+                    _limits.total_bytes += actual_size - known_size
+                if _limits.total_bytes > GITHUB_IMPORT_MAX_TOTAL_BYTES:
+                    raise ValueError(_github_import_too_large_message())
                 files[rel_path] = content
 
     # 递归获取子目录
@@ -180,9 +286,11 @@ async def fetch_all_files_recursive(
         for item in dir_items:
             sub_prefix = f"{prefix}{item['name']}/" if prefix else f"{item['name']}/"
             dir_tasks.append(
-                fetch_all_files_recursive(owner, repo, branch, item["path"], sub_prefix)
+                lambda item=item, sub_prefix=sub_prefix: fetch_all_files_recursive(
+                    owner, repo, branch, item["path"], sub_prefix, _limits
+                )
             )
-        dir_results = await asyncio.gather(*dir_tasks)
+        dir_results = await _gather_limited(dir_tasks)
         for sub_files in dir_results:
             files.update(sub_files)
 
@@ -194,14 +302,28 @@ async def fetch_github_file(
     repo: str,
     branch: str,
     path: str,
+    max_bytes: int | None = None,
 ) -> Optional[str]:
     """获取 GitHub 文件内容"""
     url = f"{GITHUB_RAW}/{owner}/{repo}/{branch}/{path}"
     async with httpx.AsyncClient() as client:
-        resp = await client.get(url, timeout=30.0)
-        if resp.status_code != 200:
-            return None
-        return resp.text
+        async with client.stream("GET", url, timeout=30.0) as resp:
+            if resp.status_code != 200:
+                return None
+            decoder = codecs.getincrementaldecoder("utf-8")()
+            text_buffer = io.StringIO()
+            total_bytes = 0
+            async for chunk in resp.aiter_bytes():
+                if not chunk:
+                    continue
+                total_bytes += len(chunk)
+                if max_bytes is not None and total_bytes > max_bytes:
+                    raise ValueError(_github_import_too_large_message())
+                text = await run_blocking_io(decoder.decode, chunk, False)
+                text_buffer.write(text)
+                del chunk
+            text_buffer.write(await run_blocking_io(decoder.decode, b"", True))
+            return text_buffer.getvalue()
 
 
 def _parse_skill_md(skill_md: str, fallback_name: str, fallback_source: str) -> dict[str, Any]:
@@ -257,12 +379,15 @@ async def scan_for_skills(
 
     # 递归扫描未找到 SKILL.md 的子目录（限制深度）
     if sub_dirs and _depth < max_depth:
-        import asyncio
-
-        sub_results = await asyncio.gather(
-            *[
-                scan_for_skills(
-                    owner, repo, branch, d["path"], _depth=_depth + 1, max_depth=max_depth
+        sub_results = await _gather_limited(
+            [
+                lambda d=d: scan_for_skills(
+                    owner,
+                    repo,
+                    branch,
+                    d["path"],
+                    _depth=_depth + 1,
+                    max_depth=max_depth,
                 )
                 for d in sub_dirs
             ]
@@ -323,6 +448,7 @@ async def install_github_skills(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+    requested_skill_names = _bounded_requested_skill_names(request.skill_names)
     storage = SkillStorage()
     installed = []
     errors = []
@@ -333,7 +459,7 @@ async def install_github_skills(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to scan repository: {str(e)}")
 
-    for skill_name in request.skill_names:
+    for skill_name in requested_skill_names:
         try:
             skill_info = next((s for s in all_skills if s["name"] == skill_name), None)
             if not skill_info:

@@ -5,7 +5,11 @@ import pytest
 
 from src.infra.agent import AgentEventProcessor
 from src.infra.agent.events.buffers import TextChunkBuffer
-from src.infra.agent.events.tool_outputs import detect_tool_error
+from src.infra.agent.events.tool_outputs import (
+    _compact_serializable_value,
+    detect_tool_error,
+    process_messages,
+)
 
 
 class FakePresenter:
@@ -222,6 +226,21 @@ async def test_text_chunk_key_change_flushes_previous_chunk_without_dropping_cur
 
 
 @pytest.mark.asyncio
+async def test_output_text_keeps_bounded_copy_while_streaming_all_chunks() -> None:
+    presenter = FakePresenter()
+    processor = AgentEventProcessor(presenter)
+
+    chunk = "x" * 300
+    for index in range(40):
+        await processor.process_event(chat_stream(chunk, f"chunk-{index}"))
+    await processor.flush()
+
+    assert sum(len(event["data"]["content"]) for event in presenter.emitted) == 12_000
+    assert len(processor.output_text) <= 8_000
+    assert processor.output_text == "x" * 8_000
+
+
+@pytest.mark.asyncio
 async def test_reasoning_content_chunk_emits_thinking_event() -> None:
     presenter = FakePresenter()
     processor = AgentEventProcessor(presenter)
@@ -348,6 +367,60 @@ def test_detect_tool_error_detects_string_error_prefix() -> None:
     assert detect_tool_error(None, "Error: failed to run") == (True, "Error: failed to run")
 
 
+def test_process_messages_compacts_large_artifact_before_serializing() -> None:
+    large_value = "x" * 20_000
+    result = process_messages(
+        [
+            SimpleNamespace(
+                content="",
+                artifact={
+                    "rows": [
+                        {"body": large_value},
+                        {"body": large_value},
+                    ],
+                },
+            )
+        ]
+    )
+
+    assert isinstance(result, str)
+    assert len(result) < 10_000
+    assert large_value not in result
+    assert "truncated from 20000 chars" in result
+
+
+def test_process_messages_compacts_large_text_content_before_joining() -> None:
+    large_value = "x" * 20_000
+
+    result = process_messages([SimpleNamespace(content=large_value)])
+
+    assert isinstance(result, str)
+    assert len(result) < 10_000
+    assert large_value not in result
+    assert "truncated from 20000 chars" in result
+
+
+def test_compact_serializable_value_does_not_materialize_large_dict_items() -> None:
+    class GuardedLargeDict(dict):
+        def __len__(self) -> int:
+            return 1_000_000
+
+        def items(self):
+            raise AssertionError("large dict compaction must not materialize all items")
+
+        def __iter__(self):
+            yield from (f"key-{index}" for index in range(101))
+
+        def __getitem__(self, key):
+            return f"value-{key}"
+
+    compacted = _compact_serializable_value(GuardedLargeDict())
+
+    assert len(compacted) == 101
+    assert compacted["key-0"] == "value-key-0"
+    assert compacted["_truncated_keys"] == 999_900
+
+
 @pytest.mark.asyncio
 async def test_tool_error_emits_start_and_failed_result_when_start_was_missing() -> None:
     presenter = FakePresenter()
@@ -422,6 +495,92 @@ async def test_tool_error_does_not_emit_duplicate_start_after_start_event() -> N
     assert [event["event"] for event in presenter.emitted] == ["tool:start", "tool:result"]
     assert presenter.emitted[1]["data"]["success"] is False
     assert presenter.emitted[1]["data"]["tool_call_id"] == "tool-run-1"
+
+
+@pytest.mark.asyncio
+async def test_tool_result_large_json_string_is_not_parsed_and_is_clipped() -> None:
+    presenter = FakePresenter()
+    processor = AgentEventProcessor(presenter)
+    large_json = '{"rows": ["' + ("x" * 12_000) + '"]}'
+
+    await processor.process_event(
+        {
+            "event": "on_tool_end",
+            "name": "large_tool",
+            "run_id": "tool-run-large",
+            "data": {"output": large_json},
+            "metadata": {},
+        }
+    )
+
+    result = presenter.emitted[0]["data"]["result"]
+
+    assert isinstance(result, str)
+    assert len(result) < len(large_json)
+    assert "[truncated from" in result
+    assert presenter.emitted[0]["data"]["tool_call_id"] == "tool-run-large"
+
+
+@pytest.mark.asyncio
+async def test_tool_end_offloads_output_extraction(monkeypatch: pytest.MonkeyPatch) -> None:
+    from src.infra.agent.events import tool_events
+
+    presenter = FakePresenter()
+    processor = AgentEventProcessor(presenter)
+    calls: list[object] = []
+
+    async def fake_run_blocking_io(func, *args, **kwargs):
+        calls.append(func)
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(tool_events, "run_blocking_io", fake_run_blocking_io, raising=False)
+
+    await processor.process_event(
+        {
+            "event": "on_tool_end",
+            "name": "large_tool",
+            "run_id": "tool-run-large",
+            "data": {
+                "output": SimpleNamespace(
+                    content=[
+                        {"type": "text", "text": "x" * 20_000},
+                    ]
+                )
+            },
+            "metadata": {},
+        }
+    )
+
+    assert tool_events.extract_tool_output in calls
+    assert presenter.emitted[0]["data"]["tool_call_id"] == "tool-run-large"
+
+
+@pytest.mark.asyncio
+async def test_tool_end_offloads_result_json_parsing(monkeypatch: pytest.MonkeyPatch) -> None:
+    from src.infra.agent.events import tool_events
+
+    presenter = FakePresenter()
+    processor = AgentEventProcessor(presenter)
+    calls: list[object] = []
+
+    async def fake_run_blocking_io(func, *args, **kwargs):
+        calls.append(func)
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(tool_events, "run_blocking_io", fake_run_blocking_io, raising=False)
+
+    await processor.process_event(
+        {
+            "event": "on_tool_end",
+            "name": "json_tool",
+            "run_id": "tool-run-json",
+            "data": {"output": '{"ok": true, "items": [1, 2]}'},
+            "metadata": {},
+        }
+    )
+
+    assert tool_events._parse_tool_result_json in calls
+    assert presenter.emitted[0]["data"]["result"] == {"ok": True, "items": [1, 2]}
 
 
 @pytest.mark.asyncio

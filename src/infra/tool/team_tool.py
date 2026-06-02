@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Annotated, Any
 
 from langchain_core.tools import BaseTool, InjectedToolArg
 
+from src.infra.async_utils import run_blocking_io
 from src.infra.persona_preset.manager import PersonaPresetManager
 from src.infra.role.storage import RoleStorage
 from src.infra.team.manager import TeamManager
@@ -30,8 +31,8 @@ else:
 from langchain.tools import tool  # noqa: E402
 
 
-def _json(data: dict[str, Any]) -> str:
-    return json.dumps(data, ensure_ascii=False, default=str)
+async def _json_dumps_result(data: dict[str, Any]) -> str:
+    return await run_blocking_io(json.dumps, data, ensure_ascii=False, default=str)
 
 
 async def _resolve_user(user_id: str) -> TokenPayload | None:
@@ -125,11 +126,13 @@ async def search_persona_presets(
     """
     user_id = get_user_id_from_runtime(runtime)
     if not user_id:
-        return _json({"error": "No user context available"})
+        return await _json_dumps_result({"error": "No user context available"})
 
     user = await _resolve_user(user_id)
     if not user or not _can_read_personas(user):
-        return _json({"error": "Permission denied: persona_preset:read required"})
+        return await _json_dumps_result(
+            {"error": "Permission denied: persona_preset:read required"}
+        )
 
     try:
         presets = await PersonaPresetManager().list_presets(
@@ -140,9 +143,9 @@ async def search_persona_presets(
             limit=min(max(limit, 1), 50),
         )
     except Exception as e:
-        return _json({"error": f"Failed to search persona presets: {e}"})
+        return await _json_dumps_result({"error": f"Failed to search persona presets: {e}"})
 
-    return _json(
+    return await _json_dumps_result(
         {
             "success": True,
             "presets": [
@@ -245,19 +248,19 @@ async def create_agent_team(
     """
     user_id = get_user_id_from_runtime(runtime)
     if not user_id:
-        return _json({"error": "No user context available"})
+        return await _json_dumps_result({"error": "No user context available"})
 
     user = await _resolve_user(user_id)
     if not user or not _can_create_team(user):
-        return _json({"error": "Permission denied: team:write required"})
+        return await _json_dumps_result({"error": "Permission denied: team:write required"})
 
     if not members:
-        return _json({"error": "At least one team member is required"})
+        return await _json_dumps_result({"error": "At least one team member is required"})
 
     for item in members:
         invalid_id = _invalid_persona_preset_id(str(item.get("persona_preset_id") or ""))
         if invalid_id is not None:
-            return _json(
+            return await _json_dumps_result(
                 {
                     "error": (
                         f"Invalid persona_preset_id '{invalid_id}'. Search for an existing "
@@ -281,9 +284,9 @@ async def create_agent_team(
             for index, item in enumerate(members, start=1)
         ]
     except KeyError:
-        return _json({"error": "Each member must include persona_preset_id"})
+        return await _json_dumps_result({"error": "Each member must include persona_preset_id"})
     except Exception as e:
-        return _json({"error": f"Invalid team member payload: {e}"})
+        return await _json_dumps_result({"error": f"Invalid team member payload: {e}"})
 
     try:
         manager = TeamManager()
@@ -314,9 +317,9 @@ async def create_agent_team(
             action = "created"
     except Exception as e:
         operation = "update" if team_id else "create"
-        return _json({"error": f"Failed to {operation} team: {e}"})
+        return await _json_dumps_result({"error": f"Failed to {operation} team: {e}"})
 
-    return _json(
+    return await _json_dumps_result(
         {
             "success": True,
             "created": action == "created",

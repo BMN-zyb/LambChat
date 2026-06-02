@@ -19,6 +19,7 @@ from src.api.deps import get_current_user_required, require_permissions
 from src.api.routes.auth.utils import _get_language
 from src.api.routes.chat_validation import validate_team_agent_request
 from src.api.routes.session import verify_session_ownership
+from src.infra.async_utils import run_blocking_io
 from src.infra.chat.user_message_timestamp import format_user_message_with_timestamp
 from src.infra.goal import GoalSpec, coerce_goal_spec
 from src.infra.logging import get_logger
@@ -37,6 +38,8 @@ from src.kernel.schemas.user import TokenPayload
 router = APIRouter()
 logger = get_logger(__name__)
 
+CHAT_SSE_DATA_MAX_BYTES = 256 * 1024
+
 
 def _model_profile_dict(model: ModelConfig) -> dict | None:
     if not model.profile:
@@ -48,6 +51,59 @@ def _model_profile_dict(model: ModelConfig) -> dict | None:
 
 def _safe_model_config_dict(model: ModelConfig) -> dict:
     return model.model_copy(update={"api_key": None}).model_dump(mode="json")
+
+
+def _estimated_json_data_bytes(data: object) -> int:
+    if data is None or isinstance(data, (bool, int, float)):
+        return len(json.dumps(data, default=str).encode("utf-8"))
+    if isinstance(data, str):
+        return len(data.encode("utf-8")) + 2
+    if isinstance(data, dict):
+        total = 2
+        for index, (key, value) in enumerate(data.items()):
+            if index:
+                total += 1
+            total += len(str(key).encode("utf-8")) + 3
+            total += _estimated_json_data_bytes(value)
+        return total
+    if isinstance(data, (list, tuple)):
+        total = 2
+        for index, item in enumerate(data):
+            if index:
+                total += 1
+            total += _estimated_json_data_bytes(item)
+        return total
+    return len(str(data).encode("utf-8")) + 2
+
+
+def _chat_sse_payload_too_large_event(event_id: object | None) -> str:
+    id_line = f"id: {event_id}\n" if event_id is not None else ""
+    return f'event: error\ndata: {{"error":"event_payload_too_large"}}\n{id_line}\n'
+
+
+def _json_dumps_chat_sse_data_limited(data: object) -> str | None:
+    if _estimated_json_data_bytes(data) > CHAT_SSE_DATA_MAX_BYTES:
+        return None
+
+    encoder = json.JSONEncoder(ensure_ascii=False, default=str)
+    chunks: list[str] = []
+    total = 0
+    for chunk in encoder.iterencode(data):
+        total += len(chunk.encode("utf-8"))
+        if total > CHAT_SSE_DATA_MAX_BYTES:
+            return None
+        chunks.append(chunk)
+    return "".join(chunks)
+
+
+def _format_sse_event(event: dict) -> str:
+    event_data = event["data"]
+    if isinstance(event_data, dict) and event.get("timestamp"):
+        event_data = {**event_data, "_timestamp": event["timestamp"]}
+    data_str = _json_dumps_chat_sse_data_limited(event_data)
+    if data_str is None:
+        return _chat_sse_payload_too_large_event(event.get("id"))
+    return f"event: {event['event_type']}\ndata: {data_str}\nid: {event['id']}\n\n"
 
 
 async def _attach_resolved_model_options(agent_options: dict, model: ModelConfig) -> None:
@@ -242,6 +298,7 @@ async def _execute_agent_stream(
     run_id = presenter.run_id if presenter else None
 
     started_at: str | None = None
+    goal_end_emitted = False
     if active_goal is not None:
         started_at = datetime.now(timezone.utc).isoformat()
         yield {"event": "goal:start", "data": {"goal": active_goal, "started_at": started_at}}
@@ -264,15 +321,22 @@ async def _execute_agent_stream(
             active_goal=active_goal,
             goal_started_at=started_at,
         ):
+            if event.get("event") == "goal:end":
+                goal_end_emitted = True
             yield event
 
-        # goal:end 由各 agent 的 _stream() 在 done 之前自行发出
+        if active_goal is not None and not goal_end_emitted:
+            ended_at = datetime.now(timezone.utc).isoformat()
+            yield {
+                "event": "goal:end",
+                "data": {"goal": active_goal, "started_at": started_at, "ended_at": ended_at},
+            }
     except (asyncio.CancelledError, TaskInterruptedError):
         # 取消/中断时，调用 agent.close 清理资源
         if run_id:
             await agent.close(run_id)
         # agent 的 finally 块可能已发 goal:end，此处再 yield 确保不遗漏（Presenter 有去重）
-        if active_goal is not None:
+        if active_goal is not None and not goal_end_emitted:
             ended_at = datetime.now(timezone.utc).isoformat()
             yield {
                 "event": "goal:end",
@@ -578,12 +642,7 @@ async def session_stream(
                     continue
 
                 event_count += 1
-                # Include timestamp in the data payload for deduplication
-                event_data = event["data"]
-                if isinstance(event_data, dict) and event.get("timestamp"):
-                    # Create a copy to avoid modifying the original
-                    event_data = {**event_data, "_timestamp": event["timestamp"]}
-                yield f"event: {event['event_type']}\ndata: {json.dumps(event_data, ensure_ascii=False, default=str)}\nid: {event['id']}\n\n"
+                yield await run_blocking_io(_format_sse_event, event)
 
             logger.info(f"[SSE] Stream ended after {event_count} events")
 

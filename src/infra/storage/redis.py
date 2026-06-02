@@ -9,12 +9,34 @@ from typing import Any, Optional
 import redis.asyncio as redis
 from redis.asyncio import Redis
 
+from src.infra.async_utils import run_blocking_io
 from src.infra.logging import get_logger
 from src.infra.storage.base import StorageBase
 from src.kernel.config import settings
 
 logger = get_logger(__name__)
 _UNSET = object()
+REDIS_STORAGE_KEYS_LIMIT = 1000
+
+
+def _parse_stream_fields_sync(fields: dict) -> dict:
+    parsed = {}
+    for key, value in fields.items():
+        try:
+            parsed[key] = json.loads(value)
+        except (json.JSONDecodeError, TypeError):
+            parsed[key] = value
+    return parsed
+
+
+def _parse_stream_entries_sync(entries: list[tuple[str, dict]]) -> list[tuple[str, dict]]:
+    return [(entry_id, _parse_stream_fields_sync(fields)) for entry_id, fields in entries]
+
+
+def _parse_stream_read_result_sync(
+    result: list[tuple[str, list[tuple[str, dict]]]],
+) -> list[tuple[str, list[tuple[str, dict]]]]:
+    return [(stream_key, _parse_stream_entries_sync(entries)) for stream_key, entries in result]
 
 
 def _redis_pool_kwargs(*, socket_timeout: Any = _UNSET) -> dict[str, Any]:
@@ -89,14 +111,14 @@ class RedisStorage(StorageBase):
         if value is None:
             return None
         try:
-            return json.loads(value)
+            return await run_blocking_io(json.loads, value)
         except json.JSONDecodeError:
             return value
 
     async def set(self, key: str, value: Any, ttl: Optional[int] = None) -> None:
         """设置数据"""
         if isinstance(value, (dict, list)):
-            value = json.dumps(value)
+            value = await run_blocking_io(json.dumps, value)
         await self.client.set(key, value, ex=ttl)
 
     async def delete(self, key: str) -> bool:
@@ -109,8 +131,17 @@ class RedisStorage(StorageBase):
         return await self.client.exists(key) > 0
 
     async def keys(self, pattern: str) -> list[str]:
-        """获取匹配的键列表"""
-        return await self.client.keys(pattern)
+        """获取匹配的键列表，使用 SCAN 且限制结果数量避免阻塞和内存膨胀。"""
+        cursor: int | str = 0
+        keys: list[str] = []
+        while True:
+            cursor, batch = await self.client.scan(cursor=cursor, match=pattern, count=100)
+            remaining = REDIS_STORAGE_KEYS_LIMIT - len(keys)
+            keys.extend(str(key) for key in batch[:remaining])
+            if len(keys) >= REDIS_STORAGE_KEYS_LIMIT:
+                return keys
+            if int(cursor) == 0:
+                return keys
 
     async def expire(self, key: str, ttl: int) -> bool:
         """设置过期时间"""
@@ -149,7 +180,7 @@ class RedisStorage(StorageBase):
         serialized = {}
         for k, v in fields.items():
             if isinstance(v, dict):
-                serialized[k] = json.dumps(v)
+                serialized[k] = await run_blocking_io(json.dumps, v)
             else:
                 serialized[k] = str(v)
 
@@ -188,16 +219,7 @@ class RedisStorage(StorageBase):
         entries = await self.client.xrange(
             stream_key, min=actual_start, max=actual_end, count=count
         )
-        result = []
-        for entry_id, fields in entries:
-            parsed = {}
-            for k, v in fields.items():
-                try:
-                    parsed[k] = json.loads(v)
-                except (json.JSONDecodeError, TypeError):
-                    parsed[k] = v
-            result.append((entry_id, parsed))
-        return result
+        return await run_blocking_io(_parse_stream_entries_sync, entries)
 
     async def xread(
         self,
@@ -240,20 +262,7 @@ class RedisStorage(StorageBase):
                 return []
             raise
 
-        parsed_result = []
-        for stream_key, entries in result or []:
-            parsed_entries = []
-            for entry_id, fields in entries:
-                parsed = {}
-                for k, v in fields.items():
-                    try:
-                        parsed[k] = json.loads(v)
-                    except (json.JSONDecodeError, TypeError):
-                        parsed[k] = v
-                parsed_entries.append((entry_id, parsed))
-            parsed_result.append((stream_key, parsed_entries))
-
-        return parsed_result
+        return await run_blocking_io(_parse_stream_read_result_sync, result or [])
 
     async def xdel(self, stream_key: str, entry_id: str) -> int:
         """Delete entry from stream"""

@@ -120,7 +120,7 @@ async def test_run_agent_task_loads_payload_and_invokes_executor(
         "objective": "finish docs",
         "rubric": "- docs updated",
     }
-    assert task_manager._run_info["run-1"]["trace_id"] == "trace-1"
+    assert task_manager._run_info == {}
     assert payload_store.deleted == ["run-1"]
 
 

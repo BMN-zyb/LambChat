@@ -1,7 +1,9 @@
+import json
 from datetime import datetime, timezone
 
 import pytest
 
+from src.infra.memory.client.native import summaries
 from src.infra.memory.client.native.backend import NativeMemoryBackend
 from src.infra.memory.client.native.classification import (
     extract_tags,
@@ -28,6 +30,42 @@ def test_extract_tags_handles_english_and_cjk_content():
 
     assert "postgresql" in english_tags
     assert any(len(tag) >= 2 for tag in cjk_tags)
+
+
+@pytest.mark.asyncio
+async def test_llm_enrich_memory_offloads_json_parsing(monkeypatch):
+    calls = []
+
+    class FakeResponse:
+        content = json.dumps(
+            {
+                "title": "SQL preference",
+                "summary": "User prefers raw SQL for analytics.",
+                "tags": ["sql", "analytics", "preference"],
+            }
+        )
+
+    class FakeModel:
+        async def ainvoke(self, _messages):
+            return FakeResponse()
+
+    class FakeBackend:
+        async def _get_memory_model(self):
+            return FakeModel()
+
+    async def fake_run_blocking_io(func, *args, **kwargs):
+        calls.append(func)
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(summaries, "run_blocking_io", fake_run_blocking_io)
+
+    result = await summaries.llm_enrich_memory(
+        FakeBackend(),
+        "The user prefers raw SQL for analytics workloads.",
+    )
+
+    assert calls == [json.loads]
+    assert result["title"] == "SQL preference"
 
 
 def test_is_manual_memory_worthy_rejects_transient_code_like_content():

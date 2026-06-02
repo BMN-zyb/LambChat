@@ -1,4 +1,5 @@
 from src.infra.writer.present import create_presenter
+from src.infra.writer.presenter_config import _extract_attachment_keys
 
 
 def test_present_token_usage_includes_model_identifiers() -> None:
@@ -33,6 +34,23 @@ def test_present_recommend_questions_builds_frontend_event() -> None:
         "如何预防胫骨内侧压力综合征？",
         {"content": "赛前减量期具体怎么做？", "upload": {"ctnm": 2}},
     ]
+
+
+def test_present_user_message_bounds_persisted_attachments() -> None:
+    presenter = create_presenter(session_id="session-1", agent_id="search", agent_name="Search")
+
+    event = presenter.present_user_message(
+        "hello",
+        attachments=[{"key": f"file-{index}", "name": f"file-{index}"} for index in range(150)],
+    )
+
+    assert len(event["data"]["attachments"]) == 100
+
+
+def test_extract_attachment_keys_bounds_unique_keys() -> None:
+    keys = _extract_attachment_keys([{"key": f"file-{index}"} for index in range(150)])
+
+    assert len(keys) == 100
 
 
 class _FakeDualWriter:
@@ -149,3 +167,31 @@ async def test_done_event_is_persisted_once(monkeypatch) -> None:
     await presenter.emit(presenter.done())
 
     assert [event["event_type"] for event in writer.events] == ["token:usage", "done"]
+
+
+async def test_save_event_offloads_legacy_string_data_parse(monkeypatch) -> None:
+    import json
+
+    from src.infra.writer import presenter_storage
+
+    writer = _FakeDualWriter()
+    calls = []
+
+    async def fake_run_blocking_io(func, *args, **kwargs):
+        calls.append(func)
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr("src.infra.session.dual_writer.get_dual_writer", lambda: writer)
+    monkeypatch.setattr(presenter_storage, "run_blocking_io", fake_run_blocking_io)
+    presenter = create_presenter(
+        session_id="session-1",
+        agent_id="search",
+        agent_name="Search",
+        run_id="run-1",
+        trace_id="trace-1",
+    )
+
+    await presenter.save_event({"event": "message", "data": '{"text": "hello"}'})
+
+    assert calls == [json.loads]
+    assert writer.events[0]["data"] == {"text": "hello"}

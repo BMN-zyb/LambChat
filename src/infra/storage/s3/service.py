@@ -8,6 +8,7 @@ Includes retry mechanism for transient upload failures.
 from __future__ import annotations
 
 import asyncio
+import io
 import random
 import re
 import uuid
@@ -166,11 +167,11 @@ class S3StorageService:
     ) -> UploadResult:
         """Upload a file to storage with retry on transient failures."""
         # Check file size via current position
+        start_pos = await run_blocking_io(file.tell)
         if not skip_size_limit:
-            current_pos = file.tell()
-            file.seek(0, 2)
-            file_size = file.tell()
-            file.seek(current_pos)
+            await run_blocking_io(file.seek, 0, 2)
+            file_size = await run_blocking_io(file.tell) - start_pos
+            await run_blocking_io(file.seek, start_pos)
             if file_size > self._config.internal_max_upload_size:
                 max_mb = self._config.internal_max_upload_size / (1024 * 1024)
                 raise ValueError(
@@ -184,8 +185,13 @@ class S3StorageService:
         key = f"{folder}/{timestamp}_{unique_suffix}_{safe_filename}"
 
         backend = self._get_backend()
+
+        async def _upload_attempt() -> UploadResult:
+            await run_blocking_io(file.seek, start_pos)
+            return await backend.upload(file, key, content_type, metadata)
+
         return await self._retry_async(
-            lambda: backend.upload(file, key, content_type, metadata),
+            _upload_attempt,
             label=f"file://{key}",
         )
 
@@ -212,7 +218,13 @@ class S3StorageService:
         unique_suffix = uuid.uuid4().hex[:8]
         key = f"{folder}/{timestamp}_{unique_suffix}_{safe_filename}"
 
-        return await self.upload_to_key(data, key, content_type, metadata, skip_size_limit=True)
+        return await self.upload_stream_to_key(
+            io.BytesIO(data),
+            key,
+            content_type,
+            metadata,
+            skip_size_limit=True,
+        )
 
     async def upload_to_key(
         self,
@@ -231,10 +243,45 @@ class S3StorageService:
                 f"internal upload limit ({max_mb:.0f}MB)"
             )
 
+        return await self.upload_stream_to_key(
+            io.BytesIO(data),
+            key,
+            content_type,
+            metadata,
+            skip_size_limit=True,
+        )
+
+    async def upload_stream_to_key(
+        self,
+        file: BinaryIO,
+        key: str,
+        content_type: Optional[str] = None,
+        metadata: Optional[dict[str, str]] = None,
+        *,
+        skip_size_limit: bool = False,
+    ) -> UploadResult:
+        """Upload a file-like object to a specific key without materializing it as bytes."""
+        start_pos = await run_blocking_io(file.tell)
+        if not skip_size_limit:
+            await run_blocking_io(file.seek, 0, 2)
+            file_size = await run_blocking_io(file.tell) - start_pos
+            await run_blocking_io(file.seek, start_pos)
+            if file_size > self._config.internal_max_upload_size:
+                max_mb = self._config.internal_max_upload_size / (1024 * 1024)
+                raise ValueError(
+                    f"File size ({file_size / (1024 * 1024):.1f}MB) exceeds "
+                    f"internal upload limit ({max_mb:.0f}MB)"
+                )
+
         backend = self._get_backend()
+
+        async def _upload_attempt() -> UploadResult:
+            await run_blocking_io(file.seek, start_pos)
+            return await backend.upload(file, key, content_type, metadata)
+
         result = await self._retry_async(
-            lambda: backend.upload_bytes(data, key, content_type, metadata),
-            label=f"bytes://{key}",
+            _upload_attempt,
+            label=f"stream://{key}",
         )
 
         if not self._config.public_bucket and "?" not in result.url:
@@ -266,40 +313,41 @@ class S3StorageService:
                 client = backend._client
                 bucket = self._config.bucket_name
 
-                avatar_objects = await self.list_files(f"avatars/{user_id}")
-                if avatar_objects:
+                for prefix in (f"avatars/{user_id}", user_id):
+                    while True:
+                        objects = await self.list_files(prefix)
+                        if not objects:
+                            break
 
-                    def _remove_avatar_objects():
-                        for key in avatar_objects:
-                            client.remove_object(bucket_name=bucket, object_name=key)
+                        def _remove_objects():
+                            for key in objects:
+                                client.remove_object(bucket_name=bucket, object_name=key)
 
-                    await run_blocking_io(_remove_avatar_objects)
-                    deleted_count += len(avatar_objects)
-
-                user_objects = await self.list_files(user_id)
-                if user_objects:
-
-                    def _remove_user_objects():
-                        for key in user_objects:
-                            client.remove_object(bucket_name=bucket, object_name=key)
-
-                    await run_blocking_io(_remove_user_objects)
-                    deleted_count += len(user_objects)
+                        await run_blocking_io(_remove_objects)
+                        deleted_count += len(objects)
 
                 return deleted_count
             except Exception as e:
                 logger.warning(f"Batch delete failed, falling back to individual deletes: {e}")
 
         # Fallback: individual deletes
-        avatar_objects = await self.list_files(f"avatars/{user_id}")
-        for key in avatar_objects:
-            await self.delete_file(key)
-            deleted_count += 1
-
-        user_objects = await self.list_files(user_id)
-        for key in user_objects:
-            await self.delete_file(key)
-            deleted_count += 1
+        for prefix in (f"avatars/{user_id}", user_id):
+            while True:
+                objects = await self.list_files(prefix)
+                if not objects:
+                    break
+                deleted_this_batch = 0
+                for key in objects:
+                    if await self.delete_file(key):
+                        deleted_count += 1
+                        deleted_this_batch += 1
+                if deleted_this_batch == 0:
+                    logger.warning(
+                        "No progress deleting files for user=%s prefix=%s; stopping cleanup",
+                        user_id,
+                        prefix,
+                    )
+                    break
 
         return deleted_count
 
@@ -309,7 +357,25 @@ class S3StorageService:
 
     async def download_file(self, key: str) -> bytes:
         """Download a file and return its content as bytes"""
-        return await self._get_backend().download(key)
+        backend = self._get_backend()
+        file_size = await backend.get_size(key)
+        if file_size > self._config.internal_max_upload_size:
+            max_mb = self._config.internal_max_upload_size / (1024 * 1024)
+            raise ValueError(
+                f"File size ({file_size / (1024 * 1024):.1f}MB) exceeds "
+                f"internal download limit ({max_mb:.0f}MB)"
+            )
+        return await backend.download(key)
+
+    async def download_to_file(
+        self,
+        key: str,
+        file: BinaryIO,
+        *,
+        chunk_size: int = 1024 * 1024,
+    ) -> int:
+        """Download a file into a file-like sink without materializing bytes."""
+        return await self._get_backend().download_to_file(key, file, chunk_size=chunk_size)
 
     async def file_exists(self, key: str) -> bool:
         """Check if a file exists"""
@@ -454,6 +520,16 @@ async def get_s3_config_from_settings() -> S3Config:
         path_style=_parse_bool(settings.S3_PATH_STYLE),
         public_bucket=_parse_bool(settings.S3_PUBLIC_BUCKET),
         max_file_size=(int(settings.S3_MAX_FILE_SIZE) if settings.S3_MAX_FILE_SIZE else 10485760),
+        internal_max_upload_size=(
+            int(settings.S3_INTERNAL_UPLOAD_MAX_SIZE)
+            if settings.S3_INTERNAL_UPLOAD_MAX_SIZE
+            else 50 * 1024 * 1024
+        ),
+        presigned_url_expires=(
+            int(settings.S3_PRESIGNED_URL_EXPIRES)
+            if settings.S3_PRESIGNED_URL_EXPIRES
+            else 7 * 24 * 3600
+        ),
         storage_path=storage_path,
     )
 

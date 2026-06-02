@@ -78,7 +78,9 @@ class _FakeStreamingClient:
 class _FakeFileClient:
     def __init__(self) -> None:
         self.uploads: list[tuple[bytes, str]] = []
+        self.file_uploads: list[tuple[str, str]] = []
         self.image_uploads: list[bytes] = []
+        self.image_file_uploads: list[tuple[str, bytes]] = []
         self.sent_files: list[tuple[str, str, str, str | None]] = []
         self.sent_images: list[tuple[str, str, str | None]] = []
 
@@ -88,6 +90,16 @@ class _FakeFileClient:
 
     async def upload_image(self, image_data: bytes) -> str:
         self.image_uploads.append(image_data)
+        return "feishu-image-key"
+
+    async def upload_file(self, file_path: str, file_name: str) -> str:
+        self.file_uploads.append((file_path, file_name))
+        return f"feishu-{file_name}"
+
+    async def upload_image_file(self, file_path: str) -> str:
+        from pathlib import Path
+
+        self.image_file_uploads.append((file_path, Path(file_path).read_bytes()))
         return "feishu-image-key"
 
     async def send_file_by_key(
@@ -108,6 +120,15 @@ class _FakeFileClient:
     ) -> bool:
         self.sent_images.append((chat_id, image_key, reply_to_id))
         return True
+
+
+class _FakeImageBytesOnlyClient:
+    def __init__(self) -> None:
+        self.image_uploads: list[bytes] = []
+
+    async def upload_image(self, image_data: bytes) -> str:
+        self.image_uploads.append(image_data)
+        return "feishu-image-key"
 
 
 class _FakeStreamingManager:
@@ -698,6 +719,32 @@ async def test_feishu_collector_appends_session_link_to_card_message(
 
 
 @pytest.mark.asyncio
+async def test_feishu_collector_offloads_card_json_serialization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[Any, dict[str, Any]]] = []
+
+    async def _fake_run_blocking_io(func, /, *args, **kwargs):
+        calls.append((func, kwargs))
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(feishu_handler, "run_blocking_io", _fake_run_blocking_io)
+
+    collector = feishu_handler.FeishuResponseCollector(
+        manager=_FakeStreamingManager(_FakeStreamingClient()),
+        user_id="user-1",
+        chat_id="oc_chat",
+        stream_reply=False,
+    )
+    collector.append_text("hello")
+
+    card_json = await collector._build_card_content_async(_FakeStreamingClient())
+
+    assert json.loads(card_json)["config"]["wide_screen_mode"] is True
+    assert calls == [(json.dumps, {"ensure_ascii": False})]
+
+
+@pytest.mark.asyncio
 async def test_feishu_collector_splits_large_first_stream_update() -> None:
     client = _FakeStreamingClient()
     collector = feishu_handler.FeishuResponseCollector(
@@ -713,6 +760,112 @@ async def test_feishu_collector_splits_large_first_stream_update() -> None:
 
     assert client.initial_texts == [first_chunk[: feishu_handler.FEISHU_STREAM_FIRST_PAINT_CHARS]]
     assert client.updates == [("card-1", first_chunk, 1)]
+
+
+@pytest.mark.asyncio
+async def test_feishu_stream_updates_keep_only_latest_pending_content(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(feishu_handler, "FEISHU_STREAM_UPDATE_DEBOUNCE_SECONDS", 60)
+
+    class _SlowStreamingClient(_FakeStreamingClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.update_started = asyncio.Event()
+            self.release_update = asyncio.Event()
+
+        async def update_stream_card(self, card_id: str, content: str, sequence: int) -> bool:
+            self.update_started.set()
+            await self.release_update.wait()
+            return await super().update_stream_card(card_id, content, sequence)
+
+    client = _SlowStreamingClient()
+    collector = feishu_handler.FeishuResponseCollector(
+        manager=_FakeStreamingManager(client),
+        user_id="user-1",
+        chat_id="oc_chat",
+        stream_reply=True,
+    )
+
+    await collector.append_stream_chunk("hello")
+    await collector.append_stream_chunk(" world")
+    await asyncio.wait_for(client.update_started.wait(), timeout=1)
+
+    for index in range(20):
+        await collector.append_stream_chunk(f" chunk-{index}")
+
+    assert collector._stream_update_queue.qsize() <= 1
+
+    client.release_update.set()
+    await collector._cancel_stream_update_worker()
+
+
+def test_feishu_stream_update_queue_has_hard_capacity_limit() -> None:
+    collector = feishu_handler.FeishuResponseCollector(
+        manager=_FakeStreamingManager(_FakeStreamingClient()),
+        user_id="user-1",
+        chat_id="oc_chat",
+        stream_reply=True,
+    )
+
+    assert collector._stream_update_queue.maxsize == 1
+
+
+@pytest.mark.asyncio
+async def test_feishu_stream_update_queue_stores_signal_not_full_content() -> None:
+    collector = feishu_handler.FeishuResponseCollector(
+        manager=_FakeStreamingManager(_FakeStreamingClient()),
+        user_id="user-1",
+        chat_id="oc_chat",
+        stream_reply=True,
+    )
+    collector._stream_card_id = "card-1"
+    collector._ensure_stream_update_worker = lambda: None  # type: ignore[method-assign]
+
+    await collector.append_stream_chunk("x" * 10_000)
+
+    queued = collector._stream_update_queue.get_nowait()
+    assert queued is not None
+    assert not isinstance(queued, str)
+    assert not hasattr(collector, "_stream_full_content")
+
+
+@pytest.mark.asyncio
+async def test_feishu_stream_update_avoids_joining_all_chunks_on_each_append(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(feishu_handler, "FEISHU_STREAM_UPDATE_DEBOUNCE_SECONDS", 60)
+
+    class _SlowStreamingClient(_FakeStreamingClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.update_started = asyncio.Event()
+            self.release_update = asyncio.Event()
+
+        async def update_stream_card(self, card_id: str, content: str, sequence: int) -> bool:
+            self.update_started.set()
+            await self.release_update.wait()
+            return await super().update_stream_card(card_id, content, sequence)
+
+    client = _SlowStreamingClient()
+    collector = feishu_handler.FeishuResponseCollector(
+        manager=_FakeStreamingManager(client),
+        user_id="user-1",
+        chat_id="oc_chat",
+        stream_reply=True,
+    )
+
+    await collector.append_stream_chunk("hello")
+    await collector.append_stream_chunk(" world")
+    await asyncio.wait_for(client.update_started.wait(), timeout=1)
+
+    collector.text_parts.insert(0, object())  # type: ignore[arg-type]
+    await collector.append_stream_chunk(" latest")
+
+    assert collector._stream_update_queue.qsize() <= 1
+
+    client.release_update.set()
+    await collector._cancel_stream_update_worker()
 
 
 @pytest.mark.asyncio
@@ -751,15 +904,27 @@ async def test_upload_and_send_files_replies_to_original_message_and_skips_sent_
     collector.add_file_to_reveal({"key": "revealed_files/doc.md", "name": "doc.md"})
 
     class _FakeBackend:
+        download_called = False
+
+        async def download_stream(self, key: str, chunk_size: int = 1024 * 1024):
+            yield b"file-"
+            yield b"bytes"
+
         async def download(self, key: str) -> bytes:
-            return b"file-bytes"
+            self.download_called = True
+            raise AssertionError("download_stream should be used for Feishu reveal files")
 
     class _FakeStorage:
+        def __init__(self) -> None:
+            self.backend = _FakeBackend()
+
         def _get_backend(self) -> _FakeBackend:
-            return _FakeBackend()
+            return self.backend
+
+    fake_storage = _FakeStorage()
 
     async def _fake_get_storage() -> _FakeStorage:
-        return _FakeStorage()
+        return fake_storage
 
     monkeypatch.setattr(
         "src.infra.storage.s3.service.get_or_init_storage",
@@ -769,7 +934,9 @@ async def test_upload_and_send_files_replies_to_original_message_and_skips_sent_
     await collector.upload_and_send_files()
     await collector.upload_and_send_files()
 
-    assert client.uploads == [(b"file-bytes", "doc.md")]
+    assert client.uploads == []
+    assert client.file_uploads == [(client.file_uploads[0][0], "doc.md")]
+    assert fake_storage.backend.download_called is False
     assert client.sent_files == [
         ("oc_chat", "feishu-doc.md", "doc.md", "om_original"),
     ]
@@ -796,15 +963,27 @@ async def test_upload_and_send_files_sends_images_as_native_feishu_images(
     )
 
     class _FakeBackend:
+        download_called = False
+
+        async def download_stream(self, key: str, chunk_size: int = 1024 * 1024):
+            yield b"image-"
+            yield b"bytes"
+
         async def download(self, key: str) -> bytes:
-            return b"image-bytes"
+            self.download_called = True
+            raise AssertionError("download_stream should be used for Feishu reveal images")
 
     class _FakeStorage:
+        def __init__(self) -> None:
+            self.backend = _FakeBackend()
+
         def _get_backend(self) -> _FakeBackend:
-            return _FakeBackend()
+            return self.backend
+
+    fake_storage = _FakeStorage()
 
     async def _fake_get_storage() -> _FakeStorage:
-        return _FakeStorage()
+        return fake_storage
 
     monkeypatch.setattr(
         "src.infra.storage.s3.service.get_or_init_storage",
@@ -816,8 +995,255 @@ async def test_upload_and_send_files_sends_images_as_native_feishu_images(
 
     assert client.uploads == []
     assert client.sent_files == []
-    assert client.image_uploads == [b"image-bytes"]
+    assert client.image_uploads == []
+    assert client.image_file_uploads == [(client.image_file_uploads[0][0], b"image-bytes")]
+    assert fake_storage.backend.download_called is False
     assert client.sent_images == [("oc_chat", "feishu-image-key", "om_original")]
+
+
+@pytest.mark.asyncio
+async def test_upload_image_from_uri_streams_storage_object_to_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _FakeFileClient()
+    collector = feishu_handler.FeishuResponseCollector(
+        manager=_FakeStreamingManager(client),
+        user_id="user-1",
+        chat_id="oc_chat",
+    )
+
+    class _FakeBackend:
+        download_called = False
+
+        async def download_stream(self, key: str, chunk_size: int = 1024 * 1024):
+            assert key == "generated-images/user-1/cat.png"
+            yield b"cat-"
+            yield b"image"
+
+        async def download(self, key: str) -> bytes:
+            self.download_called = True
+            raise AssertionError("send:// images should be streamed from storage")
+
+    class _FakeStorage:
+        def __init__(self) -> None:
+            self.backend = _FakeBackend()
+
+        def _get_backend(self) -> _FakeBackend:
+            return self.backend
+
+    fake_storage = _FakeStorage()
+
+    async def _fake_get_storage() -> _FakeStorage:
+        return fake_storage
+
+    monkeypatch.setattr(
+        "src.infra.storage.s3.service.get_or_init_storage",
+        _fake_get_storage,
+    )
+
+    image_key = await collector._upload_image_from_uri("send://generated-images/user-1/cat.png")
+
+    assert image_key == "feishu-image-key"
+    assert client.image_uploads == []
+    assert client.image_file_uploads == [(client.image_file_uploads[0][0], b"cat-image")]
+    assert fake_storage.backend.download_called is False
+
+
+@pytest.mark.asyncio
+async def test_download_storage_object_rejects_large_legacy_bytes_download(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _LegacyBytesBackend:
+        async def download(self, key: str) -> bytes:
+            assert key == "revealed_files/large.bin"
+            return b"x" * 16
+
+    monkeypatch.setattr(
+        feishu_handler,
+        "FEISHU_REVEAL_LEGACY_DOWNLOAD_MAX_BYTES",
+        8,
+        raising=False,
+    )
+
+    target = tmp_path / "large.bin"
+    with target.open("w+b") as file:
+        with pytest.raises(ValueError, match="too large"):
+            await feishu_handler._download_storage_object_to_file(
+                _LegacyBytesBackend(),
+                "revealed_files/large.bin",
+                file,
+            )
+
+        file.seek(0)
+        assert file.read() == b""
+
+
+@pytest.mark.asyncio
+async def test_download_storage_object_rejects_known_large_object_before_streaming(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _SizedBackend:
+        download_called = False
+
+        async def get_size(self, key: str) -> int:
+            assert key == "revealed_files/large.bin"
+            return 9
+
+        async def download_to_file(self, key: str, file, chunk_size: int = 1024 * 1024):
+            self.download_called = True
+            raise AssertionError("known oversized object should not be downloaded")
+
+    monkeypatch.setattr(
+        feishu_handler,
+        "FEISHU_REVEAL_DOWNLOAD_MAX_BYTES",
+        8,
+        raising=False,
+    )
+
+    backend = _SizedBackend()
+    target = tmp_path / "large.bin"
+    with target.open("w+b") as file:
+        with pytest.raises(ValueError, match="too large"):
+            await feishu_handler._download_storage_object_to_file(
+                backend,
+                "revealed_files/large.bin",
+                file,
+            )
+
+        file.seek(0)
+        assert file.read() == b""
+    assert backend.download_called is False
+
+
+@pytest.mark.asyncio
+async def test_download_storage_object_stops_stream_before_writing_oversized_chunk(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeStreamBackend:
+        async def download_stream(self, key: str, chunk_size: int = 1024 * 1024):
+            assert key == "revealed_files/large.bin"
+            yield b"1234"
+            yield b"56789"
+
+    class _RecordingFile:
+        def __init__(self) -> None:
+            self.data = bytearray()
+
+        def write(self, chunk: bytes) -> int:
+            self.data.extend(chunk)
+            return len(chunk)
+
+        def seek(self, position: int) -> int:
+            del position
+            return 0
+
+    monkeypatch.setattr(
+        feishu_handler,
+        "FEISHU_REVEAL_DOWNLOAD_MAX_BYTES",
+        8,
+        raising=False,
+    )
+
+    target = _RecordingFile()
+    with pytest.raises(ValueError, match="too large"):
+        await feishu_handler._download_storage_object_to_file(
+            _FakeStreamBackend(),
+            "revealed_files/large.bin",
+            target,
+        )
+
+    assert bytes(target.data) == b"1234"
+
+
+@pytest.mark.asyncio
+async def test_download_storage_object_offloads_stream_file_writes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeStreamBackend:
+        async def download_stream(self, key: str, chunk_size: int = 1024 * 1024):
+            assert key == "revealed_files/report.txt"
+            yield b"part-1"
+            yield b"part-2"
+
+    class _RecordingFile:
+        def __init__(self) -> None:
+            self.data = bytearray()
+            self.position = 0
+
+        def write(self, chunk: bytes) -> int:
+            self.data.extend(chunk)
+            self.position += len(chunk)
+            return len(chunk)
+
+        def seek(self, position: int) -> int:
+            self.position = position
+            return position
+
+    calls: list[tuple[str, tuple[Any, ...]]] = []
+
+    async def _fake_run_blocking_io(func, /, *args, **kwargs):
+        calls.append((getattr(func, "__name__", repr(func)), args))
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(
+        feishu_handler,
+        "run_blocking_io",
+        _fake_run_blocking_io,
+        raising=False,
+    )
+
+    target = _RecordingFile()
+    size = await feishu_handler._download_storage_object_to_file(
+        _FakeStreamBackend(),
+        "revealed_files/report.txt",
+        target,
+    )
+
+    assert size == len(b"part-1part-2")
+    assert bytes(target.data) == b"part-1part-2"
+    assert calls == [
+        ("write", (b"part-1",)),
+        ("write", (b"part-2",)),
+        ("seek", (0,)),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_upload_image_from_uri_requires_file_upload_api(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _FakeImageBytesOnlyClient()
+    collector = feishu_handler.FeishuResponseCollector(
+        manager=_FakeStreamingManager(client),
+        user_id="user-1",
+        chat_id="oc_chat",
+    )
+
+    class _FakeBackend:
+        async def download_stream(self, key: str, chunk_size: int = 1024 * 1024):
+            yield b"cat-image"
+
+    class _FakeStorage:
+        def __init__(self) -> None:
+            self.backend = _FakeBackend()
+
+        def _get_backend(self) -> _FakeBackend:
+            return self.backend
+
+    async def _fake_get_storage() -> _FakeStorage:
+        return _FakeStorage()
+
+    monkeypatch.setattr(
+        "src.infra.storage.s3.service.get_or_init_storage",
+        _fake_get_storage,
+    )
+
+    image_key = await collector._upload_image_from_uri("send://generated-images/user-1/cat.png")
+
+    assert image_key is None
+    assert client.image_uploads == []
 
 
 @pytest.mark.asyncio
@@ -886,6 +1312,66 @@ async def test_process_events_uploads_revealed_file_when_tool_result_arrives(
         "upload:doc.md",
         "chunk:after",
     ]
+
+
+@pytest.mark.asyncio
+async def test_process_events_offloads_reveal_file_result_json_parse(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events = [
+        {
+            "event_type": feishu_handler.EVENT_TOOL_RESULT,
+            "data": {
+                "tool": "reveal_file",
+                "result": '{"key":"revealed_files/doc.md","name":"doc.md"}',
+            },
+        },
+        {"event_type": "done", "data": {}},
+    ]
+
+    class _FakeDualWriter:
+        async def read_from_redis(self, session_id: str, run_id: str):
+            for event in events:
+                yield event
+
+    class _CaptureCollector:
+        def __init__(self) -> None:
+            self.files_to_reveal: list[dict[str, Any]] = []
+
+        async def append_stream_chunk(self, chunk: str) -> None:
+            raise AssertionError(f"unexpected chunk: {chunk}")
+
+        def add_tool(self, tool_name: str) -> None:
+            raise AssertionError(f"unexpected tool: {tool_name}")
+
+        def add_file_to_reveal(self, file_info: dict) -> None:
+            self.files_to_reveal.append(file_info)
+
+        async def upload_and_send_files(self) -> None:
+            return None
+
+    calls: list[tuple[Any, tuple[Any, ...]]] = []
+
+    async def _fake_run_blocking_io(func, /, *args, **kwargs):
+        calls.append((func, args))
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(
+        "src.infra.session.dual_writer.get_dual_writer",
+        lambda: _FakeDualWriter(),
+    )
+    monkeypatch.setattr(feishu_handler, "run_blocking_io", _fake_run_blocking_io)
+
+    collector = _CaptureCollector()
+    await feishu_handler._process_events(
+        collector=collector,
+        session_id="session-1",
+        run_id="run-1",
+        show_tools=True,
+    )
+
+    assert collector.files_to_reveal == [{"key": "revealed_files/doc.md", "name": "doc.md"}]
+    assert calls == [(json.loads, ('{"key":"revealed_files/doc.md","name":"doc.md"}',))]
 
 
 @pytest.mark.asyncio

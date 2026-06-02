@@ -23,6 +23,11 @@ class _FakeMonitor:
             "suspected_leak": True,
             "growth_bytes": 77 * 1024 * 1024,
             "baseline_reset_at": "2026-04-30T12:05:00+00:00",
+            "checkpointer": {
+                "configured_backend": "mongodb",
+                "memory_saver_cache_active": True,
+                "memory_saver_cache_size": 2,
+            },
         }
 
     async def get_diagnostics(self, refresh: bool = False) -> dict[str, object]:
@@ -63,6 +68,7 @@ async def test_health_route_returns_memory_summary(monkeypatch: pytest.MonkeyPat
     assert response.memory is not None
     assert response.memory.rss_bytes == 123 * 1024 * 1024
     assert response.memory.suspected_leak is True
+    assert response.memory.checkpointer["memory_saver_cache_size"] == 2
 
 
 @pytest.mark.asyncio

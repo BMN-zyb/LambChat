@@ -144,6 +144,21 @@ async def test_env_var_prompt_sections_split_intro_and_key_list(
     assert "os.environ" not in sections[1]
 
 
+def test_env_var_prompt_cache_eviction_caps_users(monkeypatch: pytest.MonkeyPatch) -> None:
+    from src.infra.tool import env_var_prompt
+
+    env_var_prompt._env_var_prompt_cache.clear()
+    monkeypatch.setattr(env_var_prompt, "_MAX_PROMPT_CACHE_ENTRIES", 2, raising=False)
+    env_var_prompt._env_var_prompt_cache["user-old"] = (("old",), 1.0)
+    env_var_prompt._env_var_prompt_cache["user-mid"] = (("mid",), 2.0)
+    env_var_prompt._env_var_prompt_cache["user-new"] = (("new",), 3.0)
+
+    removed = env_var_prompt._cleanup_excess_prompt_cache_entries()
+
+    assert removed == 1
+    assert list(env_var_prompt._env_var_prompt_cache) == ["user-mid", "user-new"]
+
+
 @pytest.mark.asyncio
 async def test_env_var_prompt_middleware_appends_key_list(
     monkeypatch: pytest.MonkeyPatch,
@@ -224,12 +239,17 @@ async def test_env_var_set_invalidates_prompt_and_syncs_current_sandbox(
     from src.infra.tool import env_var_tool
 
     storage = _FakeEnvVarStorage()
-    sync_calls: list[tuple[object, str]] = []
+    sync_calls: list[tuple[object, str, bool]] = []
     invalidated: list[str] = []
     backend = object()
 
-    async def fake_sync(current_backend: object, user_id: str) -> None:
-        sync_calls.append((current_backend, user_id))
+    async def fake_sync(
+        current_backend: object,
+        user_id: str,
+        *,
+        force_rebuild: bool = False,
+    ) -> None:
+        sync_calls.append((current_backend, user_id, force_rebuild))
 
     monkeypatch.setattr(env_var_tool, "EnvVarStorage", lambda: storage)
     monkeypatch.setattr(env_var_tool, "ensure_sandbox_mcp", fake_sync)
@@ -239,7 +259,7 @@ async def test_env_var_set_invalidates_prompt_and_syncs_current_sandbox(
         "FIRECRAWL_API_KEY", "secret", runtime=_Runtime("user-1", backend=backend)
     )
 
-    assert sync_calls == [(backend, "user-1")]
+    assert sync_calls == [(backend, "user-1", True)]
     assert invalidated == ["user-1"]
 
 
@@ -262,12 +282,21 @@ async def test_env_var_delete_delegates_to_storage(monkeypatch: pytest.MonkeyPat
 
 
 @pytest.mark.asyncio
-async def test_env_var_tool_requires_runtime_user() -> None:
+async def test_env_var_tool_requires_runtime_user(monkeypatch: pytest.MonkeyPatch) -> None:
     from src.infra.tool import env_var_tool
+
+    calls: list[object] = []
+
+    async def fake_run_blocking_io(func, *args, **kwargs):
+        calls.append(func)
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(env_var_tool, "run_blocking_io", fake_run_blocking_io, raising=False)
 
     result = json.loads(await env_var_tool.env_var_list.coroutine(runtime=_Runtime(None)))
 
     assert result == {"error": "No user context available"}
+    assert json.dumps in calls
 
 
 @pytest.mark.asyncio

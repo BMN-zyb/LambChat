@@ -104,6 +104,67 @@ async def test_search_persona_presets_returns_visible_personas(
 
 
 @pytest.mark.asyncio
+async def test_search_persona_presets_offloads_result_json(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from src.infra.tool import team_tool
+
+    calls: list[object] = []
+    manager = MagicMock()
+    manager.list_presets = AsyncMock(
+        return_value=[_preset(f"preset-{index}", f"Persona {index}") for index in range(5)]
+    )
+
+    async def fake_run_blocking_io(func, *args, **kwargs):
+        calls.append(func)
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(team_tool, "PersonaPresetManager", lambda: manager)
+    monkeypatch.setattr(
+        team_tool,
+        "_resolve_user",
+        AsyncMock(return_value=SimpleNamespace(permissions=["team:read"])),
+    )
+    monkeypatch.setattr(team_tool, "run_blocking_io", fake_run_blocking_io, raising=False)
+
+    result = json.loads(
+        await team_tool.search_persona_presets.coroutine(
+            query="persona",
+            runtime=_Runtime("user-1"),
+        )
+    )
+
+    assert result["success"] is True
+    assert len(result["presets"]) == 5
+    assert json.dumps in calls
+
+
+@pytest.mark.asyncio
+async def test_search_persona_presets_offloads_error_result_json(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from src.infra.tool import team_tool
+
+    calls: list[object] = []
+
+    async def fake_run_blocking_io(func, *args, **kwargs):
+        calls.append(func)
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(team_tool, "run_blocking_io", fake_run_blocking_io, raising=False)
+
+    result = json.loads(
+        await team_tool.search_persona_presets.coroutine(
+            query="persona",
+            runtime=_Runtime(None),
+        )
+    )
+
+    assert result == {"error": "No user context available"}
+    assert json.dumps in calls
+
+
+@pytest.mark.asyncio
 async def test_create_agent_team_saves_llm_supplied_team(monkeypatch: pytest.MonkeyPatch):
     from src.infra.tool import team_tool
 

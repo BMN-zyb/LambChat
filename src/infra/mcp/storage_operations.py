@@ -3,8 +3,10 @@
 import copy
 from typing import TYPE_CHECKING, Any, Optional
 
+from src.infra.async_utils import run_blocking_io
 from src.infra.logging import get_logger
 from src.infra.utils.datetime import utc_now_iso
+from src.kernel.config import settings
 from src.kernel.schemas.mcp import (
     MCPImportRequest,
     MCPServerCreate,
@@ -19,6 +21,19 @@ if TYPE_CHECKING:
     from src.infra.mcp.storage import MCPStorage
 
 
+def _server_list_limit() -> int:
+    from src.infra.mcp.storage import MCP_SERVER_LIST_LIMIT
+
+    return MCP_SERVER_LIST_LIMIT
+
+
+def _limit_cursor(cursor: Any, limit: int) -> Any:
+    limit_method = getattr(cursor, "limit", None)
+    if callable(limit_method):
+        return limit_method(limit)
+    return cursor
+
+
 def _can_access_system_server(
     allowed_roles: list[str] | None,
     user_roles: list[str] | None,
@@ -31,6 +46,59 @@ def _can_access_system_server(
     if not allowed_roles:
         return True
     return bool(set(user_roles or []).intersection(allowed_roles))
+
+
+def _get_effective_config_max_servers() -> int:
+    value = getattr(settings, "MCP_EFFECTIVE_CONFIG_MAX_SERVERS", 100)
+    try:
+        return max(1, int(value))
+    except (TypeError, ValueError):
+        return 100
+
+
+async def _doc_to_system_server(self: "MCPStorage", doc: dict[str, Any]) -> SystemMCPServer:
+    converter = getattr(self, "_doc_to_system_server_async", None)
+    if callable(converter):
+        return await converter(doc)
+    return self._doc_to_system_server(doc)
+
+
+async def _doc_to_user_server(self: "MCPStorage", doc: dict[str, Any]) -> UserMCPServer:
+    converter = getattr(self, "_doc_to_user_server_async", None)
+    if callable(converter):
+        return await converter(doc)
+    return self._doc_to_user_server(doc)
+
+
+async def _doc_to_config_dict(self: "MCPStorage", doc: dict[str, Any]) -> dict[str, Any]:
+    converter = getattr(self, "_doc_to_config_dict_async", None)
+    if callable(converter):
+        return await converter(doc)
+    return self._doc_to_config_dict(doc)
+
+
+async def _doc_to_response(
+    self: "MCPStorage",
+    doc: dict[str, Any],
+    *,
+    is_system: bool,
+    can_edit: bool,
+    hide_sensitive: bool = False,
+) -> MCPServerResponse:
+    converter = getattr(self, "_doc_to_response_async", None)
+    if callable(converter):
+        return await converter(
+            doc,
+            is_system=is_system,
+            can_edit=can_edit,
+            hide_sensitive=hide_sensitive,
+        )
+    return self._doc_to_response(
+        doc,
+        is_system=is_system,
+        can_edit=can_edit,
+        hide_sensitive=hide_sensitive,
+    )
 
 
 class StorageOperations:
@@ -85,7 +153,7 @@ class StorageOperations:
         # 加密敏感字段
         from src.infra.mcp.encryption import encrypt_server_secrets
 
-        doc = encrypt_server_secrets(doc)
+        doc = await run_blocking_io(encrypt_server_secrets, doc)
 
         await system_collection.insert_one(doc)
 
@@ -95,7 +163,7 @@ class StorageOperations:
         # Invalidate all caches since system server now exists
         await self._invalidate_all_cache()
 
-        return self._doc_to_system_server(doc)
+        return await _doc_to_system_server(self, doc)
 
     async def demote_to_user_server(  # type: ignore[misc]
         self: "MCPStorage", name: str, target_user_id: str, admin_user_id: str
@@ -136,7 +204,7 @@ class StorageOperations:
         # 加密敏感字段
         from src.infra.mcp.encryption import encrypt_server_secrets
 
-        doc = encrypt_server_secrets(doc)
+        doc = await run_blocking_io(encrypt_server_secrets, doc)
 
         await user_collection.insert_one(doc)
 
@@ -146,7 +214,7 @@ class StorageOperations:
         # Invalidate cache for target user
         await self._invalidate_user_cache(target_user_id)
 
-        return self._doc_to_user_server(doc)
+        return await _doc_to_user_server(self, doc)
 
     # ==========================================
     # Combined Operations (for runtime)
@@ -167,7 +235,11 @@ class StorageOperations:
 
         # System sandbox servers
         system_collection = self._get_system_collection()
-        async for doc in system_collection.find({"transport": "sandbox", "enabled": True}):
+        system_cursor = _limit_cursor(
+            system_collection.find({"transport": "sandbox", "enabled": True}),
+            _server_list_limit(),
+        )
+        async for doc in system_cursor:
             # Role-based access control
             allowed_roles = doc.get("allowed_roles", [])
             if not _can_access_system_server(allowed_roles, user_roles, is_admin=is_admin):
@@ -182,9 +254,11 @@ class StorageOperations:
 
         # User sandbox servers
         user_collection = self._get_user_collection()
-        async for doc in user_collection.find(
-            {"user_id": user_id, "transport": "sandbox", "enabled": True}
-        ):
+        user_cursor = _limit_cursor(
+            user_collection.find({"user_id": user_id, "transport": "sandbox", "enabled": True}),
+            _server_list_limit(),
+        )
+        async for doc in user_cursor:
             servers.append(
                 {
                     "name": doc.get("name", ""),
@@ -209,6 +283,7 @@ class StorageOperations:
         System servers with allowed_roles are filtered by the user's roles.
         """
         logger = get_logger(__name__)
+        max_servers = _get_effective_config_max_servers()
 
         # Get user preferences for system servers
         user_preferences = await self._get_user_preferences(user_id)
@@ -216,8 +291,9 @@ class StorageOperations:
 
         # Get system servers and apply user preferences
         system_collection = self._get_system_collection()
-        system_servers = {}
-        async for doc in system_collection.find({}):
+        system_docs: list[tuple[str, dict[str, Any]]] = []
+        system_cursor = _limit_cursor(system_collection.find({}), _server_list_limit())
+        async for doc in system_cursor:
             server_name = doc["name"]
 
             # Role-based access control: filter servers by allowed_roles
@@ -236,25 +312,43 @@ class StorageOperations:
                 is_enabled = doc.get("enabled", True)
 
             if is_enabled:
-                # Deep copy to avoid modifying the original document
-                config = self._doc_to_config_dict(copy.deepcopy(doc))
-                list_tool_policies = getattr(self, "list_tool_policies", None)
-                tool_policies = (
-                    await list_tool_policies(server_name) if callable(list_tool_policies) else {}
-                )
-                if tool_policies:
-                    config["tool_policies"] = {
-                        tool_name: policy.model_dump(mode="json")
-                        for tool_name, policy in tool_policies.items()
-                    }
-                system_servers[server_name] = config
+                system_docs.append((server_name, copy.deepcopy(doc)))
+                if len(system_docs) >= max_servers:
+                    break
+
+        system_policy_loader = getattr(self, "list_tool_policies_for_servers", None)
+        system_tool_policies = (
+            await system_policy_loader([name for name, _doc in system_docs])
+            if callable(system_policy_loader)
+            else {}
+        )
+
+        system_servers = {}
+        for server_name, doc in system_docs:
+            config = await _doc_to_config_dict(self, doc)
+            tool_policies = system_tool_policies.get(server_name, {})
+            if tool_policies:
+                config["tool_policies"] = {
+                    tool_name: policy.model_dump(mode="json")
+                    for tool_name, policy in tool_policies.items()
+                }
+            system_servers[server_name] = config
 
         # Get enabled user servers
         user_collection = self._get_user_collection()
         user_servers = {}
-        async for doc in user_collection.find({"user_id": user_id, "enabled": True}):
+        user_cursor = _limit_cursor(
+            user_collection.find({"user_id": user_id, "enabled": True}),
+            _server_list_limit(),
+        )
+        async for doc in user_cursor:
+            if (
+                doc["name"] not in system_servers
+                and len(system_servers) + len(user_servers) >= max_servers
+            ):
+                break
             # Deep copy to avoid modifying the original document
-            user_servers[doc["name"]] = self._doc_to_config_dict(copy.deepcopy(doc))
+            user_servers[doc["name"]] = await _doc_to_config_dict(self, copy.deepcopy(doc))
 
         # Merge (user servers override system servers with same name)
         result = {**system_servers, **user_servers}
@@ -270,6 +364,7 @@ class StorageOperations:
         user_id: str,
         is_admin: bool = False,
         user_roles: list[str] | None = None,
+        limit: int | None = None,
     ) -> list[MCPServerResponse]:
         """
         Get all MCP servers visible to a user.
@@ -281,13 +376,15 @@ class StorageOperations:
         (url, headers, command, env_keys) and edit the server.
         """
         servers = []
+        max_servers = max(0, int(limit)) if limit is not None else None
 
         # Get user preferences for system servers
         user_preferences = await self._get_user_preferences(user_id)
 
         # Get system servers
         system_collection = self._get_system_collection()
-        async for doc in system_collection.find({}):
+        system_cursor = _limit_cursor(system_collection.find({}), _server_list_limit())
+        async for doc in system_cursor:
             # Role-based access control: admins always see everything
             if not is_admin:
                 allowed_roles = doc.get("allowed_roles", [])
@@ -304,16 +401,24 @@ class StorageOperations:
             is_creator = doc.get("created_by", doc.get("updated_by")) == user_id
             can_edit = is_admin or is_creator
             hide_sensitive = not (is_admin or is_creator)
-            server = self._doc_to_response(
-                doc, is_system=True, can_edit=can_edit, hide_sensitive=hide_sensitive
+            server = await _doc_to_response(
+                self, doc, is_system=True, can_edit=can_edit, hide_sensitive=hide_sensitive
             )
             servers.append(server)
+            if max_servers is not None and len(servers) >= max_servers:
+                return servers
 
         # Get user servers
         user_collection = self._get_user_collection()
-        async for doc in user_collection.find({"user_id": user_id}):
-            server = self._doc_to_response(doc, is_system=False, can_edit=True)
+        user_cursor = _limit_cursor(
+            user_collection.find({"user_id": user_id}),
+            _server_list_limit(),
+        )
+        async for doc in user_cursor:
+            server = await _doc_to_response(self, doc, is_system=False, can_edit=True)
             servers.append(server)
+            if max_servers is not None and len(servers) >= max_servers:
+                break
 
         return servers
 
@@ -376,7 +481,7 @@ class StorageOperations:
 
             updated_doc = await user_collection.find_one({"name": name, "user_id": user_id})
             if updated_doc:
-                return self._doc_to_response(updated_doc, is_system=False, can_edit=True)
+                return await _doc_to_response(self, updated_doc, is_system=False, can_edit=True)
 
         # Check if it's a system server
         system_collection = self._get_system_collection()
@@ -403,7 +508,7 @@ class StorageOperations:
             response_doc = copy.deepcopy(system_doc)
             response_doc["enabled"] = new_enabled
             is_creator = response_doc.get("created_by", response_doc.get("updated_by")) == user_id
-            return self._doc_to_response(response_doc, is_system=True, can_edit=is_creator)
+            return await _doc_to_response(self, response_doc, is_system=True, can_edit=is_creator)
 
         return None
 
@@ -435,7 +540,7 @@ class StorageOperations:
 
             updated_doc = await system_collection.find_one({"name": name})
             if updated_doc:
-                return self._doc_to_response(updated_doc, is_system=True, can_edit=True)
+                return await _doc_to_response(self, updated_doc, is_system=True, can_edit=True)
 
         return None
 
@@ -550,8 +655,9 @@ class StorageOperations:
         user_collection = self._get_user_collection()
         servers = {}
 
-        async for doc in user_collection.find({"user_id": user_id}):
-            servers[doc["name"]] = self._doc_to_config_dict(doc)
+        cursor = _limit_cursor(user_collection.find({"user_id": user_id}), _server_list_limit())
+        async for doc in cursor:
+            servers[doc["name"]] = await _doc_to_config_dict(self, doc)
 
         return {"mcpServers": servers}
 
@@ -560,8 +666,9 @@ class StorageOperations:
         system_collection = self._get_system_collection()
         servers = {}
 
-        async for doc in system_collection.find({}):
-            config = self._doc_to_config_dict(doc)
+        cursor = _limit_cursor(system_collection.find({}), _server_list_limit())
+        async for doc in cursor:
+            config = await _doc_to_config_dict(self, doc)
             if doc.get("allowed_roles"):
                 config["allowed_roles"] = doc["allowed_roles"]
             if doc.get("role_quotas"):

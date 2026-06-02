@@ -4,17 +4,20 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import binascii
 import json
 import mimetypes
 import re
 import sys
 from enum import Enum
+from tempfile import SpooledTemporaryFile
 from typing import Annotated, Any
 from urllib.parse import urlparse
 
 import httpx
 from langchain_core.tools import BaseTool, InjectedToolArg
 
+from src.infra.async_utils import run_blocking_io
 from src.infra.logging import get_logger
 from src.infra.storage.s3.service import get_or_init_storage
 from src.infra.tool.backend_utils import (
@@ -40,6 +43,9 @@ DEFAULT_IMAGE_GENERATION_BASE_URL = "https://api.openai.com/v1"
 DEFAULT_IMAGE_GENERATION_MODEL = "gpt-image-2"
 IMAGE_API_MAX_ATTEMPTS = 3
 IMAGE_API_RETRY_BASE_DELAY_SECONDS = 1.0
+_SPOOL_MAX_MEMORY_BYTES = 2 * 1024 * 1024
+_BASE64_DECODE_CHUNK_CHARS = 256 * 1024
+_IMAGE_DOWNLOAD_MAX_BYTES = 20 * 1024 * 1024
 
 
 class ImageBackground(str, Enum):
@@ -76,11 +82,25 @@ def _json(data: dict[str, Any]) -> str:
     return json.dumps(data, ensure_ascii=False)
 
 
+async def _json_dumps_result(data: dict[str, Any]) -> str:
+    return await run_blocking_io(json.dumps, data, ensure_ascii=False)
+
+
 def _strip_data_url_prefix(value: str) -> tuple[str, str]:
     match = re.match(r"^data:([^;]+);base64,(.+)$", value, re.DOTALL)
     if not match:
         return "", value
     return match.group(1), match.group(2)
+
+
+def _estimate_base64_decoded_size(value: str) -> int:
+    normalized = "".join(value.split())
+    stripped = normalized.rstrip("=")
+    return (len(stripped) * 3) // 4
+
+
+def _raise_image_too_large(size: int) -> None:
+    raise ValueError(f"Image download too large: {size} bytes (max {_IMAGE_DOWNLOAD_MAX_BYTES})")
 
 
 def _guess_mime(filename: str, fallback: str = "image/png") -> str:
@@ -202,7 +222,7 @@ async def _download_image_source(
     runtime: ToolRuntime | None,
     *,
     index: int = 0,
-) -> tuple[bytes, str, str]:
+) -> tuple[SpooledTemporaryFile, str, str]:
     resolved = url
     if resolved.startswith("/"):
         base_url = get_base_url_from_runtime(runtime)
@@ -211,29 +231,93 @@ async def _download_image_source(
 
     if resolved.startswith("data:"):
         mime, data = _strip_data_url_prefix(resolved)
-        decoded = base64.b64decode(data)
+        decoded = await run_blocking_io(_decode_base64_to_spooled_file, data)
         ext = (mimetypes.guess_extension(mime) or ".png").lstrip(".")
         return decoded, mime or "image/png", f"inline-image-{index + 1}.{ext}"
 
     async with httpx.AsyncClient(follow_redirects=True, timeout=60) as client:
-        response = await client.get(resolved)
-        response.raise_for_status()
-        content = response.content
-        content_type = response.headers.get("content-type", "") or _guess_mime(resolved)
-        filename = _filename_from_url(resolved, index)
-        return content, content_type, filename
+        spooled = SpooledTemporaryFile(max_size=_SPOOL_MAX_MEMORY_BYTES, mode="w+b")
+        try:
+            total_size = 0
+            async with client.stream("GET", resolved) as response:
+                response.raise_for_status()
+                async for chunk in response.aiter_bytes():
+                    if not chunk:
+                        continue
+                    total_size += len(chunk)
+                    if total_size > _IMAGE_DOWNLOAD_MAX_BYTES:
+                        raise ValueError(
+                            f"Image download too large: {total_size} bytes "
+                            f"(max {_IMAGE_DOWNLOAD_MAX_BYTES})"
+                        )
+                    await run_blocking_io(spooled.write, chunk)
+                content_type = response.headers.get("content-type", "") or _guess_mime(resolved)
+            await run_blocking_io(spooled.seek, 0)
+            filename = _filename_from_url(resolved, index)
+            return spooled, content_type, filename
+        except Exception:
+            spooled.close()
+            raise
 
 
-async def _upload_image_bytes(
-    data: bytes,
+def _decode_base64_to_spooled_file(data: str) -> SpooledTemporaryFile:
+    estimated_size = _estimate_base64_decoded_size(data)
+    if estimated_size > _IMAGE_DOWNLOAD_MAX_BYTES:
+        _raise_image_too_large(estimated_size)
+
+    spooled = SpooledTemporaryFile(max_size=_SPOOL_MAX_MEMORY_BYTES, mode="w+b")
+    carry = ""
+    total_size = 0
+    try:
+        for offset in range(0, len(data), _BASE64_DECODE_CHUNK_CHARS):
+            chunk = "".join(data[offset : offset + _BASE64_DECODE_CHUNK_CHARS].split())
+            if not chunk:
+                continue
+            pending = carry + chunk
+            decode_len = (len(pending) // 4) * 4
+            if decode_len == 0:
+                carry = pending
+                continue
+            decoded = base64.b64decode(pending[:decode_len])
+            total_size += len(decoded)
+            if total_size > _IMAGE_DOWNLOAD_MAX_BYTES:
+                _raise_image_too_large(total_size)
+            spooled.write(decoded)
+            carry = pending[decode_len:]
+
+        if carry:
+            decoded = base64.b64decode(carry)
+            total_size += len(decoded)
+            if total_size > _IMAGE_DOWNLOAD_MAX_BYTES:
+                _raise_image_too_large(total_size)
+            spooled.write(decoded)
+        spooled.seek(0)
+        return spooled
+    except (binascii.Error, ValueError):
+        spooled.close()
+        raise
+
+
+def _file_size(file_obj: Any) -> int:
+    current = file_obj.tell()
+    file_obj.seek(0, 2)
+    size = file_obj.tell()
+    file_obj.seek(current)
+    return size
+
+
+async def _upload_image_file(
+    file_obj: Any,
     *,
     user_id: str,
     filename: str,
     content_type: str,
 ) -> dict[str, Any]:
     storage = await get_or_init_storage()
-    result = await storage.upload_bytes(
-        data,
+    size = await run_blocking_io(_file_size, file_obj)
+    await run_blocking_io(file_obj.seek, 0)
+    result = await storage.upload_file(
+        file_obj,
         folder=f"generated-images/{user_id}",
         filename=filename,
         content_type=content_type,
@@ -241,28 +325,28 @@ async def _upload_image_bytes(
     return {
         "key": result.key,
         "url": result.url,
-        "size": getattr(result, "size", len(data)),
+        "size": getattr(result, "size", size),
         "content_type": getattr(result, "content_type", content_type),
     }
 
 
-def _extract_image_payload(data: dict[str, Any]) -> tuple[bytes, str]:
+def _extract_image_payload(data: dict[str, Any]) -> tuple[SpooledTemporaryFile | None, str]:
     if isinstance(data.get("b64_json"), str) and data["b64_json"].strip():
-        raw = base64.b64decode(data["b64_json"])
+        raw = _decode_base64_to_spooled_file(data["b64_json"])
         return raw, "image/png"
 
     if isinstance(data.get("url"), str) and data["url"].strip():
         parsed = urlparse(data["url"])
         filename = parsed.path.rstrip("/").split("/")[-1] or "image.png"
         mime = _guess_mime(filename)
-        return b"", mime
+        return None, mime
 
     if isinstance(data.get("base64"), str) and data["base64"].strip():
-        raw = base64.b64decode(data["base64"])
+        raw = _decode_base64_to_spooled_file(data["base64"])
         return raw, "image/png"
 
     if isinstance(data.get("data"), str) and data["data"].strip():
-        raw = base64.b64decode(data["data"])
+        raw = _decode_base64_to_spooled_file(data["data"])
         return raw, "image/png"
 
     raise ValueError("Image API response did not include a readable image payload")
@@ -279,19 +363,21 @@ async def _convert_result_item(
     if not isinstance(payload, dict):
         raise ValueError("Image API response item is not an object")
 
-    image_bytes, mime = _extract_image_payload(payload)
-    if not image_bytes and isinstance(payload.get("url"), str):
-        source_bytes, source_mime, _ = await _download_image_source(payload["url"], runtime)
-        image_bytes = source_bytes
+    image_file, mime = await run_blocking_io(_extract_image_payload, payload)
+    if image_file is None and isinstance(payload.get("url"), str):
+        image_file, source_mime, _ = await _download_image_source(payload["url"], runtime)
         mime = source_mime
     filename = _generated_filename(mime, index)
 
-    uploaded = await _upload_image_bytes(
-        image_bytes,
-        user_id=user_id,
-        filename=filename,
-        content_type=mime,
-    )
+    try:
+        uploaded = await _upload_image_file(
+            image_file,
+            user_id=user_id,
+            filename=filename,
+            content_type=mime,
+        )
+    finally:
+        image_file.close()
     base_url = get_base_url_from_runtime(runtime)
     proxy_url = (
         f"{base_url}/api/upload/file/{uploaded['key']}"
@@ -401,35 +487,41 @@ async def _call_edit_api(
     timeout = getattr(settings, "IMAGE_GENERATION_TIMEOUT", 120) or 120
     user_id = get_user_id_from_runtime(runtime) or "anonymous"
 
-    files: list[tuple[str, tuple[str, bytes, str]]] = []
-    for index, image_url in enumerate(input_images[:16]):
-        image_bytes, content_type, filename = await _download_image_source(
-            image_url,
-            runtime,
-            index=index,
-        )
-        files.append(("image", (filename, image_bytes, content_type)))
+    source_files = []
+    files: list[tuple[str, tuple[str, Any, str]]] = []
+    try:
+        for index, image_url in enumerate(input_images[:16]):
+            image_file, content_type, filename = await _download_image_source(
+                image_url,
+                runtime,
+                index=index,
+            )
+            source_files.append(image_file)
+            files.append(("image", (filename, image_file, content_type)))
 
-    data: dict[str, Any] = {
-        "model": model,
-        "prompt": prompt,
-        "background": _enum_value(background),
-        "input_fidelity": _enum_value(input_fidelity),
-        "size": _normalize_image_size(size),
-        "quality": _enum_value(quality),
-        "n": max(1, min(int(n), 10)),
-        "output_format": _enum_value(output_format),
-    }
+        data: dict[str, Any] = {
+            "model": model,
+            "prompt": prompt,
+            "background": _enum_value(background),
+            "input_fidelity": _enum_value(input_fidelity),
+            "size": _normalize_image_size(size),
+            "quality": _enum_value(quality),
+            "n": max(1, min(int(n), 10)),
+            "output_format": _enum_value(output_format),
+        }
 
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        body = await _post_image_api_with_retries(
-            client,
-            f"{base_url}/images/edits",
-            operation="edit",
-            headers={"Authorization": f"Bearer {api_key}"},
-            data=data,
-            files=files,
-        )
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            body = await _post_image_api_with_retries(
+                client,
+                f"{base_url}/images/edits",
+                operation="edit",
+                headers={"Authorization": f"Bearer {api_key}"},
+                data=data,
+                files=files,
+            )
+    finally:
+        for image_file in source_files:
+            image_file.close()
 
     items = []
     if isinstance(body, dict):
@@ -531,10 +623,10 @@ async def image_generate(
                 output_format=output_format,
                 runtime=runtime,
             )
-        return _json(result)
+        return await _json_dumps_result(result)
     except Exception as exc:
         logger.warning("[image_generate] failed: %s", exc)
-        return _json({"error": f"Image generation failed: {exc}"})
+        return await _json_dumps_result({"error": f"Image generation failed: {exc}"})
 
 
 def get_image_generation_tool() -> BaseTool:

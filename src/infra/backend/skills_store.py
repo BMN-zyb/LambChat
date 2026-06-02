@@ -13,11 +13,13 @@ Skills Store Backend
 """
 
 import fnmatch
+from tempfile import SpooledTemporaryFile
 from typing import TYPE_CHECKING, Any, Optional, cast
 
 from deepagents.backends.utils import create_file_data, format_content_with_line_numbers
 from langgraph.config import get_config
 
+from src.infra.async_utils import run_blocking_io
 from src.infra.backend._skills_path_utils import (
     SKILL_NAME_PATTERN,
     _get_cached_storage,
@@ -29,9 +31,9 @@ from src.infra.backend._skills_path_utils import (
     parse_skill_path,
 )
 from src.infra.backend._skills_search import (
+    SKILLS_GREP_MAX_MATCHES,
     build_file_list_from_paths,
     glob_files_from_paths,
-    grep_across_skills,
     grep_single_skill,
 )
 from src.infra.backend.protocol_compat import (
@@ -52,11 +54,15 @@ from src.infra.backend.protocol_compat import (
 from src.infra.logging import get_logger
 from src.infra.skill.binary import is_binary_file, parse_binary_ref
 from src.infra.skill.storage import SkillStorage
+from src.infra.skill.storage_helpers import SKILL_EFFECTIVE_LOAD_LIMIT
 
 if TYPE_CHECKING:
     pass
 
 logger = get_logger(__name__)
+SKILL_BINARY_DOWNLOAD_MAX_BYTES = 50 * 1024 * 1024
+SKILL_BINARY_SPOOL_MAX_MEMORY_BYTES = 2 * 1024 * 1024
+SKILL_DOWNLOAD_FILES_LIMIT = 100
 
 
 def _slice_file_data(content: str, offset: int, limit: int):
@@ -426,14 +432,19 @@ class SkillsStoreBackend(BackendProtocol):
 
         try:
             if is_skills_root(path):
-                effective_skills = await storage.get_effective_skills(self._user_id)
-                skills = self._filter_effective_skills(effective_skills.get("skills", {}))
+                all_skill_names = await storage.get_all_user_skill_names(
+                    self._user_id,
+                    limit=SKILL_EFFECTIVE_LOAD_LIMIT,
+                )
+                skill_names = [
+                    name for name in sorted(all_skill_names) if self._is_skill_visible(name)
+                ]
                 logger.info(
-                    f"[Skills ls] user={self._user_id}, found {len(skills)} effective skills: {list(skills.keys())}"
+                    f"[Skills ls] user={self._user_id}, found {len(skill_names)} effective skills"
                 )
 
                 entries: list[FileInfo] = []
-                for skill_name in skills.keys():
+                for skill_name in skill_names:
                     entries.append(
                         FileInfo(
                             path=f"/{skill_name}/",
@@ -487,6 +498,12 @@ class SkillsStoreBackend(BackendProtocol):
 
     async def adownload_files(self, paths: list[str]) -> list[FileDownloadResponse]:
         """批量读取文件（异步，支持二进制文件下载）"""
+        if len(paths) > SKILL_DOWNLOAD_FILES_LIMIT:
+            return [
+                FileDownloadResponse(path=path, content=None, error="too_many_files")
+                for path in paths
+            ]
+
         storage = await self._get_storage()
 
         groups: dict[str, list[tuple[str, str]]] = {}
@@ -543,11 +560,43 @@ class SkillsStoreBackend(BackendProtocol):
 
                 binary_ref = parse_binary_ref(content)
                 if binary_ref:
+                    if binary_ref.size > SKILL_BINARY_DOWNLOAD_MAX_BYTES:
+                        results.append(
+                            FileDownloadResponse(
+                                path=original_path,
+                                content=None,
+                                error="file_too_large",
+                            )
+                        )
+                        continue
                     try:
                         from src.infra.storage.s3.service import get_or_init_storage
 
                         storage_service = await get_or_init_storage()
-                        data = await storage_service.download_file(binary_ref.storage_key)
+                        with SpooledTemporaryFile(
+                            max_size=SKILL_BINARY_SPOOL_MAX_MEMORY_BYTES,
+                            mode="w+b",
+                        ) as spooled:
+                            downloaded_size = await storage_service.download_to_file(
+                                binary_ref.storage_key,
+                                spooled,
+                            )
+                            if downloaded_size > SKILL_BINARY_DOWNLOAD_MAX_BYTES:
+                                logger.warning(
+                                    "Skill binary download exceeded max size: key=%s size=%s max=%s",
+                                    binary_ref.storage_key,
+                                    downloaded_size,
+                                    SKILL_BINARY_DOWNLOAD_MAX_BYTES,
+                                )
+                                results.append(
+                                    FileDownloadResponse(
+                                        path=original_path,
+                                        content=None,
+                                        error="file_too_large",
+                                    )
+                                )
+                                continue
+                            data = await run_blocking_io(spooled.read)
                         results.append(
                             FileDownloadResponse(path=original_path, content=data, error=None)
                         )
@@ -639,11 +688,28 @@ class SkillsStoreBackend(BackendProtocol):
 
         try:
             if is_skills_root(normalized_path):
-                effective_skills = await storage.get_effective_skills(self._user_id)
-                skills = self._filter_effective_skills(effective_skills.get("skills", {}))
-                skill_keys = [(name, self._user_id) for name in skills]
-                all_files = await storage.batch_get_skill_files(skill_keys)
-                matches = grep_across_skills(pattern, glob, all_files)
+                all_skill_names = await storage.get_all_user_skill_names(
+                    self._user_id,
+                    limit=SKILL_EFFECTIVE_LOAD_LIMIT,
+                )
+                skill_names = [
+                    name for name in sorted(all_skill_names) if self._is_skill_visible(name)
+                ]
+                matches: list[GrepMatch] = []
+                for skill_name in skill_names:
+                    skill_matches = await grep_single_skill(
+                        pattern,
+                        glob,
+                        skill_name,
+                        storage,
+                        await self._get_skill_file_paths(storage, skill_name),
+                        self._user_id,
+                        self._is_skill_visible,
+                        max_matches=SKILLS_GREP_MAX_MATCHES - len(matches),
+                    )
+                    matches.extend(skill_matches)
+                    if len(matches) >= SKILLS_GREP_MAX_MATCHES:
+                        break
                 return GrepResult(matches=matches)
 
             parsed = parse_skill_path(normalized_path.rstrip("/"))
@@ -714,10 +780,15 @@ class SkillsStoreBackend(BackendProtocol):
 
         try:
             if is_skills_root(normalized_path):
-                effective_skills = await storage.get_effective_skills(self._user_id)
-                skills = self._filter_effective_skills(effective_skills.get("skills", {}))
+                all_skill_names = await storage.get_all_user_skill_names(
+                    self._user_id,
+                    limit=SKILL_EFFECTIVE_LOAD_LIMIT,
+                )
+                skill_names = [
+                    name for name in sorted(all_skill_names) if self._is_skill_visible(name)
+                ]
                 entries: list[FileInfo] = []
-                for skill_name in skills:
+                for skill_name in skill_names:
                     if fnmatch.fnmatch(skill_name, pattern):
                         entries.append(FileInfo(path=f"/{skill_name}/", is_dir=True))
                 return GlobResult(matches=entries)

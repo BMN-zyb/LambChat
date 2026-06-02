@@ -40,6 +40,27 @@ class _FakeRedisClient:
         return 0, keys[max(1, len(keys) // 2) :]
 
 
+class _PagedRedisClient(_FakeRedisClient):
+    def __init__(self, page_size: int) -> None:
+        super().__init__()
+        self.page_size = page_size
+        self.scan_calls = 0
+
+    async def scan(
+        self,
+        cursor: int = 0,
+        match: str | None = None,
+        count: int | None = None,
+    ) -> tuple[int, list[str]]:
+        assert match == "health:memory:instance:*"
+        self.scan_calls += 1
+        keys = sorted(self.values)
+        start = int(cursor)
+        end = min(start + self.page_size, len(keys))
+        next_cursor = 0 if end >= len(keys) else end
+        return next_cursor, keys[start:end]
+
+
 class _ScanOnlyRedisClient(_FakeRedisClient):
     async def keys(self, pattern: str) -> list[str]:
         raise AssertionError(f"Redis KEYS must not be used for pattern {pattern}")
@@ -311,6 +332,58 @@ async def test_publish_and_load_cluster_snapshots_use_redis_safe_payloads() -> N
 
 
 @pytest.mark.asyncio
+async def test_publish_instance_snapshot_offloads_json_serialization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[object] = []
+    redis_client = _FakeRedisClient()
+    snapshot = memory_health.build_instance_snapshot(
+        instance_id="instance-a",
+        captured_at="2026-04-30T03:21:00+00:00",
+        summary={"available": True, "growth_bytes": 2048},
+        details={"top_growth": []},
+    )
+
+    async def _fake_run_blocking_io(func, /, *args, **kwargs):
+        calls.append(func)
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(memory_health, "run_blocking_io", _fake_run_blocking_io, raising=False)
+
+    await memory_health.publish_instance_snapshot(
+        snapshot,
+        interval_seconds=75,
+        redis_client=redis_client,
+    )
+
+    assert calls == [json.dumps]
+    assert redis_client.set_calls[0][1] == json.dumps(snapshot)
+
+
+@pytest.mark.asyncio
+async def test_load_cluster_snapshots_offloads_json_parse(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[object] = []
+    redis_client = _FakeRedisClient()
+    instance_a = _build_payload(instance_id="instance-a")
+    redis_client.values = {
+        "health:memory:instance:instance-a": json.dumps(instance_a),
+    }
+
+    async def _fake_run_blocking_io(func, /, *args, **kwargs):
+        calls.append(func)
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(memory_health, "run_blocking_io", _fake_run_blocking_io, raising=False)
+
+    loaded = await memory_health.load_cluster_snapshots(redis_client=redis_client)
+
+    assert loaded == [instance_a]
+    assert calls == [json.loads]
+
+
+@pytest.mark.asyncio
 async def test_load_cluster_snapshots_scans_without_blocking_redis_keys() -> None:
     redis_client = _ScanOnlyRedisClient()
     instance_a = _build_payload(instance_id="instance-a")
@@ -323,6 +396,25 @@ async def test_load_cluster_snapshots_scans_without_blocking_redis_keys() -> Non
     loaded = await memory_health.load_cluster_snapshots(redis_client=redis_client)
 
     assert loaded == [instance_a, instance_b]
+
+
+@pytest.mark.asyncio
+async def test_load_cluster_snapshots_limits_scanned_instance_keys() -> None:
+    redis_client = _PagedRedisClient(page_size=25)
+    redis_client.values = {
+        f"health:memory:instance:instance-{index:03d}": json.dumps(
+            _build_payload(instance_id=f"instance-{index:03d}")
+        )
+        for index in range(memory_health.CLUSTER_SNAPSHOT_SCAN_LIMIT + 50)
+    }
+
+    loaded = await memory_health.load_cluster_snapshots(redis_client=redis_client)
+
+    assert len(loaded) == memory_health.CLUSTER_SNAPSHOT_SCAN_LIMIT
+    assert loaded[-1]["instance_id"] == (
+        f"instance-{memory_health.CLUSTER_SNAPSHOT_SCAN_LIMIT - 1:03d}"
+    )
+    assert redis_client.scan_calls < 10
 
 
 @pytest.mark.asyncio

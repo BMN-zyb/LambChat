@@ -4,11 +4,11 @@ File upload API routes
 Provides endpoints for file uploads to S3-compatible storage.
 """
 
-import asyncio
-import base64
 import hashlib
 import uuid
-from typing import Any
+from dataclasses import dataclass
+from tempfile import SpooledTemporaryFile
+from typing import Any, BinaryIO
 
 from fastapi import (
     APIRouter,
@@ -30,6 +30,8 @@ from src.api.routes.file_type import (
     get_file_category,
     get_permission_for_category,
 )
+from src.infra.async_utils import run_blocking_io
+from src.infra.async_utils.background_tasks import BestEffortTaskLimiter
 from src.infra.auth.rbac import check_permission
 from src.infra.logging import get_logger
 from src.infra.storage.s3 import (
@@ -43,8 +45,15 @@ from src.kernel.schemas.user import TokenPayload
 logger = get_logger(__name__)
 
 _file_record_storage = FileRecordStorage()
+_upload_delete_tasks = BestEffortTaskLimiter("upload delete", max_tasks=8)
 
 UPLOAD_READ_CHUNK_SIZE = 1024 * 1024
+UPLOAD_SPOOL_MEMORY_LIMIT = 2 * 1024 * 1024
+SIGNED_URL_KEYS_MAX = 100
+
+
+async def drain_upload_delete_tasks() -> None:
+    await _upload_delete_tasks.drain()
 
 
 def _parse_bool(value: Any) -> bool:
@@ -117,6 +126,10 @@ def _build_upload_response(
     return payload
 
 
+def _path_exists(file_path) -> bool:
+    return file_path.exists()
+
+
 async def _read_upload_file_limited(
     file: Any,
     *,
@@ -126,7 +139,7 @@ async def _read_upload_file_limited(
     chunk_size: int = UPLOAD_READ_CHUNK_SIZE,
 ) -> bytes:
     """Read an UploadFile in chunks and stop as soon as the configured limit is exceeded."""
-    chunks: list[bytes] = []
+    data = bytearray()
     total_size = 0
 
     while True:
@@ -140,9 +153,54 @@ async def _read_upload_file_limited(
                 status_code=400,
                 detail=f"{purpose} size exceeds maximum of {max_size_mb}MB",
             )
-        chunks.append(chunk)
+        data.extend(chunk)
 
-    return b"".join(chunks)
+    return bytes(data)
+
+
+@dataclass
+class SpooledUpload:
+    file: BinaryIO
+    sha256_hex: str
+    size: int
+
+    def close(self) -> None:
+        self.file.close()
+
+
+async def _spool_upload_file_limited(
+    file: Any,
+    *,
+    max_size_bytes: int,
+    max_size_mb: int,
+    purpose: str = "File",
+    chunk_size: int = UPLOAD_READ_CHUNK_SIZE,
+) -> SpooledUpload:
+    """Stream an UploadFile into a bounded spool while hashing and enforcing size limits."""
+    digest = hashlib.sha256()
+    total_size = 0
+    spooled = SpooledTemporaryFile(max_size=UPLOAD_SPOOL_MEMORY_LIMIT, mode="w+b")
+
+    try:
+        while True:
+            chunk = await file.read(chunk_size)
+            if not chunk:
+                break
+
+            total_size += len(chunk)
+            if total_size > max_size_bytes:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"{purpose} size exceeds maximum of {max_size_mb}MB",
+                )
+            digest.update(chunk)
+            await run_blocking_io(spooled.write, chunk)
+
+        await run_blocking_io(spooled.seek, 0)
+        return SpooledUpload(file=spooled, sha256_hex=digest.hexdigest(), size=total_size)
+    except Exception:
+        spooled.close()
+        raise
 
 
 def get_s3_enabled() -> bool:
@@ -177,6 +235,16 @@ async def get_s3_config_from_settings() -> S3Config:
         path_style=_parse_bool(settings.S3_PATH_STYLE),
         public_bucket=_parse_bool(settings.S3_PUBLIC_BUCKET),
         max_file_size=(int(settings.S3_MAX_FILE_SIZE) if settings.S3_MAX_FILE_SIZE else 10485760),
+        internal_max_upload_size=(
+            int(settings.S3_INTERNAL_UPLOAD_MAX_SIZE)
+            if settings.S3_INTERNAL_UPLOAD_MAX_SIZE
+            else 50 * 1024 * 1024
+        ),
+        presigned_url_expires=(
+            int(settings.S3_PRESIGNED_URL_EXPIRES)
+            if settings.S3_PRESIGNED_URL_EXPIRES
+            else 7 * 24 * 3600
+        ),
         storage_path=storage_path,
     )
 
@@ -334,13 +402,16 @@ async def upload_file(
             detail=f"File extension '.{ext}' is not allowed for {category.value} files",
         )
 
+    spooled_upload: SpooledUpload | None = None
+    storage_key = ""
+    file_hash = ""
     try:
-        file_data = await _read_upload_file_limited(
+        spooled_upload = await _spool_upload_file_limited(
             file,
             max_size_bytes=max_size_bytes,
             max_size_mb=max_size_mb,
         )
-        file_hash = hashlib.sha256(file_data).hexdigest()
+        file_hash = spooled_upload.sha256_hex
 
         # Check if hash already exists (race condition guard)
         existing = await _get_live_record_by_hash(file_hash, storage)
@@ -363,13 +434,14 @@ async def upload_file(
             if ext
             else f"{category.value}/{current_user.sub}/{short_id}"
         )
-        await storage.upload_to_key(
-            data=file_data,
+        upload_result = await storage.upload_stream_to_key(
+            file=spooled_upload.file,
             key=storage_key,
             content_type=file.content_type,
             metadata={"uploaded_by": current_user.sub, "content_hash": file_hash},
             skip_size_limit=True,
         )
+        storage_key = upload_result.key
 
         # Write file record
         await _file_record_storage.create(
@@ -377,7 +449,7 @@ async def upload_file(
             key=storage_key,
             name=file.filename or "unknown",
             mime_type=file.content_type or "application/octet-stream",
-            size=len(file_data),
+            size=spooled_upload.size,
             category=category.value,
             uploaded_by=current_user.sub,
         )
@@ -388,7 +460,7 @@ async def upload_file(
             name=file.filename or "unknown",
             file_type=category.value,
             mime_type=file.content_type or "application/octet-stream",
-            size=len(file_data),
+            size=spooled_upload.size,
         )
     except DuplicateKeyError:
         logger.info("Duplicate upload detected for hash %s, reusing existing file", file_hash)
@@ -415,8 +487,13 @@ async def upload_file(
             )
 
         raise HTTPException(status_code=500, detail="Upload failed: duplicate record conflict")
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
+    finally:
+        if spooled_upload is not None:
+            spooled_upload.close()
 
 
 def _get_image_content_type(data: bytes) -> str:
@@ -448,8 +525,7 @@ async def upload_avatar(
     """
     Upload user avatar
 
-    Avatar is stored as base64 in the database (users.avatar_data).
-    No S3 required for avatar storage.
+    Avatar is stored in object storage and referenced by URL.
 
     Requires: file:upload permission
 
@@ -460,15 +536,6 @@ async def upload_avatar(
     Returns:
         Avatar data URI
     """
-    # Validate file size (max 2MB for avatar)
-    max_size = 2 * 1024 * 1024  # 2MB
-    content = await _read_upload_file_limited(
-        file,
-        max_size_bytes=max_size,
-        max_size_mb=2,
-        purpose="Avatar file",
-    )
-
     # Validate file type
     allowed_image_extensions = ["jpg", "jpeg", "png", "gif", "webp"]
     ext = (
@@ -482,35 +549,55 @@ async def upload_avatar(
             detail=f"File type '.{ext}' is not allowed. Allowed types: {', '.join(allowed_image_extensions)}",
         )
 
-    # Detect content type
-    content_type = _get_image_content_type(content)
+    # Validate file size (max 2MB for avatar)
+    max_size = 2 * 1024 * 1024  # 2MB
+    spooled_upload = await _spool_upload_file_limited(
+        file,
+        max_size_bytes=max_size,
+        max_size_mb=2,
+        purpose="Avatar file",
+    )
 
-    # Convert to base64
-    avatar_base64 = base64.b64encode(content).decode("utf-8")
-    data_uri = f"data:{content_type};base64,{avatar_base64}"
+    try:
+        header = await run_blocking_io(spooled_upload.file.read, 12)
+        content_type = _get_image_content_type(header)
+        await run_blocking_io(spooled_upload.file.seek, 0)
+    except Exception:
+        spooled_upload.close()
+        raise
 
-    # Update user's avatar_url (with data URI) in database
-    # Note: We store the data URI in avatar_url for backward compatibility with frontend
     try:
         from src.infra.user.storage import UserStorage
         from src.kernel.schemas.user import UserUpdate
 
+        storage = await get_or_init_storage()
+        upload_result = await storage.upload_file(
+            file=spooled_upload.file,
+            folder=f"avatars/{current_user.sub}",
+            filename=file.filename or "avatar.png",
+            content_type=content_type,
+            skip_size_limit=True,
+        )
+        avatar_url = upload_result.url or f"/api/upload/file/{upload_result.key}"
+
         logger.info(f"Uploading avatar for user: {current_user.sub}, filename: {file.filename}")
-        storage = UserStorage()
-        await storage.update(
+        user_storage = UserStorage()
+        await user_storage.update(
             current_user.sub,
-            UserUpdate(avatar_url=data_uri),  # Store data URI in avatar_url for frontend
+            UserUpdate(avatar_url=avatar_url),
         )
         logger.info(f"Avatar uploaded successfully for user: {current_user.sub}")
 
         return {
-            "url": data_uri,
-            "size": len(content),
+            "url": avatar_url,
+            "size": spooled_upload.size,
             "content_type": content_type,
         }
     except Exception as e:
         logger.exception("Avatar upload failed")
         raise HTTPException(status_code=500, detail=f"Avatar upload failed: {str(e)}")
+    finally:
+        spooled_upload.close()
 
 
 @router.delete("/avatar", dependencies=[Depends(require_permissions("avatar:upload"))])
@@ -589,9 +676,7 @@ async def delete_file(
         except Exception as e:
             logger.error(f"Background delete failed for key {key}: {e}")
 
-    # Create task and return immediately (non-blocking)
-    task = asyncio.create_task(background_delete())
-    task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+    _upload_delete_tasks.create_task(background_delete())
     return {"deleted": True, "key": key, "status": "deleting"}
 
 
@@ -634,7 +719,12 @@ async def get_storage_config(
 class SignedUrlRequest(BaseModel):
     """Request model for getting signed URLs"""
 
-    keys: list[str] = Field(..., description="List of S3 object keys to get signed URLs for")
+    keys: list[str] = Field(
+        ...,
+        min_length=1,
+        max_length=SIGNED_URL_KEYS_MAX,
+        description="List of S3 object keys to get signed URLs for",
+    )
     expires: int = Field(
         default=3600,
         ge=60,
@@ -805,7 +895,7 @@ async def get_file_proxy(
             return JSONResponse({"url": proxy_url})
         try:
             file_path = storage.get_file_path(key)
-            if not file_path.exists():
+            if not await run_blocking_io(_path_exists, file_path):
                 raise HTTPException(status_code=404, detail="File not found")
 
             # Try to get original filename and content type from file records

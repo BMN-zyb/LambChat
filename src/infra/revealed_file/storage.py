@@ -9,11 +9,18 @@ from src.infra.utils.datetime import to_iso, utc_now
 from src.kernel.config import settings
 
 logger = get_logger(__name__)
+REVEALED_FILE_PAGE_LIMIT_MAX = 50
+REVEALED_FILE_GROUPED_FILES_PER_SESSION_MAX = 10
+REVEALED_FILE_SESSION_LIST_LIMIT = 100
 
 
 def _safe_search_pattern(text: str) -> str:
     """Escape user input for use as MongoDB $regex pattern to prevent ReDoS."""
     return re.escape(text)
+
+
+def _bounded_page_limit(limit: int) -> int:
+    return min(max(int(limit), 1), REVEALED_FILE_PAGE_LIMIT_MAX)
 
 
 class RevealedFileStorage:
@@ -67,22 +74,28 @@ class RevealedFileStorage:
                             "file_key": "$file_key",
                             "source": "$source",
                         },
-                        "ids": {"$push": "$_id"},
+                        "keep_id": {"$max": "$_id"},
                         "count": {"$sum": 1},
                     }
                 },
                 {"$match": {"count": {"$gt": 1}}},
             ]
             async for group in c.aggregate(pipeline):
-                ids_to_remove = sorted(group["ids"])[:-1]  # keep the last inserted
-                if ids_to_remove:
-                    await c.delete_many({"_id": {"$in": ids_to_remove}})
-                    logger.info(
-                        f"Removed {len(ids_to_remove)} duplicate(s) for "
-                        f"user_id={group['_id']['user_id']}, "
-                        f"file_key={group['_id']['file_key']}, "
-                        f"source={group['_id']['source']}"
-                    )
+                duplicate_key = group["_id"]
+                result = await c.delete_many(
+                    {
+                        "user_id": duplicate_key["user_id"],
+                        "file_key": duplicate_key["file_key"],
+                        "source": duplicate_key["source"],
+                        "_id": {"$ne": group["keep_id"]},
+                    }
+                )
+                logger.info(
+                    f"Removed {result.deleted_count} duplicate(s) for "
+                    f"user_id={duplicate_key['user_id']}, "
+                    f"file_key={duplicate_key['file_key']}, "
+                    f"source={duplicate_key['source']}"
+                )
 
             await c.create_index(
                 [("user_id", 1), ("file_key", 1), ("source", 1)],
@@ -223,6 +236,7 @@ class RevealedFileStorage:
     ) -> Dict[str, Any]:
         """List revealed files with pagination, filtering, and sorting."""
         await self.ensure_indexes_if_needed()
+        limit = _bounded_page_limit(limit)
 
         query: Dict[str, Any] = {"user_id": user_id}
         if file_type:
@@ -315,6 +329,7 @@ class RevealedFileStorage:
     ) -> Dict[str, Any]:
         """List revealed files grouped by session, with session-level pagination."""
         await self.ensure_indexes_if_needed()
+        limit = _bounded_page_limit(limit)
 
         # Build base query (same as list_files minus session_id filter)
         query: Dict[str, Any] = {"user_id": user_id, "session_id": {"$ne": None}}
@@ -434,36 +449,32 @@ class RevealedFileStorage:
         if not session_ids:
             return {"sessions": [], "total_sessions": total_sessions, "skip": skip, "limit": limit}
 
-        # Fetch all matching files for these sessions.
-        # Build a clean file query: keep non-session_id filters from base query,
-        # then add the paginated session_ids constraint.
-        file_query: Dict[str, Any] = {"user_id": user_id, "session_id": {"$in": session_ids}}
+        # Fetch a bounded preview per session. A single hot session can otherwise
+        # fill the grouped response and materialize hundreds of file documents.
+        file_query_base: Dict[str, Any] = {"user_id": user_id}
         if file_type:
-            file_query["file_type"] = file_type
+            file_query_base["file_type"] = file_type
         if project_id == "none":
-            file_query["project_id"] = None
+            file_query_base["project_id"] = None
         elif project_id:
-            file_query["project_id"] = project_id
+            file_query_base["project_id"] = project_id
         if favorites_only:
-            file_query["is_favorite"] = True
+            file_query_base["is_favorite"] = True
         # Re-apply file name/description search (but NOT session_id search to avoid conflict)
         if search:
             safe_search = _safe_search_pattern(search)
-            file_query["$or"] = [
+            file_query_base["$or"] = [
                 {"file_name": {"$regex": safe_search, "$options": "i"}},
                 {"description": {"$regex": safe_search, "$options": "i"}},
             ]
 
         file_sort_dir = -1 if sort_order == "desc" else 1
         if sort_by == "file_name":
-            file_sort = [("session_id", 1), ("file_name", file_sort_dir)]
+            file_sort = [("file_name", file_sort_dir)]
         elif sort_by == "file_size":
-            file_sort = [("session_id", 1), ("file_size", file_sort_dir)]
+            file_sort = [("file_size", file_sort_dir)]
         else:
-            file_sort = [("session_id", 1), ("created_at", file_sort_dir)]
-
-        files_cursor = self.collection.find(file_query).sort(file_sort)
-        raw_files = await files_cursor.to_list(length=500)
+            file_sort = [("created_at", file_sort_dir)]
 
         # Enrich with session names
         from src.infra.storage.mongodb import get_mongo_client
@@ -479,9 +490,15 @@ class RevealedFileStorage:
 
         # Group files by session
         files_by_session: Dict[str, list] = {sid: [] for sid in session_ids}
-        for item in raw_files:
-            sid = item.get("session_id")
-            if sid in files_by_session:
+        for sid in session_ids:
+            file_query = {**file_query_base, "session_id": sid}
+            cursor = (
+                self.collection.find(file_query)
+                .sort(file_sort)
+                .limit(REVEALED_FILE_GROUPED_FILES_PER_SESSION_MAX)
+            )
+            raw_files = await cursor.to_list(length=REVEALED_FILE_GROUPED_FILES_PER_SESSION_MAX)
+            for item in raw_files:
                 files_by_session[sid].append(
                     self._serialize_item(
                         {
@@ -517,8 +534,11 @@ class RevealedFileStorage:
             {"$match": {"user_id": user_id, "session_id": {"$ne": None}}},
             {"$group": {"_id": "$session_id", "count": {"$sum": 1}}},
             {"$sort": {"count": -1}},
+            {"$limit": REVEALED_FILE_SESSION_LIST_LIMIT},
         ]
-        results = await self.collection.aggregate(pipeline).to_list(length=100)
+        results = await self.collection.aggregate(pipeline).to_list(
+            length=REVEALED_FILE_SESSION_LIST_LIMIT
+        )
         session_ids = [r["_id"] for r in results]
 
         if not session_ids:

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 
 import pytest
 
+from src.infra.task import arq_payloads
 from src.infra.task.arq_payloads import TaskArqPayloadStore
 
 
@@ -60,3 +62,58 @@ async def test_task_arq_payload_store_deletes_context() -> None:
 
     assert deleted is True
     assert await store.load("run-1") is None
+
+
+@pytest.mark.asyncio
+async def test_task_arq_payload_store_rejects_oversized_payload_before_redis_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(arq_payloads, "TASK_ARQ_PAYLOAD_MAX_BYTES", 32, raising=False)
+    redis = _FakeRedis()
+    store = TaskArqPayloadStore(redis=redis, ttl_seconds=60)
+
+    with pytest.raises(ValueError, match="task payload too large"):
+        await store.save("run-1", {"message": "x" * 64})
+
+    assert redis.values == {}
+
+
+@pytest.mark.asyncio
+async def test_task_arq_payload_store_offloads_payload_json_serialization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[Any] = []
+    redis = _FakeRedis()
+    store = TaskArqPayloadStore(redis=redis, ttl_seconds=60)
+
+    async def _fake_run_blocking_io(func, /, *args: Any, **kwargs: Any):
+        calls.append(func)
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(arq_payloads, "run_blocking_io", _fake_run_blocking_io, raising=False)
+
+    await store.save("run-1", {"message": "x" * 20_000})
+
+    assert calls == [json.dumps]
+    assert redis.values["task:arq:payload:run-1"].startswith('{"message":')
+
+
+@pytest.mark.asyncio
+async def test_task_arq_payload_store_offloads_payload_json_parse(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[Any] = []
+    redis = _FakeRedis()
+    redis.values["task:arq:payload:run-1"] = '{"message": "' + ("x" * 20_000) + '"}'
+    store = TaskArqPayloadStore(redis=redis, ttl_seconds=60)
+
+    async def _fake_run_blocking_io(func, /, *args: Any, **kwargs: Any):
+        calls.append(func)
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(arq_payloads, "run_blocking_io", _fake_run_blocking_io, raising=False)
+
+    loaded = await store.load("run-1")
+
+    assert calls == [json.loads]
+    assert loaded == {"message": "x" * 20_000}

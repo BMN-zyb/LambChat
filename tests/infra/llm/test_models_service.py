@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import json
+from typing import Any
+
 import pytest
 
 from src.infra.llm import models_service
+from src.infra.storage import redis as redis_storage
 from src.kernel.config import settings
 
 
@@ -64,3 +68,83 @@ async def test_get_default_model_respects_allowed_models_before_admin_default(
 
     assert await models_service.get_default_model(["model-a"]) == "openai/gpt-a"
     assert await models_service.get_default_model_id(["model-a"]) == "model-a"
+
+
+def test_set_memory_cache_caps_cached_model_list(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(models_service, "_MODELS_CACHE_MAX_SIZE", 2)
+
+    models_service.set_memory_cache(
+        [
+            {"id": "model-a", "value": "openai/gpt-a"},
+            {"id": "model-b", "value": "openai/gpt-b"},
+            {"id": "model-c", "value": "openai/gpt-c"},
+        ]
+    )
+
+    assert models_service._memory_cache == [
+        {"id": "model-a", "value": "openai/gpt-a"},
+        {"id": "model-b", "value": "openai/gpt-b"},
+    ]
+
+
+class _RecordingRedis:
+    def __init__(self, cached: str | None = None) -> None:
+        self.cached = cached
+        self.set_calls: list[tuple[str, str, int | None]] = []
+
+    async def get(self, _key: str):
+        return self.cached
+
+    async def set(self, key: str, value: str, ex: int | None = None):
+        self.set_calls.append((key, value, ex))
+
+
+@pytest.mark.asyncio
+async def test_get_available_models_offloads_redis_cache_json_parse(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[Any] = []
+    cached = '[{"id": "model-a", "value": "openai/gpt-a"}]'
+    redis = _RecordingRedis(cached=cached)
+
+    async def _fake_run_blocking_io(func, /, *args: Any, **kwargs: Any):
+        calls.append(func)
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(redis_storage, "get_redis_client", lambda: redis)
+    monkeypatch.setattr(models_service, "run_blocking_io", _fake_run_blocking_io, raising=False)
+
+    result = await models_service.get_available_models()
+
+    assert calls == [json.loads]
+    assert result == [{"id": "model-a", "value": "openai/gpt-a"}]
+
+
+@pytest.mark.asyncio
+async def test_write_to_caches_offloads_redis_cache_json_serialization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[Any] = []
+    redis = _RecordingRedis()
+
+    async def _fake_run_blocking_io(func, /, *args: Any, **kwargs: Any):
+        calls.append(func)
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(redis_storage, "get_redis_client", lambda: redis)
+    monkeypatch.setattr(models_service, "run_blocking_io", _fake_run_blocking_io, raising=False)
+
+    await models_service._write_to_caches(
+        [{"id": "model-a", "value": "openai/gpt-a", "api_key": "secret"}]
+    )
+
+    assert calls == [json.dumps]
+    assert redis.set_calls == [
+        (
+            models_service._MODELS_CACHE_KEY,
+            '[{"id": "model-a", "value": "openai/gpt-a", "api_key": null}]',
+            models_service._MODELS_CACHE_TTL,
+        )
+    ]

@@ -466,7 +466,7 @@ class NativeMemoryBackend(MemoryBackend):
         if not self._embedding_fn:
             return None
         try:
-            result = self._embedding_fn(text)
+            result = await run_blocking_io(self._embedding_fn, text)
             if asyncio.iscoroutine(result):
                 return await result
             return result

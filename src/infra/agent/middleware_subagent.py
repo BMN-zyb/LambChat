@@ -19,6 +19,8 @@ from langchain.agents.middleware.types import (
 )
 from langchain_core.messages import AIMessage, ToolMessage
 
+from src.infra.async_utils import run_blocking_io
+
 if TYPE_CHECKING:
     pass
 
@@ -42,6 +44,10 @@ _MAX_RESULT_SNIPPET = 800
 # Externalize payloads larger than this into separate files, keeping the log readable
 _MAX_INLINE_PAYLOAD_CHARS = 2000
 
+# Hard in-memory cap for rendered activity log entries. Compression is helpful
+# but can fail or happen only once; this bound prevents unbounded per-run growth.
+_DEFAULT_MAX_LOG_CHARS = _DEFAULT_ACTIVITY_TOKEN_LIMIT * _CHARS_PER_TOKEN
+
 
 class SubagentActivityMiddleware(AgentMiddleware):
     """Records all subagent activity (LLM reasoning + tool calls) to a log file.
@@ -64,11 +70,13 @@ class SubagentActivityMiddleware(AgentMiddleware):
         backend: Any,
         token_limit: int = _DEFAULT_ACTIVITY_TOKEN_LIMIT,
         keep_recent: int = _DEFAULT_KEEP_RECENT,
+        max_log_chars: int = _DEFAULT_MAX_LOG_CHARS,
     ) -> None:
         super().__init__()
         self._backend = backend  # BackendProtocol | BackendFactory
         self._token_limit = token_limit
         self._keep_recent = keep_recent
+        self._max_log_chars = max(int(max_log_chars), 1)
         self._run_id = uuid.uuid4().hex[:8]
         self._log_path = f"/workspace/subagent_logs/activity_{self._run_id}.md"
         self._payload_dir = f"/workspace/subagent_logs/payloads/{self._run_id}"
@@ -123,7 +131,16 @@ class SubagentActivityMiddleware(AgentMiddleware):
             return None
 
     @staticmethod
-    def _serialize_tool_result(result: Any) -> str:
+    async def _json_dumps_for_log(value: Any, *, indent: int | None = None) -> str:
+        return await run_blocking_io(
+            json.dumps,
+            value,
+            ensure_ascii=False,
+            indent=indent,
+        )
+
+    @classmethod
+    async def _serialize_tool_result(cls, result: Any) -> str:
         """Normalize tool results into text for logging / payload storage."""
         if isinstance(result, ToolMessage):
             content = result.content
@@ -138,13 +155,13 @@ class SubagentActivityMiddleware(AgentMiddleware):
                         if block.get("type") == "text":
                             parts.append(str(block.get("text", "")))
                         else:
-                            parts.append(json.dumps(block, ensure_ascii=False))
+                            parts.append(await cls._json_dumps_for_log(block))
                 return "\n".join(part for part in parts if part)
             if isinstance(content, dict):
-                return json.dumps(content, ensure_ascii=False, indent=2)
+                return await cls._json_dumps_for_log(content, indent=2)
             return str(content)
         if isinstance(result, (dict, list, tuple)):
-            return json.dumps(result, ensure_ascii=False, indent=2)
+            return await cls._json_dumps_for_log(result, indent=2)
         if result is None:
             return ""
         return str(result)
@@ -238,6 +255,35 @@ class SubagentActivityMiddleware(AgentMiddleware):
             return
         self._entries.append(entry)
         self._total_chars += len(entry)
+        self._trim_entries_to_memory_cap()
+
+    def _trim_entries_to_memory_cap(self) -> None:
+        if self._total_chars <= self._max_log_chars:
+            return
+
+        omitted_count = 0
+        marker = "\n## [TRUNCATED] Earlier subagent activity entries omitted to cap memory."
+
+        while self._entries and self._total_chars + len(marker) > self._max_log_chars:
+            removed = self._entries.pop(0)
+            self._total_chars -= len(removed)
+            omitted_count += 1
+
+        if omitted_count <= 0:
+            return
+
+        marker = f"\n## [TRUNCATED] {omitted_count} older activity entries omitted to cap memory."
+        if self._entries and self._entries[0].startswith("\n## [TRUNCATED]"):
+            self._total_chars -= len(self._entries[0])
+            self._entries[0] = marker
+            self._total_chars += len(marker)
+        else:
+            self._entries.insert(0, marker)
+            self._total_chars += len(marker)
+
+        while self._entries and self._total_chars > self._max_log_chars:
+            removed = self._entries.pop(0)
+            self._total_chars -= len(removed)
 
     async def _check_and_compress(self, runtime: Any) -> None:
         """Compress older entries in memory if log exceeds token limit.
@@ -398,7 +444,7 @@ class SubagentActivityMiddleware(AgentMiddleware):
         result = await handler(request)
 
         # Extract result preview
-        result_text = self._serialize_tool_result(result)
+        result_text = await self._serialize_tool_result(result)
         entry = await self._build_tool_entry(request.runtime, tool_name, tool_args, result_text)
         self._append_entry(entry)
 

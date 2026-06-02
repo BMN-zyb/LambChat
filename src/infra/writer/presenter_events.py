@@ -6,12 +6,53 @@
 
 from __future__ import annotations
 
+from itertools import islice
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence
 
 from src.infra.utils.datetime import utc_now_iso
+from src.infra.writer.presenter_config import _bounded_attachments
 
 if TYPE_CHECKING:
     from src.infra.writer.presenter_config import PresenterConfig
+
+TOOL_START_ARG_MAX_STRING_CHARS = 2_000
+TOOL_START_ARG_MAX_LIST_ITEMS = 100
+TOOL_START_ARG_MAX_DICT_ITEMS = 100
+TOOL_START_ARG_MAX_DEPTH = 8
+
+
+def _compact_tool_start_arg(value: Any, *, depth: int = 0) -> Any:
+    if depth >= TOOL_START_ARG_MAX_DEPTH:
+        return "[truncated: max depth exceeded]"
+
+    if isinstance(value, str):
+        if len(value) <= TOOL_START_ARG_MAX_STRING_CHARS:
+            return value
+        return (
+            value[:TOOL_START_ARG_MAX_STRING_CHARS].rstrip()
+            + f"\n[truncated from {len(value)} chars]"
+        )
+
+    if isinstance(value, dict):
+        compacted: dict[Any, Any] = {}
+        for key in islice(value, TOOL_START_ARG_MAX_DICT_ITEMS):
+            compacted[key] = _compact_tool_start_arg(value[key], depth=depth + 1)
+        omitted = len(value) - TOOL_START_ARG_MAX_DICT_ITEMS
+        if omitted > 0:
+            compacted["_truncated_keys"] = omitted
+        return compacted
+
+    if isinstance(value, (list, tuple)):
+        items = [
+            _compact_tool_start_arg(item, depth=depth + 1)
+            for item in value[:TOOL_START_ARG_MAX_LIST_ITEMS]
+        ]
+        omitted = len(value) - TOOL_START_ARG_MAX_LIST_ITEMS
+        if omitted > 0:
+            items.append({"_truncated_items": omitted})
+        return items
+
+    return value
 
 
 class EventPresenterMixin:
@@ -287,12 +328,13 @@ class EventPresenterMixin:
             depth: 层级深度（0=主代理，1+=子代理）
             agent_id: 代理ID（用于子代理事件）
         """
-        self._tool_calls.append({"name": tool_name, "input": tool_input})
+        self._tool_calls.append({"name": tool_name})
+        args = tool_input if isinstance(tool_input, dict) else {"input": tool_input}
         return self._build_event(
             "tool:start",
             {
                 "tool": tool_name,
-                "args": (tool_input if isinstance(tool_input, dict) else {"input": tool_input}),
+                "args": _compact_tool_start_arg(args),
                 "tool_call_id": tool_call_id,
                 "timestamp": utc_now_iso(),
             },
@@ -389,10 +431,7 @@ class EventPresenterMixin:
             "message_id": resolved_message_id,
             "run_id": self.run_id,
         }
-        if attachments:
-            data["attachments"] = attachments
-        else:
-            data["attachments"] = []
+        data["attachments"] = _bounded_attachments(attachments)
         return self._build_event("user:message", data)
 
     def present_sandbox_starting(self) -> Dict[str, Any]:

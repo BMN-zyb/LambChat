@@ -53,6 +53,11 @@ logger = get_logger(__name__)
 
 # 默认超时 30 分钟（秒）
 _DEFAULT_TIMEOUT = 30 * 60
+SANDBOX_READ_MAX_BYTES = 2 * 1024 * 1024
+SANDBOX_DOWNLOAD_MAX_BYTES = 50 * 1024 * 1024
+SANDBOX_UPLOAD_MAX_BYTES = 50 * 1024 * 1024
+SANDBOX_BATCH_FILES_LIMIT = 100
+SANDBOX_GLOB_MAX_MATCHES = 1000
 
 
 def _slice_text_read(content: str, offset: int, limit: int) -> str | ReadResult:
@@ -336,6 +341,14 @@ class E2BBackend(BaseSandbox):
         自动检测二进制文件，返回 data URI 而非裸 base64。
         """
         try:
+            size = self._file_size(file_path)
+            if size is not None and size > SANDBOX_READ_MAX_BYTES:
+                return ReadResult(
+                    error=(
+                        f"file too large to read directly: {size} bytes "
+                        f"(limit {SANDBOX_READ_MAX_BYTES} bytes)"
+                    )
+                )
             # 先尝试文本读取
             content = self._sandbox.files.read(path=file_path, format="text")
 
@@ -389,7 +402,7 @@ class E2BBackend(BaseSandbox):
         """使用 E2B 原生 files.list() 递归搜索匹配 glob 模式的文件
 
         E2B 没有 glob API，所以用 list 递归列出后在 Python 端过滤。
-        使用 _max_depth 限制递归深度，防止深层目录结构导致长时间阻塞。
+        使用 _max_depth 和结果数限制，防止大目录导致长时间阻塞和内存增长。
         """
         try:
             import fnmatch
@@ -402,6 +415,8 @@ class E2BBackend(BaseSandbox):
             _skip_prefixes = ("/proc", "/sys", "/dev")
 
             def _match_glob(entries_list: list[Any], current_path: str, depth: int) -> None:
+                if len(result) >= SANDBOX_GLOB_MAX_MATCHES:
+                    return
                 if depth > _max_depth:
                     logger.warning(f"E2B glob reached max depth {_max_depth} at {current_path}")
                     return
@@ -423,10 +438,14 @@ class E2BBackend(BaseSandbox):
                         if hasattr(entry, "size"):
                             info["size"] = entry.size
                         result.append(info)
+                        if len(result) >= SANDBOX_GLOB_MAX_MATCHES:
+                            return
                     if is_dir:
                         try:
                             sub_entries = self._sandbox.files.list(path=full_path)
                             _match_glob(sub_entries, full_path, depth + 1)
+                            if len(result) >= SANDBOX_GLOB_MAX_MATCHES:
+                                return
                         except Exception:
                             pass
 
@@ -450,10 +469,18 @@ class E2BBackend(BaseSandbox):
     # =========================================================================
 
     def upload_files(self, files: list[tuple[str, bytes]]) -> list[FileUploadResponse]:
+        if len(files) > SANDBOX_BATCH_FILES_LIMIT:
+            return [
+                FileUploadResponse(path=path, error="too_many_files") for path, _content in files
+            ]
+
         responses: list[FileUploadResponse] = []
         for path, content in files:
             if not path.startswith("/"):
                 responses.append(FileUploadResponse(path=path, error="invalid_path"))
+                continue
+            if len(content) > SANDBOX_UPLOAD_MAX_BYTES:
+                responses.append(FileUploadResponse(path=path, error="file_too_large"))
                 continue
             try:
                 self._ensure_parent_dir(path)
@@ -478,6 +505,12 @@ class E2BBackend(BaseSandbox):
         return await run_blocking_io(self.upload_files, files)
 
     def download_files(self, paths: list[str]) -> list[FileDownloadResponse]:
+        if len(paths) > SANDBOX_BATCH_FILES_LIMIT:
+            return [
+                FileDownloadResponse(path=path, content=None, error="too_many_files")
+                for path in paths
+            ]
+
         responses: list[FileDownloadResponse] = []
         for path in paths:
             if not path.startswith("/"):
@@ -486,6 +519,18 @@ class E2BBackend(BaseSandbox):
                 )
                 continue
             try:
+                size = self._file_size(path)
+                if size is not None and size > SANDBOX_DOWNLOAD_MAX_BYTES:
+                    logger.warning(
+                        "Skipping E2B download for large file %s: %s bytes > %s",
+                        path,
+                        size,
+                        SANDBOX_DOWNLOAD_MAX_BYTES,
+                    )
+                    responses.append(
+                        FileDownloadResponse(path=path, content=None, error="file_not_found")
+                    )
+                    continue
                 content = self._sandbox.files.read(path, format="bytes")
                 responses.append(
                     FileDownloadResponse(path=path, content=bytes(content), error=None)
@@ -496,6 +541,21 @@ class E2BBackend(BaseSandbox):
                     FileDownloadResponse(path=path, content=None, error="file_not_found")
                 )
         return responses
+
+    def _file_size(self, path: str) -> int | None:
+        parent = os.path.dirname(path) or "/"
+        try:
+            entries = self._sandbox.files.list(path=parent)
+        except Exception as e:
+            logger.debug("E2B files.list(%s) size preflight failed: %s", parent, e)
+            return None
+        for entry in entries:
+            if getattr(entry, "path", None) == path and hasattr(entry, "size"):
+                try:
+                    return int(entry.size)
+                except (TypeError, ValueError):
+                    return None
+        return None
 
     async def adownload_files(self, paths: list[str]) -> list[FileDownloadResponse]:
         return await run_blocking_io(self.download_files, paths)

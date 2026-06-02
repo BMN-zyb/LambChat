@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from src.infra.session.manager import SessionManager
 from src.infra.session.storage import SessionStorage
 
 
@@ -47,3 +48,21 @@ async def test_update_metadata_only_uses_update_one_without_fetching_document(
     assert query == {"session_id": "session-1"}
     assert update["$set"]["metadata.current_run_id"] == "run-1"
     assert update["$set"]["metadata.agent_id"] == "search"
+
+
+@pytest.mark.asyncio
+async def test_session_manager_get_session_events_forwards_limit_as_max_events() -> None:
+    calls: list[tuple] = []
+
+    class _FakeTraceStorage:
+        async def get_session_events(self, *args, **kwargs):
+            calls.append((args, kwargs))
+            return [{"event_type": "done"}]
+
+    manager = SessionManager()
+    manager._trace_storage = _FakeTraceStorage()
+
+    events = await manager.get_session_events("session-1", limit=25)
+
+    assert events == [{"event_type": "done"}]
+    assert calls == [(("session-1",), {"max_events": 25})]

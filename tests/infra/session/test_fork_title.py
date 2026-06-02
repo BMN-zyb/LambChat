@@ -46,12 +46,16 @@ class _FakeTraceCollection:
     def __init__(self, traces):
         self.cursor = _AsyncTraceCursor(list(traces))
         self.inserted_docs = None
+        self.insert_many_calls = []
+        self.find_calls = []
 
     def find(self, *_args, **_kwargs):
+        self.find_calls.append((_args, _kwargs))
         return self.cursor
 
     async def insert_many(self, docs):
         self.inserted_docs = docs
+        self.insert_many_calls.append(list(docs))
 
 
 class _FakeSessionStorage:
@@ -99,6 +103,308 @@ async def test_clone_history_streams_traces_until_target_run() -> None:
     assert collection.cursor.to_list_called is False
     assert collection.inserted_docs is not None
     assert [doc["run_id"] for doc in collection.inserted_docs] == ["run-1", "run-2"]
+
+
+@pytest.mark.asyncio
+async def test_clone_history_inserts_traces_in_batches(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "src.infra.session.manager.SESSION_FORK_TRACE_INSERT_BATCH_SIZE",
+        2,
+        raising=False,
+    )
+    traces = [{"run_id": f"run-{index}", "events": [], "started_at": index} for index in range(5)]
+    collection = _FakeTraceCollection(traces)
+    manager = SessionManager()
+    manager._trace_storage = SimpleNamespace(collection=collection)
+
+    result = await manager._clone_history_to_session(
+        source_session=Session(id="source", user_id="user"),
+        target_session=Session(id="target", user_id="user"),
+        target={
+            "run_id": "run-5",
+            "target_type": "assistant",
+            "completed_run_ids": [f"run-{index}" for index in range(5)],
+        },
+        user_id="user",
+    )
+
+    inserted_docs = [doc for call in collection.insert_many_calls for doc in call]
+    assert result.copied_trace_count == 5
+    assert [len(call) for call in collection.insert_many_calls] == [2, 2, 1]
+    assert [doc["run_id"] for doc in inserted_docs] == [
+        "run-0",
+        "run-1",
+        "run-2",
+        "run-3",
+        "run-4",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_clone_history_returns_count_without_retaining_cloned_trace_docs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "src.infra.session.manager.SESSION_FORK_TRACE_INSERT_BATCH_SIZE",
+        2,
+        raising=False,
+    )
+    traces = [
+        {
+            "run_id": f"run-{index}",
+            "events": [
+                {
+                    "event_type": "user:message",
+                    "data": {"content": f"hello {index}"},
+                }
+            ],
+            "started_at": index,
+        }
+        for index in range(5)
+    ]
+    collection = _FakeTraceCollection(traces)
+    manager = SessionManager()
+    manager._trace_storage = SimpleNamespace(collection=collection)
+
+    result = await manager._clone_history_to_session(
+        source_session=Session(id="source", user_id="user"),
+        target_session=Session(id="target", user_id="user"),
+        target={
+            "run_id": "run-4",
+            "target_type": "assistant",
+        },
+        user_id="user",
+        collect_checkpoint_messages=True,
+    )
+
+    assert result.copied_trace_count == 5
+    assert [len(call) for call in collection.insert_many_calls] == [2, 2, 1]
+    assert [message.content for message in result.checkpoint_messages] == [
+        "hello 0",
+        "hello 1",
+        "hello 2",
+        "hello 3",
+        "hello 4",
+    ]
+    assert not hasattr(result, "cloned_docs")
+
+
+@pytest.mark.asyncio
+async def test_clone_history_does_not_retain_compat_docs_for_completed_run_ids(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "src.infra.session.manager.SESSION_FORK_TRACE_INSERT_BATCH_SIZE",
+        2,
+        raising=False,
+    )
+    traces = [
+        {
+            "run_id": f"run-{index}",
+            "events": [{"event_type": "message:chunk", "data": {"content": "x" * 1000}}],
+            "started_at": index,
+        }
+        for index in range(5)
+    ]
+    collection = _FakeTraceCollection(traces)
+    manager = SessionManager()
+    manager._trace_storage = SimpleNamespace(collection=collection)
+
+    result = await manager._clone_history_to_session(
+        source_session=Session(id="source", user_id="user"),
+        target_session=Session(id="target", user_id="user"),
+        target={
+            "run_id": "run-4",
+            "target_type": "assistant",
+            "completed_run_ids": [f"run-{index}" for index in range(5)],
+        },
+        user_id="user",
+    )
+
+    assert result.copied_trace_count == 5
+    assert result._compat_docs == []  # type: ignore[attr-defined]
+    assert [len(call) for call in collection.insert_many_calls] == [2, 2, 1]
+
+
+@pytest.mark.asyncio
+async def test_clone_history_offloads_trace_document_cloning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import src.infra.session.manager as manager_module
+
+    traces = [
+        {"run_id": "run-1", "events": [{"data": {"content": "hello"}}], "started_at": 1},
+        {"run_id": "run-2", "events": [{"data": {"content": "world"}}], "started_at": 2},
+    ]
+    collection = _FakeTraceCollection(traces)
+    manager = SessionManager()
+    manager._trace_storage = SimpleNamespace(collection=collection)
+    offloaded: list[str] = []
+
+    async def fake_run_blocking_io(func, /, *args, **kwargs):
+        offloaded.append(func.__name__)
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(manager_module, "run_blocking_io", fake_run_blocking_io, raising=False)
+
+    cloned_docs = await manager._clone_history_to_session(
+        source_session=Session(id="source", user_id="user"),
+        target_session=Session(id="target", user_id="user"),
+        target={
+            "run_id": "run-2",
+            "target_type": "assistant",
+            "completed_run_ids": ["run-1", "run-2"],
+        },
+        user_id="user",
+    )
+
+    assert len(cloned_docs) == 2
+    assert offloaded == ["_build_cloned_trace_doc", "_build_cloned_trace_doc"]
+
+
+@pytest.mark.asyncio
+async def test_clone_history_offloads_checkpoint_message_rebuild(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import src.infra.session.manager as manager_module
+
+    traces = [
+        {
+            "run_id": "run-1",
+            "events": [
+                {
+                    "event_type": "user:message",
+                    "data": {"content": "hello"},
+                },
+                {
+                    "event_type": "message:chunk",
+                    "data": {"content": "hi"},
+                },
+            ],
+            "started_at": 1,
+        },
+    ]
+    collection = _FakeTraceCollection(traces)
+    manager = SessionManager()
+    manager._trace_storage = SimpleNamespace(collection=collection)
+    offloaded: list[str] = []
+
+    async def fake_run_blocking_io(func, /, *args, **kwargs):
+        offloaded.append(func.__name__)
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(manager_module, "run_blocking_io", fake_run_blocking_io, raising=False)
+
+    result = await manager._clone_history_to_session(
+        source_session=Session(id="source", user_id="user"),
+        target_session=Session(id="target", user_id="user"),
+        target={
+            "run_id": "run-1",
+            "target_type": "assistant",
+        },
+        user_id="user",
+        collect_checkpoint_messages=True,
+    )
+
+    assert [message.content for message in result.checkpoint_messages] == ["hello", "hi"]
+    assert "build_messages_from_trace_events" in offloaded
+
+
+@pytest.mark.asyncio
+async def test_resolve_fork_target_does_not_retain_all_prior_run_ids() -> None:
+    traces = [{"run_id": f"run-{index}", "events": [], "started_at": index} for index in range(5)]
+    traces.append(
+        {
+            "run_id": "run-target",
+            "trace_id": "trace-target",
+            "events": [
+                {
+                    "event_type": "user:message",
+                    "data": {"message_id": "message-target"},
+                }
+            ],
+            "started_at": 5,
+        }
+    )
+    collection = _FakeTraceCollection(traces)
+    manager = SessionManager()
+    manager._trace_storage = SimpleNamespace(collection=collection)
+
+    target = await manager._resolve_fork_target("source", "message-target")
+
+    assert target["target_type"] == "user"
+    assert target["run_id"] == "run-target"
+    assert target["completed_run_count"] == 5
+    assert "completed_run_ids" not in target
+    assert collection.cursor.to_list_called is False
+
+
+@pytest.mark.asyncio
+async def test_resolve_fork_target_streams_traces_until_message() -> None:
+    traces = [
+        {"run_id": "run-1", "events": [], "started_at": 1},
+        {
+            "run_id": "run-2",
+            "trace_id": "trace-2",
+            "events": [
+                {
+                    "event_type": "user:message",
+                    "data": {"message_id": "message-2"},
+                }
+            ],
+            "started_at": 2,
+        },
+        {"run_id": "run-3", "events": [], "started_at": 3},
+    ]
+    collection = _FakeTraceCollection(traces)
+    manager = SessionManager()
+    manager._trace_storage = SimpleNamespace(collection=collection)
+
+    target = await manager._resolve_fork_target("source", "message-2")
+
+    assert target["target_type"] == "user"
+    assert target["run_id"] == "run-2"
+    assert target["completed_run_count"] == 1
+    assert "completed_run_ids" not in target
+    assert collection.cursor.to_list_called is False
+
+
+@pytest.mark.asyncio
+async def test_resolve_fork_target_projects_only_needed_trace_fields() -> None:
+    traces = [
+        {
+            "run_id": "run-1",
+            "trace_id": "trace-1",
+            "events": [
+                {
+                    "event_type": "user:message",
+                    "data": {"message_id": "message-1"},
+                }
+            ],
+            "started_at": 1,
+            "large_metadata": "x" * 100_000,
+        },
+    ]
+    collection = _FakeTraceCollection(traces)
+    manager = SessionManager()
+    manager._trace_storage = SimpleNamespace(collection=collection)
+
+    target = await manager._resolve_fork_target("source", "message-1")
+
+    assert target["run_id"] == "run-1"
+    assert collection.find_calls[0] == (
+        (
+            {"session_id": "source"},
+            {
+                "_id": 0,
+                "trace_id": 1,
+                "run_id": 1,
+                "events.event_type": 1,
+                "events.data": 1,
+            },
+        ),
+        {},
+    )
 
 
 @pytest.mark.asyncio

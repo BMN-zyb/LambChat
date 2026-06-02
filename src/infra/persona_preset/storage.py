@@ -9,6 +9,8 @@ from src.infra.utils.datetime import utc_now
 from src.kernel.config import settings
 
 _SEARCH_TOKEN_RE = re.compile(r"[A-Za-z0-9_]+|[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF]+")
+_SEARCH_HAS_LITERAL_RE = re.compile(r"[A-Za-z0-9_\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF]")
+PERSONA_PRESET_LIST_LIMIT = 200
 
 
 def _build_persona_search_terms(text: str | None) -> list[str]:
@@ -24,7 +26,11 @@ def _build_persona_search_terms(text: str | None) -> list[str]:
         if not clean or clean in seen:
             return
         seen.add(clean)
-        terms.append(clean)
+        terms.append(re.escape(clean))
+
+    stripped = text.strip()
+    if _SEARCH_HAS_LITERAL_RE.search(stripped) and re.search(r"[^\w\s]", stripped):
+        add(stripped)
 
     for match in _SEARCH_TOKEN_RE.finditer(text):
         token = match.group(0)
@@ -121,6 +127,23 @@ class PersonaPresetStorage:
     # ── User preference helpers (stored in user metadata) ──
 
     MAX_PINNED = 10
+    MAX_FAVORITES = 100
+
+    @staticmethod
+    def _bounded_unique_ids(values: Any, limit: int) -> list[str]:
+        result: list[str] = []
+        seen: set[str] = set()
+        if not isinstance(values, list):
+            return result
+        for value in values:
+            clean = str(value).strip()
+            if not clean or clean in seen:
+                continue
+            seen.add(clean)
+            result.append(clean)
+            if len(result) >= limit:
+                break
+        return result
 
     async def _get_user_preset_preference(self, user_id: str) -> dict[str, list[str]]:
         doc = await self.user_collection.find_one(
@@ -129,8 +152,14 @@ class PersonaPresetStorage:
         )
         metadata = (doc or {}).get("metadata") or {}
         return {
-            "pinned": metadata.get("pinned_preset_ids") or [],
-            "favorite": metadata.get("favorite_preset_ids") or [],
+            "pinned": self._bounded_unique_ids(
+                metadata.get("pinned_preset_ids"),
+                self.MAX_PINNED,
+            ),
+            "favorite": self._bounded_unique_ids(
+                metadata.get("favorite_preset_ids"),
+                self.MAX_FAVORITES,
+            ),
         }
 
     async def _set_user_preset_preference(self, user_id: str, pref: dict[str, list[str]]) -> None:
@@ -170,6 +199,12 @@ class PersonaPresetStorage:
 
         if update.get("is_favorite") is not None:
             if update["is_favorite"] and preset_id not in favorite:
+                if len(favorite) >= self.MAX_FAVORITES:
+                    return {
+                        "is_favorite": False,
+                        "is_pinned": preset_id in pinned,
+                        "last_used_at": None,
+                    }
                 favorite.append(preset_id)
             elif not update["is_favorite"] and preset_id in favorite:
                 favorite.remove(preset_id)
@@ -200,6 +235,8 @@ class PersonaPresetStorage:
         skip: int = 0,
         limit: int = 100,
     ) -> list[dict[str, Any]]:
+        skip = max(int(skip or 0), 0)
+        limit = min(max(int(limit or 1), 1), PERSONA_PRESET_LIST_LIMIT)
         query = self._build_visible_query(
             user_id=user_id,
             include_admin=include_admin,
@@ -224,11 +261,31 @@ class PersonaPresetStorage:
                 return []
             query["_id"] = {"$in": object_ids}
 
-        cursor = self.collection.find(query)
-        docs = [self._to_model_dict(doc) async for doc in cursor]
-        await self._apply_user_preferences(user_id, docs)
-        docs.sort(key=self._preference_sort_key)
-        return docs[skip : skip + limit]
+        pref = await self._get_user_preset_preference(user_id)
+        pinned_ids = pref["pinned"]
+        favorite_ids = pref["favorite"]
+        pipeline: list[dict[str, Any]] = [
+            {"$match": query},
+            {
+                "$addFields": {
+                    "is_pinned": {"$in": [{"$toString": "$_id"}, pinned_ids]},
+                    "is_favorite": {"$in": [{"$toString": "$_id"}, favorite_ids]},
+                    "last_used_at": None,
+                }
+            },
+            {
+                "$sort": {
+                    "is_pinned": -1,
+                    "is_favorite": -1,
+                    "updated_at": -1,
+                    "created_at": -1,
+                    "usage_count": -1,
+                }
+            },
+            {"$skip": skip},
+            {"$limit": limit},
+        ]
+        return [self._to_model_dict(doc) async for doc in self.collection.aggregate(pipeline)]
 
     async def count_visible(
         self,

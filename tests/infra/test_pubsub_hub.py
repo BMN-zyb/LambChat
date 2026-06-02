@@ -129,6 +129,148 @@ async def test_hub_dispatches_message_only_to_matching_channel_handlers(
 
 
 @pytest.mark.asyncio
+async def test_slow_async_handler_does_not_block_later_pubsub_messages(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_redis = FakeRedisClient()
+    monkeypatch.setattr(
+        "src.infra.pubsub_hub.create_redis_client",
+        lambda **kwargs: fake_redis,
+    )
+
+    hub = RedisPubSubHub()
+    release_slow_handler = asyncio.Event()
+    fast_handled = asyncio.Event()
+    received: list[str] = []
+
+    async def slow_handler(message: dict) -> None:
+        received.append(f"slow:{message['data']}")
+        await release_slow_handler.wait()
+
+    async def fast_handler(message: dict) -> None:
+        received.append(f"fast:{message['data']}")
+        fast_handled.set()
+
+    hub.subscribe("task:cancel", slow_handler)
+    hub.subscribe("settings:changed", fast_handler)
+
+    await hub.start()
+    pubsub = fake_redis.pubsubs[0]
+    await pubsub.subscribed_event.wait()
+
+    await pubsub.push({"type": "message", "channel": "task:cancel", "data": "slow"})
+    await asyncio.sleep(0)
+    await pubsub.push({"type": "message", "channel": "settings:changed", "data": "fast"})
+
+    await asyncio.wait_for(fast_handled.wait(), timeout=1)
+    assert received == ["slow:slow", "fast:fast"]
+
+    release_slow_handler.set()
+    await hub.stop()
+
+
+@pytest.mark.asyncio
+async def test_hub_applies_backpressure_to_handler_tasks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_redis = FakeRedisClient()
+    monkeypatch.setattr(
+        "src.infra.pubsub_hub.create_redis_client",
+        lambda **kwargs: fake_redis,
+    )
+
+    hub = RedisPubSubHub(max_handler_tasks=1)
+    started = 0
+    release_handler = asyncio.Event()
+
+    async def slow_handler(_: dict) -> None:
+        nonlocal started
+        started += 1
+        await release_handler.wait()
+
+    hub.subscribe("task:cancel", slow_handler)
+
+    await hub.start()
+    pubsub = fake_redis.pubsubs[0]
+    await pubsub.subscribed_event.wait()
+
+    await pubsub.push({"type": "message", "channel": "task:cancel", "data": "one"})
+    await pubsub.push({"type": "message", "channel": "task:cancel", "data": "two"})
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    assert started == 1
+    assert len(hub._handler_tasks) == 1
+
+    async def _second_handler_started() -> bool:
+        return started == 2
+
+    release_handler.set()
+    await _wait_until(_second_handler_started)
+    await hub.stop()
+
+
+@pytest.mark.asyncio
+async def test_hub_drops_oversized_messages_before_handler_fanout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_redis = FakeRedisClient()
+    monkeypatch.setattr(
+        "src.infra.pubsub_hub.create_redis_client",
+        lambda **kwargs: fake_redis,
+    )
+
+    hub = RedisPubSubHub(max_message_bytes=4)
+    received: list[str] = []
+
+    async def handler(message: dict) -> None:
+        received.append(message["data"])
+
+    hub.subscribe("settings:changed", handler)
+
+    await hub.start()
+    pubsub = fake_redis.pubsubs[0]
+    await pubsub.subscribed_event.wait()
+
+    await pubsub.push({"type": "message", "channel": "settings:changed", "data": "too-large"})
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    assert received == []
+    assert len(hub._handler_tasks) == 0
+
+    await hub.stop()
+
+
+@pytest.mark.asyncio
+async def test_hub_coalesces_resubscribe_poke_tasks() -> None:
+    hub = RedisPubSubHub()
+    release_poke = asyncio.Event()
+    started = 0
+
+    async def slow_poke() -> None:
+        nonlocal started
+        started += 1
+        await release_poke.wait()
+
+    async def noop(_: dict) -> None:
+        return None
+
+    hub._running = True
+    hub._poke_listener = slow_poke  # type: ignore[method-assign]
+
+    for index in range(5):
+        hub.subscribe(f"channel:{index}", noop)
+
+    await asyncio.sleep(0)
+
+    assert started == 1
+
+    release_poke.set()
+    await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
 async def test_hub_resubscribes_without_logging_error_for_intentional_reconnect(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,

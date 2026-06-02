@@ -7,7 +7,7 @@ Skills 加载模块
 from typing import Any, Dict, List, Optional, TypedDict
 
 from src.infra.logging import get_logger
-from src.infra.skill.binary import parse_binary_ref
+from src.infra.skill.binary import parse_binary_ref_async
 from src.kernel.config import settings
 
 logger = get_logger(__name__)
@@ -76,7 +76,7 @@ async def load_skill_files(user_id: Optional[str]) -> SkillLoadResult:
                 if skill_files:
                     for file_name, file_content in skill_files.items():
                         # 跳过二进制文件引用（它们存储在 S3，不适合作为文本加载）
-                        if parse_binary_ref(file_content):
+                        if await parse_binary_ref_async(file_content):
                             continue
                         file_path = f"/{skill_name}/{file_name}"
                         result["files"][file_path] = create_file_data(file_content)

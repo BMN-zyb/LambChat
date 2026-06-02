@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, Optional, Set
 
 from langchain_core.tools import BaseTool
 
+from src.infra.async_utils import run_blocking_io
 from src.infra.logging import get_logger
 from src.infra.pubsub_hub import get_pubsub_hub
 from src.infra.storage.redis import get_redis_client
@@ -47,6 +48,7 @@ GLOBAL_CACHE_TTL = 900
 
 # 最大缓存条目数（防止内存泄漏）
 MAX_GLOBAL_ENTRIES = 100
+DEFAULT_INIT_WAIT_SECONDS = 5
 
 # Redis 键前缀
 LOCK_KEY_PREFIX = "mcp_init_lock:"
@@ -62,6 +64,14 @@ _INSTANCE_ID = str(uuid.uuid4())[:8]
 RELEASE_LOCK_SCRIPT = """
 if redis.call("get", KEYS[1]) == ARGV[1] then
     return redis.call("del", KEYS[1])
+else
+    return 0
+end
+"""
+
+RENEW_LOCK_SCRIPT = """
+if redis.call("get", KEYS[1]) == ARGV[1] then
+    return redis.call("expire", KEYS[1], ARGV[2])
 else
     return 0
 end
@@ -104,7 +114,7 @@ class MCPGlobalCachePubSub:
 
     async def _handle_message(self, message: dict[str, Any]) -> None:
         try:
-            data = json.loads(message["data"])
+            data = await run_blocking_io(json.loads, message["data"])
             if data.get("instance_id") == self._instance_id:
                 return
 
@@ -168,6 +178,22 @@ def _get_global_cache_ttl() -> int:
 
 def _get_max_global_entries() -> int:
     return max(int(getattr(settings, "MCP_GLOBAL_MAX_ENTRIES", MAX_GLOBAL_ENTRIES) or 0), 1)
+
+
+def _get_global_warmup_max_users() -> int:
+    value = getattr(settings, "MCP_GLOBAL_WARMUP_MAX_USERS", 100)
+    try:
+        return max(1, int(value))
+    except (TypeError, ValueError):
+        return 100
+
+
+def _get_global_init_wait_seconds() -> int:
+    value = getattr(settings, "MCP_GLOBAL_INIT_WAIT_SECONDS", DEFAULT_INIT_WAIT_SECONDS)
+    try:
+        return max(1, int(value))
+    except (TypeError, ValueError):
+        return DEFAULT_INIT_WAIT_SECONDS
 
 
 def _cleanup_orphan_locks() -> int:
@@ -257,6 +283,40 @@ async def release_distributed_lock(lock_key: str, lock_value: str) -> bool:
     except Exception as e:
         logger.warning(f"[Global MCP] Failed to release lock {lock_key}: {e}")
         return False
+
+
+async def renew_distributed_lock(lock_key: str, lock_value: str, ttl: int) -> bool:
+    """Renew a Redis lock only if this instance still owns it."""
+    try:
+        redis_client = get_redis_client()
+        result = redis_client.eval(RENEW_LOCK_SCRIPT, 1, lock_key, lock_value, int(ttl))
+        if hasattr(result, "__await__"):
+            result = await result
+        return int(result) == 1  # type: ignore[misc]
+    except Exception as e:
+        logger.warning(f"[Global MCP] Failed to renew lock {lock_key}: {e}")
+        return False
+
+
+def _get_lock_renew_interval(ttl: int) -> float:
+    return max(1.0, min(float(ttl) / 3.0, 10.0))
+
+
+async def _renew_lock_until_stopped(
+    lock_key: str,
+    lock_value: str,
+    ttl: int,
+    stop_event: asyncio.Event,
+) -> None:
+    interval = _get_lock_renew_interval(ttl)
+    while True:
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=interval)
+            return
+        except asyncio.TimeoutError:
+            if not await renew_distributed_lock(lock_key, lock_value, ttl):
+                logger.warning("[Global MCP] Stopped renewing lock no longer owned: %s", lock_key)
+                return
 
 
 async def check_init_done(user_id: str) -> bool:
@@ -398,9 +458,15 @@ async def get_global_mcp_tools(
                 f"[Global MCP] Waiting for other instance (lock held by someone else): {user_id}"
             )
 
-            # 等待完成标记（最多 30 秒）
-            for attempt in range(30):
-                logger.info(f"[Global MCP] Waiting... attempt {attempt + 1}/30 for {user_id}")
+            max_wait_seconds = _get_global_init_wait_seconds()
+            # 等待完成标记；上限可配置，避免请求路径长期占用协程。
+            for attempt in range(max_wait_seconds):
+                logger.info(
+                    "[Global MCP] Waiting... attempt %s/%s for %s",
+                    attempt + 1,
+                    max_wait_seconds,
+                    user_id,
+                )
                 await asyncio.sleep(1)
 
                 # 检查本实例是否已有缓存（可能通过其他协程获取）
@@ -428,6 +494,20 @@ async def get_global_mcp_tools(
 
             # 超时或未获取到缓存，尝试初始化（降级）
             logger.warning(f"[Global MCP] Timeout waiting, creating new: {user_id}")
+
+        renew_stop_event: asyncio.Event | None = None
+        renew_task: asyncio.Task | None = None
+        if lock_acquired and lock_value:
+            renew_stop_event = asyncio.Event()
+            renew_task = asyncio.create_task(
+                _renew_lock_until_stopped(
+                    lock_key,
+                    lock_value,
+                    DISTRIBUTED_LOCK_TTL,
+                    renew_stop_event,
+                )
+            )
+            _track_background_task(renew_task)
 
         try:
             # 5. 再次检查（triple-check）
@@ -470,6 +550,13 @@ async def get_global_mcp_tools(
             return tools, manager
 
         finally:
+            if renew_stop_event is not None:
+                renew_stop_event.set()
+            if renew_task is not None:
+                try:
+                    await renew_task
+                except Exception:
+                    pass
             # 10. 释放 Redis 锁（如果获取了）
             if lock_acquired and lock_value:
                 await release_distributed_lock(lock_key, lock_value)
@@ -478,12 +565,13 @@ async def get_global_mcp_tools(
 async def _publish_mcp_cache_invalidation(scope: str, *, user_id: str | None = None) -> None:
     try:
         redis_client = get_redis_client()
-        payload = json.dumps(
+        payload = await run_blocking_io(
+            json.dumps,
             {
                 "instance_id": get_mcp_cache_pubsub().instance_id,
                 "scope": scope,
                 "user_id": user_id,
-            }
+            },
         )
         await redis_client.publish(MCP_CACHE_INVALIDATE_CHANNEL, payload)
     except Exception as e:
@@ -557,6 +645,14 @@ async def warmup_global_cache(user_ids: list[str]) -> None:
     if not user_ids:
         logger.info("[Global MCP] No users to warm up, skipping")
         return
+    max_users = _get_global_warmup_max_users()
+    if len(user_ids) > max_users:
+        logger.warning(
+            "[Global MCP] Warmup requested for %s users; only warming first %s",
+            len(user_ids),
+            max_users,
+        )
+        user_ids = user_ids[:max_users]
 
     logger.info(f"[Global MCP] Warming up cache for {len(user_ids)} users")
     start_time = time.time()
@@ -568,14 +664,24 @@ async def warmup_global_cache(user_ids: list[str]) -> None:
         except Exception as e:
             logger.warning(f"[Global MCP] Warmup failed for user {user_id}: {e}")
 
-    # 并行预热（限制并发数）
-    semaphore = asyncio.Semaphore(5)  # 最多同时预热 5 个用户
+    next_index = 0
+    lock = asyncio.Lock()
+    worker_count = min(
+        max(1, int(getattr(settings, "MCP_GLOBAL_WARMUP_CONCURRENCY", 5) or 1)),
+        len(user_ids),
+    )
 
-    async def _warmup_with_limit(user_id: str):
-        async with semaphore:
+    async def _warmup_worker() -> None:
+        nonlocal next_index
+        while True:
+            async with lock:
+                if next_index >= len(user_ids):
+                    return
+                user_id = user_ids[next_index]
+                next_index += 1
             await _warmup_user(user_id)
 
-    await asyncio.gather(*[_warmup_with_limit(uid) for uid in user_ids])
+    await asyncio.gather(*(_warmup_worker() for _ in range(worker_count)))
 
     elapsed = time.time() - start_time
     logger.info(f"[Global MCP] Warmup complete in {elapsed:.2f}s for {len(user_ids)} users")
@@ -608,17 +714,20 @@ async def warmup_active_users_mcp(limit: int = 10) -> None:
         db = client[settings.MONGODB_DB]
         users_collection = db["users"]
 
-        # 查询所有用户（去重）
+        effective_limit = limit
+        if effective_limit <= 0:
+            effective_limit = _get_global_warmup_max_users()
+
+        # 查询用户（去重）
         pipeline: list[dict[str, Any]] = [
             {"$group": {"_id": "$_id"}},
+            {"$limit": effective_limit},
         ]
 
-        if limit > 0:
-            pipeline.append({"$limit": limit})
-
         cursor = users_collection.aggregate(pipeline)
-        user_docs = await cursor.to_list(length=limit if limit > 0 else None)
-        user_ids = [str(doc["_id"]) for doc in user_docs]
+        user_ids: list[str] = []
+        async for doc in cursor:
+            user_ids.append(str(doc["_id"]))
 
         if not user_ids:
             logger.info("[Global MCP] No users found, skipping warmup")

@@ -16,13 +16,17 @@ from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field
 
+from src.infra.async_utils import run_blocking_io
 from src.infra.logging import get_logger
-from src.infra.tool.tool_search import search_tools_with_keywords
+from src.infra.tool.tool_search import ToolSearchResult, search_tools_with_keywords
 
 if TYPE_CHECKING:
     from src.infra.tool.deferred_manager import DeferredToolManager
 
 logger = get_logger(__name__)
+
+TOOL_SEARCH_SCHEMA_MAX_ARRAY_ITEMS = 200
+TOOL_SEARCH_SCHEMA_MAX_STRING_CHARS = 2000
 
 
 class ToolSearchInput(BaseModel):
@@ -101,23 +105,13 @@ class ToolSearchTool(BaseTool):
         if not all_tools:
             return "No deferred tools are available for search."
 
-        # 优先返回未加载工具，避免较小的 result limit 被已可用工具占满。
-        undiscovered_results = search_tools_with_keywords(
-            query=query,
-            tools=undiscovered,
-            max_results=self._search_limit,
+        results, parts = await run_blocking_io(
+            _search_and_format_tool_results,
+            query,
+            discovered,
+            undiscovered,
+            self._search_limit,
         )
-        remaining_slots = max(self._search_limit - len(undiscovered_results), 0)
-        discovered_results = (
-            search_tools_with_keywords(
-                query=query,
-                tools=discovered,
-                max_results=remaining_slots,
-            )
-            if remaining_slots > 0
-            else []
-        )
-        results = undiscovered_results + discovered_results
 
         if not results:
             return (
@@ -130,35 +124,6 @@ class ToolSearchTool(BaseTool):
         newly_discovered = self._manager.discover_tools(matched_names)
         newly_discovered_names = {tool.name for tool in newly_discovered}
         already_available_count = len(results) - len(newly_discovered)
-
-        # 构建返回内容
-        parts: list[str] = []
-        for result in results:
-            tool = result.tool
-            # 获取参数 schema
-            schema: dict[str, Any] = {}
-            args_schema = getattr(tool, "args_schema", None)
-            if args_schema is not None:
-                try:
-                    schema = args_schema.model_json_schema()
-                except Exception:
-                    pass
-
-            props = schema.get("properties", {})
-            required = schema.get("required", [])
-
-            schema_str = json.dumps(
-                {"properties": props, "required": required},
-                ensure_ascii=False,
-                indent=2,
-            )
-
-            parts.append(
-                f"## {result.name} (score: {result.score:.1f})\n"
-                f"Status: {'newly loaded' if result.name in newly_discovered_names else 'already available'}\n"
-                f"Description: {result.description[:300]}\n"
-                f"Parameters:\n```json\n{schema_str}\n```"
-            )
 
         status = ""
         if newly_discovered and already_available_count:
@@ -175,4 +140,85 @@ class ToolSearchTool(BaseTool):
             f"Found {len(results)} tool(s){status}. These tools are now available for use. "
             "If the tool you need appears below, call it directly next.\n\n"
         )
-        return header + "\n\n---\n\n".join(parts)
+        formatted_parts = [
+            part.replace(
+                "__TOOL_STATUS__",
+                "newly loaded" if result.name in newly_discovered_names else "already available",
+            )
+            for result, part in zip(results, parts)
+        ]
+        return header + "\n\n---\n\n".join(formatted_parts)
+
+
+def _search_and_format_tool_results(
+    query: str,
+    discovered: list[BaseTool],
+    undiscovered: list[BaseTool],
+    search_limit: int,
+) -> tuple[list[ToolSearchResult], list[str]]:
+    # 优先返回未加载工具，避免较小的 result limit 被已可用工具占满。
+    undiscovered_results = search_tools_with_keywords(
+        query=query,
+        tools=undiscovered,
+        max_results=search_limit,
+    )
+    remaining_slots = max(search_limit - len(undiscovered_results), 0)
+    discovered_results = (
+        search_tools_with_keywords(
+            query=query,
+            tools=discovered,
+            max_results=remaining_slots,
+        )
+        if remaining_slots > 0
+        else []
+    )
+    results = undiscovered_results + discovered_results
+    return results, [_format_tool_result(result) for result in results]
+
+
+def _format_tool_result(result: ToolSearchResult) -> str:
+    tool = result.tool
+    schema: dict[str, Any] = {}
+    args_schema = getattr(tool, "args_schema", None)
+    if args_schema is not None:
+        try:
+            schema = args_schema.model_json_schema()
+        except Exception:
+            pass
+
+    props = _compact_schema_value(schema.get("properties", {}))
+    required = _compact_schema_value(schema.get("required", []))
+
+    schema_str = json.dumps(
+        {"properties": props, "required": required},
+        ensure_ascii=False,
+        indent=2,
+    )
+
+    return (
+        f"## {result.name} (score: {result.score:.1f})\n"
+        "Status: __TOOL_STATUS__\n"
+        f"Description: {result.description[:300]}\n"
+        f"Parameters:\n```json\n{schema_str}\n```"
+    )
+
+
+def _compact_schema_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: _compact_schema_value(child) for key, child in value.items()}
+    if isinstance(value, list):
+        if len(value) <= TOOL_SEARCH_SCHEMA_MAX_ARRAY_ITEMS:
+            return [_compact_schema_value(child) for child in value]
+        omitted = len(value) - TOOL_SEARCH_SCHEMA_MAX_ARRAY_ITEMS
+        compacted = [
+            _compact_schema_value(child) for child in value[:TOOL_SEARCH_SCHEMA_MAX_ARRAY_ITEMS]
+        ]
+        compacted.append(f"... schema truncated, {omitted} more item(s) omitted")
+        return compacted
+    if isinstance(value, str) and len(value) > TOOL_SEARCH_SCHEMA_MAX_STRING_CHARS:
+        omitted = len(value) - TOOL_SEARCH_SCHEMA_MAX_STRING_CHARS
+        return (
+            value[:TOOL_SEARCH_SCHEMA_MAX_STRING_CHARS]
+            + f"... schema truncated, {omitted} more character(s) omitted"
+        )
+    return value

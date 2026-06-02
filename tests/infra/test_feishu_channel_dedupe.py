@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import asyncio
+import json
 import threading
 from types import ModuleType, SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -181,6 +184,85 @@ async def test_message_metadata_includes_received_reaction_id(
 
 
 @pytest.mark.asyncio
+async def test_on_message_offloads_content_json_parse(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    channel = _build_channel()
+    captured: dict[str, object] = {}
+    calls: list[tuple[Any, tuple[Any, ...]]] = []
+
+    async def _mark_processed(_message_id: str) -> bool:
+        return True
+
+    async def _add_reaction(_message_id: str, _emoji: str) -> str:
+        return "reaction-1"
+
+    async def _handle_message(**kwargs):
+        captured.update(kwargs)
+
+    async def _fake_run_blocking_io(func, /, *args, **kwargs):
+        calls.append((func, args))
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(channel, "_mark_message_processed", _mark_processed)
+    monkeypatch.setattr(channel, "_add_reaction", _add_reaction)
+    monkeypatch.setattr(channel, "_handle_message", _handle_message)
+    monkeypatch.setattr("src.infra.channel.feishu.channel.run_blocking_io", _fake_run_blocking_io)
+
+    await channel._on_message(
+        _build_message_event(
+            message_type="text",
+            content='{"text":"hello"}',
+        )
+    )
+
+    assert captured["content"] == "hello"
+    assert calls == [(json.loads, ('{"text":"hello"}',))]
+
+
+@pytest.mark.asyncio
+async def test_on_message_offloads_share_card_content_extraction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.infra.channel.feishu import channel as feishu_channel
+
+    channel = _build_channel()
+    captured: dict[str, object] = {}
+    calls: list[tuple[Any, tuple[Any, ...]]] = []
+
+    async def _mark_processed(_message_id: str) -> bool:
+        return True
+
+    async def _add_reaction(_message_id: str, _emoji: str) -> str:
+        return "reaction-1"
+
+    async def _handle_message(**kwargs):
+        captured.update(kwargs)
+
+    async def _fake_run_blocking_io(func, /, *args, **kwargs):
+        calls.append((func, args))
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(channel, "_mark_message_processed", _mark_processed)
+    monkeypatch.setattr(channel, "_add_reaction", _add_reaction)
+    monkeypatch.setattr(channel, "_handle_message", _handle_message)
+    monkeypatch.setattr(feishu_channel, "run_blocking_io", _fake_run_blocking_io)
+
+    await channel._on_message(
+        _build_message_event(
+            message_type="interactive",
+            content='{"title":"hello card"}',
+        )
+    )
+
+    assert captured["content"] == "title: hello card"
+    assert calls == [
+        (json.loads, ('{"title":"hello card"}',)),
+        (feishu_channel.extract_share_card_content, ({"title": "hello card"}, "interactive")),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_start_imports_lark_sdk_off_event_loop(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -203,6 +285,50 @@ async def test_start_imports_lark_sdk_off_event_loop(
     assert await channel.start() is True
     assert import_threads
     assert import_threads[0] != main_thread_id
+
+
+@pytest.mark.asyncio
+async def test_stop_waits_for_websocket_futures_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    channel = _build_channel()
+    ws_cleanup_finished = False
+    health_cleanup_finished = False
+    ws_started = asyncio.Event()
+    health_started = asyncio.Event()
+
+    async def _ws_forever() -> None:
+        nonlocal ws_cleanup_finished
+        ws_started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            ws_cleanup_finished = True
+
+    async def _health_forever() -> None:
+        nonlocal health_cleanup_finished
+        health_started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            health_cleanup_finished = True
+
+    async def _close_http_client() -> None:
+        return None
+
+    monkeypatch.setattr(channel, "close_feishu_http_client", _close_http_client)
+
+    channel._ws_future = asyncio.create_task(_ws_forever())
+    channel._health_check_future = asyncio.create_task(_health_forever())
+    await ws_started.wait()
+    await health_started.wait()
+
+    await channel.stop()
+
+    assert channel._ws_future.cancelled() is True
+    assert channel._health_check_future.cancelled() is True
+    assert ws_cleanup_finished is True
+    assert health_cleanup_finished is True
 
 
 @pytest.mark.asyncio

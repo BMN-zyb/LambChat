@@ -25,6 +25,7 @@ Event Merger - 事件合并器
 import asyncio
 from typing import Any, Dict, List, Optional
 
+from src.infra.async_utils import run_blocking_io
 from src.infra.logging import get_logger
 from src.infra.storage.redis import create_redis_client
 from src.infra.utils.datetime import utc_now
@@ -68,6 +69,10 @@ def _get_merge_batch_size() -> int:
 
 def _get_merge_concurrency() -> int:
     return max(int(getattr(settings, "EVENT_MERGE_CONCURRENCY", _MERGE_CONCURRENCY) or 0), 1)
+
+
+def _get_merge_max_events_per_trace() -> int:
+    return max(int(getattr(settings, "EVENT_MERGE_MAX_EVENTS_PER_TRACE", 5000) or 0), 1)
 
 
 class EventMerger:
@@ -238,35 +243,89 @@ class EventMerger:
             # 查询最近完成的 traces（未合并的）
             # 使用投影减少数据传输
             batch_size = _get_merge_batch_size()
+            max_events_per_trace = _get_merge_max_events_per_trace()
             cursor = collection.find(
                 {
                     "status": {"$ne": "running"},
                     "metadata.merged": {"$ne": True},
+                    "$or": [
+                        {"event_count": {"$lte": max_events_per_trace}},
+                        {"event_count": {"$exists": False}},
+                    ],
                 },
-                {"trace_id": 1, "events": 1},
+                {"trace_id": 1, "events": 1, "event_count": 1},
             ).limit(batch_size)
 
-            traces = await cursor.to_list(length=batch_size)
+            trace_batch: list[dict[str, Any]] = []
+            total_found = 0
+            total_modified = 0
+            total_merged = 0
+            total_skipped = 0
+            total_errors = 0
+            process_batch_size = _get_merge_concurrency()
 
-            if not traces:
+            async for trace in cursor:
+                total_found += 1
+                trace_batch.append(trace)
+                if len(trace_batch) >= process_batch_size:
+                    modified, merged, skipped, errors = await self._merge_trace_batch(
+                        collection,
+                        trace_batch,
+                        concurrency=process_batch_size,
+                    )
+                    total_modified += modified
+                    total_merged += merged
+                    total_skipped += skipped
+                    total_errors += errors
+                    trace_batch.clear()
+                    await asyncio.sleep(0)
+
+            if trace_batch:
+                modified, merged, skipped, errors = await self._merge_trace_batch(
+                    collection,
+                    trace_batch,
+                    concurrency=process_batch_size,
+                )
+                total_modified += modified
+                total_merged += merged
+                total_skipped += skipped
+                total_errors += errors
+                trace_batch.clear()
+
+            if not total_found:
                 logger.debug("No traces to merge")
                 return
 
-            logger.info(f"Found {len(traces)} traces to merge")
+            logger.info(
+                "Merge batch completed: %s found, %s modified, %s merged, %s skipped, %s failed",
+                total_found,
+                total_modified,
+                total_merged,
+                total_skipped,
+                total_errors,
+            )
 
-            # 并发合并事件（纯 CPU，不涉及 IO）
-            sem = asyncio.Semaphore(_get_merge_concurrency())
+        except Exception as e:
+            logger.error(f"Failed to merge completed traces: {e}", exc_info=True)
 
-            async def _process(trace):
-                async with sem:
-                    trace_id = trace.get("trace_id")
-                    events = trace.get("events", [])
-                    if not events:
-                        return (trace_id, [], [])
-                    return (trace_id, events, self._merge_events(events))
+    async def _merge_trace_batch(
+        self,
+        collection: Any,
+        traces: list[dict[str, Any]],
+        *,
+        concurrency: int,
+    ) -> tuple[int, int, int, int]:
+        if not traces:
+            return 0, 0, 0, 0
 
-            results = await asyncio.gather(*[_process(t) for t in traces], return_exceptions=True)
+        # 并发合并事件（纯 CPU，不涉及 IO），但只创建固定数量 worker。
+        # 避免 backlog 较大时为整批 trace 一次性创建大量 coroutine。
+        results = await self._process_trace_merges_bounded(
+            traces,
+            concurrency=concurrency,
+        )
 
+        try:
             # 收集 bulk_write 操作
             from pymongo import UpdateOne
 
@@ -303,13 +362,45 @@ class EventMerger:
 
             if operations:
                 bulk_result = await collection.bulk_write(operations, ordered=False)
-                logger.info(
-                    f"Merge batch completed: {bulk_result.modified_count} modified, "
-                    f"{merged_count} merged, {skipped_count} skipped, {error_count} failed"
-                )
-
+                return bulk_result.modified_count, merged_count, skipped_count, error_count
+            return 0, merged_count, skipped_count, error_count
         except Exception as e:
-            logger.error(f"Failed to merge completed traces: {e}", exc_info=True)
+            logger.error(f"Failed to write merged traces: {e}", exc_info=True)
+            return 0, 0, 0, len(traces)
+
+    async def _process_trace_merges_bounded(
+        self,
+        traces: list[dict[str, Any]],
+        *,
+        concurrency: int,
+    ) -> list[Any]:
+        results: list[Any] = []
+        next_index = 0
+        lock = asyncio.Lock()
+        worker_count = min(max(concurrency, 1), len(traces))
+
+        async def _worker() -> None:
+            nonlocal next_index
+            while True:
+                async with lock:
+                    if next_index >= len(traces):
+                        return
+                    trace = traces[next_index]
+                    next_index += 1
+                try:
+                    trace_id = trace.get("trace_id")
+                    events = trace.get("events", [])
+                    if not events:
+                        results.append((trace_id, [], []))
+                        continue
+                    merged_events = await run_blocking_io(self._merge_events, events)
+                    results.append((trace_id, events, merged_events))
+                except Exception as exc:
+                    results.append(exc)
+
+        if worker_count:
+            await asyncio.gather(*(_worker() for _ in range(worker_count)))
+        return results
 
     def _merge_events(self, events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """

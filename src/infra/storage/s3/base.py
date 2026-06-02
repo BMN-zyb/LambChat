@@ -8,7 +8,10 @@ from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from typing import BinaryIO, Optional
 
+from src.infra.async_utils import run_blocking_io
 from src.infra.storage.s3.types import UploadResult
+
+LIST_OBJECTS_LIMIT = 1000
 
 
 class S3StorageBackend(ABC):
@@ -43,21 +46,37 @@ class S3StorageBackend(ABC):
 
     async def get_size(self, key: str) -> int:
         """Get file size in bytes. Override for efficient stat."""
-        data = await self.download(key)
-        return len(data)
+        raise NotImplementedError("S3 backends must implement get_size without downloading bytes")
 
     async def download_range(self, key: str, start: int, end: int) -> bytes:
         """Download a byte range [start, end]. Override for efficient range reads."""
-        data = await self.download(key)
-        return data[start : end + 1]
+        raise NotImplementedError(
+            "S3 backends must implement download_range without downloading full objects"
+        )
 
     async def download_stream(
         self, key: str, chunk_size: int = 1024 * 1024
     ) -> AsyncIterator[bytes]:
         """Stream download a file in chunks. Override for memory-efficient streaming."""
-        data = await self.download(key)
-        for i in range(0, len(data), chunk_size):
-            yield data[i : i + chunk_size]
+        raise NotImplementedError(
+            "S3 backends must implement download_stream without downloading full objects"
+        )
+        yield b""
+
+    async def download_to_file(
+        self,
+        key: str,
+        file: BinaryIO,
+        *,
+        chunk_size: int = 1024 * 1024,
+    ) -> int:
+        """Download an object into a file-like sink without returning full bytes."""
+        total_size = 0
+        async for chunk in self.download_stream(key, chunk_size=chunk_size):
+            await run_blocking_io(file.write, chunk)
+            total_size += len(chunk)
+        await run_blocking_io(file.seek, 0)
+        return total_size
 
     async def download_range_stream(
         self, key: str, start: int, end: int, chunk_size: int = 256 * 1024

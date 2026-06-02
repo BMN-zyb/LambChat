@@ -23,10 +23,12 @@ Reveal File 工具
 - 使用 asyncio.Lock 防止并发初始化
 """
 
+import inspect
 import json
 import mimetypes
 import os
 import re
+from tempfile import SpooledTemporaryFile
 from typing import Annotated, Any, Literal, Optional
 from urllib.parse import unquote, urlparse
 
@@ -45,6 +47,16 @@ from src.infra.tool.backend_utils import (
 from src.kernel.config import settings
 
 logger = get_logger(__name__)
+
+
+async def _json_dumps_result(data: dict[str, Any]) -> str:
+    return await run_blocking_io(json.dumps, data, ensure_ascii=False)
+
+
+_UPLOAD_SPOOL_MEMORY_LIMIT = 2 * 1024 * 1024
+_LOCAL_REF_RESOLUTION_MAX_BYTES = 2 * 1024 * 1024
+_LOCAL_REF_UPLOAD_LIMIT = 20
+_DEFAULT_REVEAL_FILE_UPLOAD_MAX_BYTES = 50 * 1024 * 1024
 
 # 文件类型分类
 FileCategory = Literal["image", "video", "audio", "document"]
@@ -107,6 +119,65 @@ def _local_filesystem_fallback_enabled() -> bool:
     return bool(getattr(settings, "ENABLE_LOCAL_FILESYSTEM_FALLBACK", True))
 
 
+def _can_resolve_local_filesystem_refs(file_path: str) -> bool:
+    """Only materialize small local text files for best-effort reference rewriting."""
+    try:
+        return os.path.getsize(file_path) <= _LOCAL_REF_RESOLUTION_MAX_BYTES
+    except OSError:
+        return False
+
+
+def _get_local_ref_upload_limit() -> int:
+    return max(int(_LOCAL_REF_UPLOAD_LIMIT), 1)
+
+
+def _get_reveal_file_upload_max_bytes() -> int:
+    configured = getattr(
+        settings,
+        "S3_INTERNAL_UPLOAD_MAX_SIZE",
+        _DEFAULT_REVEAL_FILE_UPLOAD_MAX_BYTES,
+    )
+    return max(int(configured or _DEFAULT_REVEAL_FILE_UPLOAD_MAX_BYTES), 1)
+
+
+def _coerce_file_size(value: Any) -> int | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        size = int(value)
+    except (TypeError, ValueError):
+        return None
+    return size if size >= 0 else None
+
+
+async def _get_backend_file_size(backend: Any, file_path: str) -> int | None:
+    async_method = getattr(backend, "aget_file_size", None)
+    if callable(async_method):
+        try:
+            size = async_method(file_path)
+            if inspect.isawaitable(size):
+                size = await size
+            return _coerce_file_size(size)
+        except Exception as e:
+            logger.debug(f"[reveal_file] aget_file_size failed for {file_path}: {e}")
+
+    sync_method = getattr(backend, "get_file_size", None)
+    if callable(sync_method):
+        try:
+            return _coerce_file_size(await run_blocking_io(sync_method, file_path))
+        except Exception as e:
+            logger.debug(f"[reveal_file] get_file_size failed for {file_path}: {e}")
+
+    private_method = getattr(backend, "_file_size", None)
+    if callable(private_method):
+        try:
+            return _coerce_file_size(await run_blocking_io(private_method, file_path))
+        except Exception as e:
+            logger.debug(f"[reveal_file] _file_size failed for {file_path}: {e}")
+
+    return None
+
+
 async def _get_storage():
     """获取已初始化的 storage 服务（复用 upload 模块的初始化逻辑）"""
     from src.infra.storage.s3.service import get_or_init_storage
@@ -159,12 +230,54 @@ async def _download_file_from_backend(backend: Any, file_path: str) -> Optional[
 async def _read_file_from_filesystem(file_path: str) -> Optional[bytes]:
     """非沙箱模式下的兜底：直接从本地文件系统读取文件内容"""
     try:
-        if os.path.isfile(file_path):
-            return await run_blocking_io(lambda: open(file_path, "rb").read())
+
+        def _read_small_file() -> Optional[bytes]:
+            if not os.path.isfile(file_path):
+                return None
+            if os.path.getsize(file_path) > _LOCAL_REF_RESOLUTION_MAX_BYTES:
+                logger.warning(
+                    "[reveal_file] Skipping filesystem fallback read for large file: %s",
+                    file_path,
+                )
+                return None
+            with open(file_path, "rb") as file:
+                return file.read()
+
+        content = await run_blocking_io(_read_small_file)
+        if content is not None:
+            return content
         logger.debug(f"[reveal_file] File not found on filesystem: {file_path}")
     except Exception as e:
         logger.warning(f"[reveal_file] Failed to read from filesystem: {file_path}: {e}")
     return None
+
+
+def _is_file_path(file_path: str) -> bool:
+    return os.path.isfile(file_path)
+
+
+async def _upload_filesystem_file(
+    file_path: str,
+    storage: Any,
+    filename: str,
+    mime_type: str,
+):
+    """Upload a local file handle directly without materializing it as bytes."""
+
+    def _open_file():
+        return open(file_path, "rb")
+
+    file = await run_blocking_io(_open_file)
+    try:
+        return await storage.upload_file(
+            file=file,
+            folder="revealed_files",
+            filename=filename,
+            content_type=mime_type,
+            skip_size_limit=True,
+        )
+    finally:
+        await run_blocking_io(file.close)
 
 
 # ---------------------------------------------------------------------------
@@ -286,18 +399,38 @@ async def _upload_local_resource(
             and not _is_sandbox_backend(backend)
             and _local_filesystem_fallback_enabled()
         ):
-            content = await _read_file_from_filesystem(abs_path)
+            if not await run_blocking_io(_is_file_path, abs_path):
+                return None
+            res_filename = os.path.basename(abs_path)
+            res_mime = get_mime_type(res_filename)
+            upload_result = await _upload_filesystem_file(
+                abs_path,
+                storage,
+                res_filename,
+                res_mime,
+            )
+            url = f"{base_url}/api/upload/file/{upload_result.key}"
+            logger.info(f"[reveal_file] Uploaded local resource {local_path} -> {url}")
+            return url
         if content is None:
             return None
 
         res_filename = os.path.basename(abs_path)
         res_mime = get_mime_type(res_filename)
-        upload_result = await storage.upload_bytes(
-            data=content,
-            folder="revealed_files",
-            filename=res_filename,
-            content_type=res_mime,
-        )
+        with SpooledTemporaryFile(
+            max_size=_UPLOAD_SPOOL_MEMORY_LIMIT,
+            mode="w+b",
+        ) as spooled:
+            await run_blocking_io(spooled.write, content)
+            del content
+            await run_blocking_io(spooled.seek, 0)
+            upload_result = await storage.upload_file(
+                file=spooled,
+                folder="revealed_files",
+                filename=res_filename,
+                content_type=res_mime,
+                skip_size_limit=True,
+            )
         url = f"{base_url}/api/upload/file/{upload_result.key}"
         logger.info(f"[reveal_file] Uploaded local resource {local_path} -> {url}")
         return url
@@ -345,6 +478,14 @@ async def _resolve_local_references(
 
     if not unique_paths:
         return content
+    upload_limit = _get_local_ref_upload_limit()
+    if len(unique_paths) > upload_limit:
+        logger.warning(
+            "[reveal_file] Found %s local resource references; only uploading first %s",
+            len(unique_paths),
+            upload_limit,
+        )
+        unique_paths = unique_paths[:upload_limit]
 
     logger.info(
         f"[reveal_file] Found {len(unique_paths)} local resource reference(s), "
@@ -425,7 +566,7 @@ async def reveal_file(
                 "source": "remote_url",
             },
         }
-        return json.dumps(remote_result, ensure_ascii=False)
+        return await _json_dumps_result(remote_result)
 
     storage = await _get_storage()
 
@@ -440,10 +581,52 @@ async def reveal_file(
                 "description": description or "",
             },
         }
-        return json.dumps(backend_unavailable_result, ensure_ascii=False)
+        return await _json_dumps_result(backend_unavailable_result)
 
     try:
+        known_size = await _get_backend_file_size(backend, file_path)
+        max_upload_bytes = _get_reveal_file_upload_max_bytes()
+        if known_size is not None and known_size > max_upload_bytes:
+            logger.warning(
+                "[reveal_file] Refusing oversized backend file before download: %s size=%s max=%s",
+                file_path,
+                known_size,
+                max_upload_bytes,
+            )
+            too_large_result = {
+                "type": "file_reveal",
+                "file": {
+                    "path": file_path,
+                    "description": description or "",
+                    "error": "file_too_large",
+                    "size": known_size,
+                    "max_size": max_upload_bytes,
+                },
+            }
+            return await _json_dumps_result(too_large_result)
+
         file_content = await _download_file_from_backend(backend, file_path)
+        use_filesystem_stream = False
+        if file_content is not None and len(file_content) > max_upload_bytes:
+            content_size = len(file_content)
+            del file_content
+            logger.warning(
+                "[reveal_file] Refusing oversized backend file after download: %s size=%s max=%s",
+                file_path,
+                content_size,
+                max_upload_bytes,
+            )
+            too_large_result = {
+                "type": "file_reveal",
+                "file": {
+                    "path": file_path,
+                    "description": description or "",
+                    "error": "file_too_large",
+                    "size": content_size,
+                    "max_size": max_upload_bytes,
+                },
+            }
+            return await _json_dumps_result(too_large_result)
 
         # 非沙箱模式兜底：backend 下载失败时尝试直接读取本地文件系统
         if (
@@ -454,9 +637,9 @@ async def reveal_file(
             logger.info(
                 f"[reveal_file] Backend download failed, trying filesystem fallback for {file_path}"
             )
-            file_content = await _read_file_from_filesystem(file_path)
+            use_filesystem_stream = await run_blocking_io(_is_file_path, file_path)
 
-        if file_content is None:
+        if file_content is None and not use_filesystem_stream:
             logger.error(f"Failed to read file {file_path} from backend")
             missing_file_result = {
                 "type": "file_reveal",
@@ -466,7 +649,7 @@ async def reveal_file(
                     "error": "file_not_found_or_empty",
                 },
             }
-            return json.dumps(missing_file_result, ensure_ascii=False)
+            return await _json_dumps_result(missing_file_result)
 
         filename = _get_filename_from_path(file_path)
         mime_type = get_mime_type(filename)
@@ -476,18 +659,36 @@ async def reveal_file(
         if not base_url:
             logger.warning("[reveal_file] base_url is empty, URL may be incomplete")
 
-        if _needs_local_ref_resolution(filename, mime_type):
+        if _needs_local_ref_resolution(filename, mime_type) and (
+            file_content is not None
+            or not use_filesystem_stream
+            or _can_resolve_local_filesystem_refs(file_path)
+        ):
+            if file_content is None and use_filesystem_stream:
+                file_content = await _read_file_from_filesystem(file_path)
             file_dir = os.path.dirname(file_path)
             file_content = await _resolve_local_references(
                 file_content, file_dir, backend, storage, base_url
             )
+            use_filesystem_stream = False
 
-        upload_result = await storage.upload_bytes(
-            data=file_content,
-            folder="revealed_files",
-            filename=filename,
-            content_type=mime_type,
-        )
+        if use_filesystem_stream:
+            upload_result = await _upload_filesystem_file(file_path, storage, filename, mime_type)
+        else:
+            with SpooledTemporaryFile(
+                max_size=_UPLOAD_SPOOL_MEMORY_LIMIT,
+                mode="w+b",
+            ) as spooled:
+                await run_blocking_io(spooled.write, file_content)
+                del file_content
+                await run_blocking_io(spooled.seek, 0)
+                upload_result = await storage.upload_file(
+                    file=spooled,
+                    folder="revealed_files",
+                    filename=filename,
+                    content_type=mime_type,
+                    skip_size_limit=True,
+                )
 
         file_category = get_file_category(upload_result.content_type or mime_type)
 
@@ -553,7 +754,7 @@ async def reveal_file(
         except Exception as idx_err:
             logger.warning(f"[reveal_file] Failed to index revealed file: {idx_err}")
 
-        return json.dumps(reveal_result, ensure_ascii=False)
+        return await _json_dumps_result(reveal_result)
 
     except Exception as e:
         logger.error(f"Error processing file {file_path}: {e}")
@@ -565,7 +766,7 @@ async def reveal_file(
                 "error": str(e),
             },
         }
-        return json.dumps(error_result, ensure_ascii=False)
+        return await _json_dumps_result(error_result)
 
 
 def get_reveal_file_tool() -> BaseTool:

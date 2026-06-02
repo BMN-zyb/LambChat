@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Annotated, Any
 
 from langchain_core.tools import BaseTool, InjectedToolArg
 
+from src.infra.async_utils import run_blocking_io
 from src.infra.persona_preset.manager import PersonaPresetManager
 from src.infra.role.storage import RoleStorage
 from src.infra.tool.backend_utils import get_user_id_from_runtime
@@ -39,8 +40,8 @@ else:
 from langchain.tools import tool  # noqa: E402
 
 
-def _json(data: dict[str, Any]) -> str:
-    return json.dumps(data, ensure_ascii=False, default=str)
+async def _json_dumps_result(data: dict[str, Any]) -> str:
+    return await run_blocking_io(json.dumps, data, ensure_ascii=False, default=str)
 
 
 def _get_user_id(runtime: ToolRuntime) -> str | None:
@@ -117,17 +118,19 @@ async def create_persona_preset(
     role here first, then pass the returned preset.id into create_agent_team."""
     user_id = _get_user_id(runtime)
     if not user_id:
-        return _json({"error": "No user context available"})
+        return await _json_dumps_result({"error": "No user context available"})
 
     user = await _resolve_user(user_id)
     if not user or "persona_preset:write" not in set(user.permissions):
-        return _json({"error": "Permission denied: persona_preset:write required"})
+        return await _json_dumps_result(
+            {"error": "Permission denied: persona_preset:write required"}
+        )
 
     try:
         vis = PersonaPresetVisibility(visibility)
         st = PersonaPresetStatus(status)
     except ValueError:
-        return _json({"error": "Invalid visibility or status value"})
+        return await _json_dumps_result({"error": "Invalid visibility or status value"})
 
     manager = PersonaPresetManager()
     try:
@@ -147,8 +150,8 @@ async def create_persona_preset(
             is_admin=_is_admin(user),
         )
     except Exception as e:
-        return _json({"error": f"Failed to create preset: {e}"})
-    return _json(
+        return await _json_dumps_result({"error": f"Failed to create preset: {e}"})
+    return await _json_dumps_result(
         {
             "success": True,
             "action": "created",
@@ -190,34 +193,40 @@ async def update_persona_preset(
     When updating system_prompt, rewrite the full prompt (partial edits are not supported)."""
     user_id = _get_user_id(runtime)
     if not user_id:
-        return _json({"error": "No user context available"})
+        return await _json_dumps_result({"error": "No user context available"})
 
     user = await _resolve_user(user_id)
     if not user or "persona_preset:write" not in set(user.permissions):
-        return _json({"error": "Permission denied: persona_preset:write required"})
+        return await _json_dumps_result(
+            {"error": "Permission denied: persona_preset:write required"}
+        )
 
     if scope is not None:
         try:
             PersonaPresetScope(scope)
         except ValueError:
-            return _json({"error": "Invalid scope value. Must be 'user' or 'global'"})
+            return await _json_dumps_result(
+                {"error": "Invalid scope value. Must be 'user' or 'global'"}
+            )
     if visibility is not None:
         try:
             PersonaPresetVisibility(visibility)
         except ValueError:
-            return _json({"error": "Invalid visibility value"})
+            return await _json_dumps_result({"error": "Invalid visibility value"})
     if status is not None:
         try:
             PersonaPresetStatus(status)
         except ValueError:
-            return _json({"error": "Invalid status value"})
+            return await _json_dumps_result({"error": "Invalid status value"})
 
     manager = PersonaPresetManager()
 
     resolved_preset_id = preset_id
     if not resolved_preset_id:
         if not current_name or not current_name.strip():
-            return _json({"error": "Either preset_id or current_name is required"})
+            return await _json_dumps_result(
+                {"error": "Either preset_id or current_name is required"}
+            )
         presets = await manager.list_presets(
             user_id=user_id,
             is_admin=_is_admin(user),
@@ -229,9 +238,11 @@ async def update_persona_preset(
         if len(exact_matches) == 1:
             resolved_preset_id = exact_matches[0].id
         elif len(exact_matches) > 1:
-            return _json({"error": f"Multiple persona presets named '{current_name}' were found"})
+            return await _json_dumps_result(
+                {"error": f"Multiple persona presets named '{current_name}' were found"}
+            )
         else:
-            return _json({"error": f"Persona preset '{current_name}' not found"})
+            return await _json_dumps_result({"error": f"Persona preset '{current_name}' not found"})
 
     fields: dict[str, Any] = {}
     if name is not None:
@@ -260,7 +271,7 @@ async def update_persona_preset(
     if status is not None:
         fields["status"] = PersonaPresetStatus(status)
     if not fields:
-        return _json({"error": "At least one field to update is required"})
+        return await _json_dumps_result({"error": "At least one field to update is required"})
 
     update_data = PersonaPresetUpdate(**fields)
 
@@ -272,11 +283,11 @@ async def update_persona_preset(
             is_admin=_is_admin(user),
         )
     except (NotFoundError, AuthorizationError) as e:
-        return _json({"error": str(e)})
+        return await _json_dumps_result({"error": str(e)})
     except Exception as e:
-        return _json({"error": f"Failed to update preset: {e}"})
+        return await _json_dumps_result({"error": f"Failed to update preset: {e}"})
 
-    return _json(
+    return await _json_dumps_result(
         {
             "success": True,
             "action": "updated",

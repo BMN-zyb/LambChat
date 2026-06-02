@@ -8,12 +8,15 @@ import re
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+from src.infra.async_utils import run_blocking_io
 from src.infra.auth.password import hash_password, verify_password
 from src.infra.logging import get_logger
 from src.infra.utils.datetime import utc_now
 from src.kernel.config import settings
 from src.kernel.exceptions import NotFoundError, ValidationError
 from src.kernel.schemas.user import User, UserCreate, UserInDB, UserUpdate
+
+USER_LIST_LIMIT_MAX = 100
 
 
 def _escape_regex(text: str) -> str:
@@ -46,6 +49,16 @@ def _safe_search_pattern(text: str) -> str:
     escaped = _escape_regex(text)
     # 不添加锚定，允许部分匹配（如搜索 "john" 匹配 "johnson"）
     return escaped
+
+
+def _bounded_list_limit(limit: int) -> int:
+    return min(max(int(limit), 1), USER_LIST_LIMIT_MAX)
+
+
+def _validate_metadata_update_key(key: Any) -> str:
+    if not isinstance(key, str) or not key or "." in key or "$" in key:
+        raise ValidationError(f"Invalid metadata key: {key!r}")
+    return key
 
 
 class UserStorage:
@@ -157,7 +170,7 @@ class UserStorage:
         user_dict: dict[str, Any] = {
             "username": user_data.username,
             "email": user_data.email,
-            "password_hash": hash_password(password) if password else None,
+            "password_hash": await run_blocking_io(hash_password, password) if password else None,
             "roles": user_data.roles if user_data.roles else [],  # 使用提供的角色，否则为空
             "avatar_url": user_data.avatar_url,  # Data URI for avatar
             "oauth_provider": user_data.oauth_provider.value if user_data.oauth_provider else None,
@@ -297,7 +310,10 @@ class UserStorage:
             update_dict["email"] = user_data.email
 
         if user_data.password is not None:
-            update_dict["password_hash"] = hash_password(user_data.password)
+            update_dict["password_hash"] = await run_blocking_io(
+                hash_password,
+                user_data.password,
+            )
 
         # Check if avatar_url was explicitly set (even to None) using model_fields_set
         if "avatar_url" in user_data.model_fields_set:
@@ -397,6 +413,7 @@ class UserStorage:
         Returns:
             用户列表
         """
+        limit = _bounded_list_limit(limit)
         query: dict = {}
         if is_active is not None:
             query["is_active"] = is_active
@@ -469,7 +486,7 @@ class UserStorage:
 
         # 只验证密码，不检查 is_active
         # is_active 检查由 UserManager.login() 处理，以便返回正确的错误信息
-        if not verify_password(password, user.password_hash):
+        if not await run_blocking_io(verify_password, password, user.password_hash):
             return None
 
         return user
@@ -604,24 +621,15 @@ class UserStorage:
         """
         from bson import ObjectId
 
-        # Fetch current metadata
-        user_dict = await self.collection.find_one({"_id": ObjectId(user_id)})
-        if not user_dict:
-            from src.kernel.exceptions import NotFoundError
-
-            raise NotFoundError(f"用户 '{user_id}' 不存在")
-
-        current_metadata = user_dict.get("metadata") or {}
-        merged = {**current_metadata, **metadata}
+        update_fields = {
+            f"metadata.{_validate_metadata_update_key(key)}": value
+            for key, value in metadata.items()
+        }
+        update_fields["updated_at"] = utc_now()
 
         result = await self.collection.find_one_and_update(
             {"_id": ObjectId(user_id)},
-            {
-                "$set": {
-                    "metadata": merged,
-                    "updated_at": utc_now(),
-                }
-            },
+            {"$set": update_fields},
             return_document=True,
         )
 

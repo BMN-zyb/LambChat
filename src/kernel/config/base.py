@@ -53,15 +53,18 @@ class Settings(BaseSettings):
     # Logging Configuration (not in SETTING_DEFINITIONS - internal use only)
     LOG_LEVELS: str = ""
     LOG_FORMAT: str = (
-        "%(asctime)s.%(msecs)03d [%(levelname)s] [%(trace_info)s] %(name)s - %(message)s"
+        "%(asctime)s.%(msecs)03d [%(levelname)s] %(trace_context)s%(name)s - %(message)s"
     )
     LOG_DATE_FORMAT: str = "%Y-%m-%d %H:%M:%S"
 
     # Session Configuration (not in SETTING_DEFINITIONS)
     SESSION_MAX_MESSAGES: int = 20
     SESSION_MAX_EVENTS_PER_TRACE: int = 10000  # 单个 trace 最多保留的事件数，防止内存爆炸
+    SESSION_EVENT_READ_DEFAULT_LIMIT: int = 1000
     SESSION_EVENT_MONGO_BUFFER_MAX: int = 10000
     SESSION_EVENT_TTL_CACHE_MAX: int = 5000
+    SESSION_EVENT_REDIS_REPLAY_BATCH_SIZE: int = 500
+    FEISHU_UPLOAD_BYTES_MAX_SIZE: int = 20 * 1024 * 1024
 
     # ============================================
     # All settings below get defaults from SETTING_DEFINITIONS
@@ -89,10 +92,16 @@ class Settings(BaseSettings):
     DEFERRED_TOOL_PROMPT_LIMIT: int = 25
     MCP_GLOBAL_CACHE_TTL_SECONDS: int = 900
     MCP_GLOBAL_MAX_ENTRIES: int = 100
+    MCP_GLOBAL_INIT_WAIT_SECONDS: int = 5
+    MCP_GLOBAL_WARMUP_CONCURRENCY: int = 5
+    MCP_GLOBAL_WARMUP_MAX_USERS: int = 100
     MCP_USER_CACHE_TTL_SECONDS: int = 900
     MCP_USER_CACHE_MAX_ENTRIES: int = 100
     MCP_POOL_TTL_SECONDS: int = 900
     MCP_POOL_MAX_CONNECTIONS: int = 100
+    MCP_SERVER_LOAD_CONCURRENCY: int = 4
+    MCP_EFFECTIVE_CONFIG_MAX_SERVERS: int = 100
+    MCP_EFFECTIVE_CONFIG_MAX_TOOLS: int = 200
     MCP_ENCRYPTION_SALT: Optional[str] = None  # 默认随机生成，确保加密一致性
     DEEPAGENT_DEFAULT_MAX_INPUT_TOKENS: int = 64000
 
@@ -106,17 +115,19 @@ class Settings(BaseSettings):
     SESSION_TITLE_API_KEY: str = ""
     SESSION_TITLE_PROMPT: str = "请您用简短的3-5个字的标题加上一个表情符号作为用户对话的提示标题。请您选取适合用于总结的表情符号来增强理解，但请避免使用符号或特殊格式。请您根据提示回复一个提示标题文本。\n\n回复示例：\n\n📉 股市趋势\n\n🍪 完美巧克力曲奇食谱\n\n🎮 视频游戏开发洞察\n\n# 重要\n\n1. 请务必用{lang}回复我\n2. 回复字数控制在3-5个字\n\nPrompt: {message}"
     ENABLE_RECOMMEND_QUESTIONS: bool = True
+    RECOMMEND_QUESTIONS_MAX_BACKGROUND_TASKS: int = 8
 
     # Redis Settings
     REDIS_URL: str = "redis://localhost:6379/0"
     REDIS_PASSWORD: Optional[str] = None
 
     # Task execution settings
-    TASK_BACKEND: str = "local"  # local | arq
+    TASK_BACKEND: str = "arq"  # local | arq
     ARQ_EMBEDDED_WORKER: bool = True
     ARQ_QUEUE_NAME: str = "lambchat:arq"
-    ARQ_WORKER_MAX_JOBS: int = 64
+    ARQ_WORKER_MAX_JOBS: int = 2
     ARQ_JOB_TIMEOUT_SECONDS: int = 86400
+    TASK_STARTUP_CLEANUP_CONCURRENCY: int = 16
 
     # MongoDB Settings
     MONGODB_URL: str = "mongodb://localhost:27017"
@@ -126,6 +137,7 @@ class Settings(BaseSettings):
     MONGODB_AUTH_SOURCE: str = "admin"
     MONGODB_SESSIONS_COLLECTION: str = "sessions"
     MONGODB_TRACES_COLLECTION: str = "traces"
+    MONGODB_STORE_BATCH_CONCURRENCY: int = 16
 
     # Event Merger Settings
     ENABLE_EVENT_MERGER: bool = True  # 是否启用事件合并
@@ -133,6 +145,7 @@ class Settings(BaseSettings):
     EVENT_MERGE_BATCH_SIZE: int = 100
     EVENT_MERGE_CONCURRENCY: int = 3
     EVENT_MERGE_TIMEOUT_SECONDS: float = 120.0
+    EVENT_MERGE_MAX_EVENTS_PER_TRACE: int = 5000
 
     # Memory Monitoring Settings
     MEMORY_MONITOR_ENABLED: bool = True
@@ -174,6 +187,7 @@ class Settings(BaseSettings):
     DAYTONA_TIMEOUT: int = 180
     DAYTONA_IMAGE: str = ""
     SANDBOX_GREP_TIMEOUT: int = 30
+    SANDBOX_MCP_REBUILD_CONCURRENCY: int = 4
     DAYTONA_AUTO_STOP_INTERVAL: int = 5
     DAYTONA_AUTO_ARCHIVE_INTERVAL: int = 5
     DAYTONA_AUTO_DELETE_INTERVAL: int = 1440
@@ -292,19 +306,28 @@ class Settings(BaseSettings):
     NATIVE_MEMORY_RERANK_API_KEY: str = ""
     NATIVE_MEMORY_MAX_TOKENS: int = 2000
     NATIVE_MEMORY_INLINE_CONTENT_MAX_CHARS: int = 1200
+    NATIVE_MEMORY_IMPORT_TOTAL_CONTENT_MAX_CHARS: int = 2_000_000
+    NATIVE_MEMORY_COMPACTION_CONTENT_MAX_CHARS: int = 4000
+    NATIVE_MEMORY_CONSOLIDATION_INPUT_MAX_CHARS: int = 4000
     NATIVE_MEMORY_STORE_NAMESPACE: str = "memories"
     NATIVE_MEMORY_APPEND_MAX_DETAILS: int = 8
     NATIVE_MEMORY_RECALL_MIN_SCORE: float = 0.3
+    NATIVE_MEMORY_HYDRATE_CONCURRENCY: int = 4
+    NATIVE_MEMORY_CONSOLIDATION_ENRICH_CONCURRENCY: int = 4
+    NATIVE_MEMORY_CONTENT_DELETE_CONCURRENCY: int = 4
     NATIVE_MEMORY_AUTO_COMPACT_ENABLED: bool = True
     NATIVE_MEMORY_AUTO_COMPACT_THRESHOLD: int = 40
     NATIVE_MEMORY_AUTO_COMPACT_INTERVAL_SECONDS: int = 43200
     NATIVE_MEMORY_AUTO_COMPACT_MIN_INTERVAL_SECONDS: int = 900
+    NATIVE_MEMORY_AUTO_CAPTURE_INPUT_MAX_CHARS: int = 8000
+    NATIVE_MEMORY_AUTO_CAPTURE_MAX_TASKS: int = 8
 
     # Audio transcription tool settings
     ENABLE_AUDIO_TRANSCRIPTION: bool = False
     AUDIO_TRANSCRIPTION_API_KEY: str = ""
     AUDIO_TRANSCRIPTION_BASE_URL: str = ""
     AUDIO_TRANSCRIPTION_MODEL: str = "gpt-4o-mini-transcribe"
+    AUDIO_TRANSCRIPTION_MAX_DOWNLOAD_BYTES: int = 50 * 1024 * 1024
 
     # Image generation tool settings
     ENABLE_IMAGE_GENERATION: bool = False

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from src.infra.channel.feishu.manager import FeishuChannelManager
@@ -64,6 +66,28 @@ class _FakeChannel:
     async def stop(self) -> None:
         self.stopped = True
         self._running = False
+
+
+class _StreamingStorage:
+    def __init__(self) -> None:
+        self.list_enabled_called = False
+        self.yielded = 0
+
+    async def iter_enabled_configs(self, channel_type):
+        del channel_type
+        self.yielded += 1
+        yield {
+            "user_id": "user-1",
+            "instance_id": "inst-1",
+            "app_id": "app-1",
+            "app_secret": "secret",
+            "enabled": True,
+        }
+
+    async def list_enabled_configs(self, channel_type):
+        del channel_type
+        self.list_enabled_called = True
+        raise AssertionError("Feishu manager start should stream enabled configs")
 
 
 class _FailingRedisClient(_FakeRedisClient):
@@ -149,6 +173,30 @@ async def test_start_user_client_registers_channel_when_lease_acquired(
 
 
 @pytest.mark.asyncio
+async def test_start_streams_enabled_configs_without_materializing_list(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_redis = _FakeRedisClient()
+    storage = _StreamingStorage()
+    monkeypatch.setattr(
+        "src.infra.channel.feishu.manager.create_redis_client",
+        lambda isolated_pool=False: fake_redis,
+    )
+    monkeypatch.setattr("src.infra.channel.feishu.manager.FeishuChannel", _FakeChannel)
+    monkeypatch.setattr("src.infra.channel.feishu.manager.FEISHU_AVAILABLE", True)
+
+    manager = FeishuChannelManager()
+    manager._storage = storage
+    manager._instance_id = "instance-a"
+
+    await manager.start()
+
+    assert storage.yielded == 1
+    assert storage.list_enabled_called is False
+    assert "user-1:inst-1" in manager._channels
+
+
+@pytest.mark.asyncio
 async def test_stop_releases_owned_leases(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -171,6 +219,41 @@ async def test_stop_releases_owned_leases(
     assert "feishu:lease:app-2" in fake_redis.deleted
     assert fake_redis.closed is True
     assert isolated_pool_flags == [True]
+
+
+@pytest.mark.asyncio
+async def test_release_lease_waits_for_refresh_task_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_redis = _FakeRedisClient()
+    monkeypatch.setattr(
+        "src.infra.channel.feishu.manager.create_redis_client",
+        lambda isolated_pool=False: fake_redis,
+    )
+
+    manager = FeishuChannelManager()
+    manager._instance_id = "instance-a"
+    cleanup_finished = False
+    started = asyncio.Event()
+
+    async def _refresh_forever() -> None:
+        nonlocal cleanup_finished
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cleanup_finished = True
+
+    task = asyncio.create_task(_refresh_forever())
+    await started.wait()
+    manager._lease_tasks["app-1"] = task
+    fake_redis.values["feishu:lease:app-1"] = "instance-a"
+
+    await manager._release_lease("app-1")
+
+    assert task.cancelled() is True
+    assert cleanup_finished is True
+    assert "feishu:lease:app-1" in fake_redis.deleted
 
 
 @pytest.mark.asyncio

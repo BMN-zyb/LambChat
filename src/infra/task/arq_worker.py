@@ -139,6 +139,8 @@ async def run_agent_task(ctx: dict[str, Any], run_id: str) -> None:
     else:
         await payload_store.delete(run_id)
         await _release_concurrency_slot(payload.get("user_id"), run_id, dequeue=True)
+    finally:
+        task_manager._run_info.pop(run_id, None)
 
 
 class WorkerSettings:

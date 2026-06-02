@@ -4,7 +4,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FIXTURE_PATH = REPO_ROOT / "tests" / "events" / "stream_events.json"
-PRESENTER_PATH = REPO_ROOT / "src" / "infra" / "writer" / "present.py"
+PRESENTER_PATH = REPO_ROOT / "src" / "infra" / "writer" / "presenter_events.py"
 
 NON_PRESENTER_STREAM_EVENTS = {
     "complete",
