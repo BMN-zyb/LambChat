@@ -80,7 +80,7 @@ def _raise_unknown_agent(_agent_id: str):
     raise ValueError("unknown agent")
 
 
-def test_get_shared_content_event_limit_is_capped_by_route_validation() -> None:
+def test_get_shared_content_event_limit_has_no_upper_bound_in_route_validation() -> None:
     route = next(route for route in share_route.router.routes if route.path == "/public/{share_id}")
     limit_param = next(
         param for param in route.dependant.query_params if param.name == "event_limit"
@@ -91,7 +91,7 @@ def test_get_shared_content_event_limit_is_capped_by_route_validation() -> None:
     }
 
     assert constraints["Ge"] == 1
-    assert constraints["Le"] == share_route.SHARE_EVENT_RESPONSE_LIMIT_MAX
+    assert "Le" not in constraints
 
 
 class _CreateShouldNotBeCalledShareStorage:
@@ -122,6 +122,30 @@ async def test_create_share_rejects_partial_share_with_too_many_run_ids(
 
     assert exc_info.value.status_code == 400
     assert "run_ids" in exc_info.value.detail
+
+
+@pytest.mark.asyncio
+async def test_get_shared_content_returns_all_events_when_limit_is_omitted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dual_writer = _FakeDualWriter()
+    monkeypatch.setattr(share_route, "ShareStorage", _FakeShareStorage)
+    monkeypatch.setattr(share_route, "SessionManager", _FakeSessionManager)
+    monkeypatch.setattr(share_route, "get_dual_writer", lambda: dual_writer)
+    monkeypatch.setattr(share_route, "UserStorage", _FakeUserStorage)
+    monkeypatch.setattr(share_route, "get_agent_class", _raise_unknown_agent)
+
+    response = await share_route.get_shared_content("share-1", user=None)
+
+    assert dual_writer.calls == [
+        {
+            "session_id": "session-1",
+            "completed_only": True,
+        }
+    ]
+    assert len(response.events) == 3
+    assert response.events_limited is False
+    assert response.events_limit is None
 
 
 @pytest.mark.asyncio

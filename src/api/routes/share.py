@@ -4,7 +4,7 @@
 允许用户分享会话，支持公开链接或需要登录访问。
 """
 
-from typing import Optional
+from typing import Annotated, Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
@@ -34,7 +34,6 @@ router = APIRouter()
 logger = get_logger(__name__)
 
 SHARE_PARTIAL_RUN_IDS_LIMIT = 100
-SHARE_EVENT_RESPONSE_LIMIT_MAX = 1000
 
 
 def _check_permission(user: TokenPayload, permission: str) -> bool:
@@ -275,7 +274,7 @@ async def delete_share(
 @router.get("/public/{share_id}", response_model=SharedContentResponse)
 async def get_shared_content(
     share_id: str,
-    event_limit: int = Query(1000, ge=1, le=SHARE_EVENT_RESPONSE_LIMIT_MAX),
+    event_limit: Annotated[int | None, Query(ge=1)] = None,
     user: Optional[TokenPayload] = Depends(get_current_user_optional),
 ):
     """
@@ -308,27 +307,27 @@ async def get_shared_content(
     # 获取会话事件
     dual_writer = get_dual_writer()
 
-    events_probe_limit = event_limit + 1
     partial_run_ids = (
         _bounded_partial_run_ids(share.run_ids) if share.share_type == ShareType.PARTIAL else None
     )
+    read_events_kwargs: dict[str, Any] = {"completed_only": True}
+    if event_limit is not None:
+        read_events_kwargs["max_events"] = event_limit + 1
 
     # 如果是部分分享，只获取指定 run 的事件
     if partial_run_ids:
         events = await dual_writer.read_session_events(
             share.session_id,
-            completed_only=True,
             run_ids=partial_run_ids,
-            max_events=events_probe_limit,
+            **read_events_kwargs,
         )
     else:
         events = await dual_writer.read_session_events(
             share.session_id,
-            completed_only=True,
-            max_events=events_probe_limit,
+            **read_events_kwargs,
         )
-    events_limited = len(events) > event_limit
-    if events_limited:
+    events_limited = event_limit is not None and len(events) > event_limit
+    if events_limited and event_limit is not None:
         events = events[:event_limit]
 
     # 获取分享者信息
