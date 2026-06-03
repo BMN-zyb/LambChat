@@ -195,23 +195,27 @@ class FeishuChannelManager(UserChannelManager):
             )
             return False
 
-        if channel_key in self._channels:
-            await self._channels[channel_key].stop()
-            # Clean up old app_id tracking
-            old_app_id = getattr(self._channels[channel_key].config, "app_id", None)
-            if old_app_id and old_app_id in self._active_app_ids:
-                del self._active_app_ids[old_app_id]
+        try:
+            if channel_key in self._channels:
+                await self._channels[channel_key].stop()
+                # Clean up old app_id tracking
+                old_app_id = getattr(self._channels[channel_key].config, "app_id", None)
+                if old_app_id and old_app_id in self._active_app_ids:
+                    del self._active_app_ids[old_app_id]
 
-        client = FeishuChannel(config, self._message_handler)
-        success = await client.start()
+            client = FeishuChannel(config, self._message_handler)
+            success = await client.start()
 
-        if success:
-            self._channels[channel_key] = client
-            self._active_app_ids[app_id] = channel_key
-            self._ensure_lease_refresh_task(app_id)
-            return True
-        await self._release_lease(app_id)
-        return False
+            if success:
+                self._channels[channel_key] = client
+                self._active_app_ids[app_id] = channel_key
+                self._ensure_lease_refresh_task(app_id)
+                return True
+            await self._release_lease(app_id)
+            return False
+        except BaseException:
+            await self._release_lease(app_id)
+            raise
 
     async def reload_user(self, user_id: str, instance_id: Optional[str] = None) -> bool:
         """Reload a user's Feishu configuration and restart the client.

@@ -266,6 +266,21 @@ async def _cancel_background_tasks(app: FastAPI, *task_names: str) -> None:
         await asyncio.gather(*tasks, return_exceptions=True)
 
 
+async def _stop_feishu_channels_for_shutdown(app: FastAPI) -> None:
+    await _cancel_background_tasks(app, "feishu_task")
+    try:
+        from src.infra.channel.feishu import stop_feishu_channels
+
+        await stop_feishu_channels()
+        logger.info("Feishu channels stopped")
+    except Exception as e:
+        logger.warning(f"Failed to stop Feishu channels: {e}")
+
+
+async def _cancel_lifespan_background_tasks_for_shutdown(app: FastAPI) -> None:
+    await _cancel_background_tasks(app, *_LIFESPAN_BACKGROUND_TASK_NAMES)
+
+
 def _startup_index_initializers():
     async def _init_agent_config_storage() -> None:
         from src.infra.agent.config_storage import get_agent_config_storage
@@ -478,6 +493,11 @@ async def lifespan(app: FastAPI):
         from src.agents import AgentFactory
         from src.infra.sandbox import SandboxFactory
 
+        # 先关闭飞书长连接并释放 lease，避免快速重启时旧锁阻止新实例启动。
+        await _stop_feishu_channels_for_shutdown(app)
+        # 再统一取消 lifespan 后台任务，让各任务自己的 finally 在依赖关闭前完成。
+        await _cancel_lifespan_background_tasks_for_shutdown(app)
+
         # 停止事件合并器
         from src.infra.session.event_merger import get_event_merger
         from src.infra.task.manager import get_task_manager
@@ -517,11 +537,6 @@ async def lifespan(app: FastAPI):
         logger.info("User sandboxes stopped")
 
         await AgentFactory.close_all()
-
-        await _cancel_background_tasks(
-            app,
-            *_LIFESPAN_BACKGROUND_TASK_NAMES,
-        )
 
         # 关闭 PostgreSQL 连接池
         from src.infra.storage.checkpoint import (
@@ -571,15 +586,6 @@ async def lifespan(app: FastAPI):
         from src.infra.storage.mongodb import close_mongo_client
 
         await close_mongo_client()
-
-        # 关闭 Feishu 渠道
-        try:
-            from src.infra.channel.feishu import stop_feishu_channels
-
-            await stop_feishu_channels()
-            logger.info("Feishu channels stopped")
-        except Exception as e:
-            logger.warning(f"Failed to stop Feishu channels: {e}")
 
         # Cancel remaining background tasks (e.g., lark_oapi ExpiringCache cron)
         pending = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]

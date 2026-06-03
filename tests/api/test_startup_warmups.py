@@ -189,5 +189,68 @@ async def test_cancel_background_tasks_awaits_task_cleanup() -> None:
 
 
 @pytest.mark.asyncio
+async def test_stop_feishu_channels_for_shutdown_cancels_startup_task_before_stop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.infra.channel import feishu as feishu_package
+
+    calls: list[str] = []
+    started = asyncio.Event()
+
+    async def _starting_feishu() -> None:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            calls.append("startup_cancelled")
+
+    async def _stop_feishu_channels() -> None:
+        calls.append("stop")
+
+    monkeypatch.setattr(feishu_package, "stop_feishu_channels", _stop_feishu_channels)
+
+    task = asyncio.create_task(_starting_feishu())
+    await asyncio.wait_for(started.wait(), timeout=1)
+    app = SimpleNamespace(state=SimpleNamespace(feishu_task=task))
+
+    await api_main._stop_feishu_channels_for_shutdown(app)
+
+    assert task.cancelled() is True
+    assert calls == ["startup_cancelled", "stop"]
+
+
+@pytest.mark.asyncio
+async def test_cancel_lifespan_background_tasks_for_shutdown_cancels_registered_tasks() -> None:
+    cleanup_calls: list[str] = []
+    started_events = {
+        task_name: asyncio.Event() for task_name in api_main._LIFESPAN_BACKGROUND_TASK_NAMES
+    }
+
+    async def _long_running_task(task_name: str) -> None:
+        started_events[task_name].set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cleanup_calls.append(task_name)
+
+    state = SimpleNamespace()
+    tasks: list[asyncio.Task[None]] = []
+    for task_name in api_main._LIFESPAN_BACKGROUND_TASK_NAMES:
+        task = asyncio.create_task(_long_running_task(task_name))
+        setattr(state, task_name, task)
+        tasks.append(task)
+
+    for event in started_events.values():
+        await asyncio.wait_for(event.wait(), timeout=1)
+
+    app = SimpleNamespace(state=state)
+
+    await api_main._cancel_lifespan_background_tasks_for_shutdown(app)
+
+    assert all(task.cancelled() for task in tasks)
+    assert set(cleanup_calls) == set(api_main._LIFESPAN_BACKGROUND_TASK_NAMES)
+
+
+@pytest.mark.asyncio
 async def test_shutdown_background_task_list_includes_feishu_task() -> None:
     assert "feishu_task" in api_main._LIFESPAN_BACKGROUND_TASK_NAMES

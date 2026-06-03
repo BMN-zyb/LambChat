@@ -431,6 +431,44 @@ async def test_resume_interrupted_run_releases_lock_after_failed_recovery(
 
 
 @pytest.mark.asyncio
+async def test_resume_interrupted_run_releases_lock_when_cancelled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = SimpleNamespace(
+        id="session-1",
+        user_id="user-1",
+        agent_id="search",
+        metadata={"current_run_id": "run-old"},
+    )
+    manager = BackgroundTaskManager()
+    manager._storage = _FakeStorage(session)
+
+    redis = _FakeRedis(acquired=True)
+    mark_failed_started = asyncio.Event()
+
+    async def _blocking_mark_failed(run_id: str, reason: str, loaded_session) -> None:
+        mark_failed_started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(recovery_module, "get_redis_client", lambda: redis)
+    monkeypatch.setattr(manager, "_mark_run_failed", _blocking_mark_failed)
+
+    task = asyncio.create_task(manager._resume_interrupted_run(session, "run-old", "manual_resume"))
+    await asyncio.wait_for(mark_failed_started.wait(), timeout=1)
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert redis.eval_calls
+    assert redis.eval_calls[0][1:] == (
+        1,
+        "task:recovery:session-1:run-old",
+        redis.set_calls[0][1],
+    )
+
+
+@pytest.mark.asyncio
 async def test_resume_interrupted_run_skips_when_recovery_lock_is_held(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -514,6 +552,12 @@ async def test_resume_interrupted_run_restores_recoverable_failure_when_submissi
     assert storage.updates[-1][1].metadata["task_status"] == "failed"
     assert storage.updates[-1][1].metadata["task_recoverable"] is True
     assert storage.updates[-1][1].metadata["task_error_code"] == "server_restart"
+    assert redis.eval_calls
+    assert redis.eval_calls[0][1:] == (
+        1,
+        "task:recovery:session-1:run-old",
+        redis.set_calls[0][1],
+    )
 
 
 @pytest.mark.asyncio

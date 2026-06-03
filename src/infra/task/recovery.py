@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
 import uuid
 from typing import Any, Awaitable, Callable
@@ -403,6 +404,9 @@ class TaskRecoveryService:
                     recovery_result.get("message") or "恢复任务失败",
                 )
             return recovery_result
+        except asyncio.CancelledError:
+            await self.release_recovery_lock(lock_key, lock_token)
+            raise
         except Exception as e:
             await self.release_recovery_lock(lock_key, lock_token)
             await self._restore_recoverable_failure(

@@ -68,6 +68,18 @@ class _FakeChannel:
         self._running = False
 
 
+class _BlockingStartChannel:
+    def __init__(self, config, message_handler) -> None:
+        self.config = config
+        self.message_handler = message_handler
+        self.started = asyncio.Event()
+
+    async def start(self) -> bool:
+        self.started.set()
+        await asyncio.Event().wait()
+        return True
+
+
 class _StreamingStorage:
     def __init__(self) -> None:
         self.list_enabled_called = False
@@ -261,6 +273,43 @@ async def test_stop_releases_owned_leases(
     assert "feishu:lease:app-2" in fake_redis.deleted
     assert fake_redis.closed is True
     assert isolated_pool_flags == [True]
+
+
+@pytest.mark.asyncio
+async def test_start_user_client_releases_lease_when_start_is_cancelled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_redis = _FakeRedisClient()
+    created_channels: list[_BlockingStartChannel] = []
+    monkeypatch.setattr(
+        "src.infra.channel.feishu.manager.create_redis_client",
+        lambda isolated_pool=False: fake_redis,
+    )
+
+    def _create_channel(config, message_handler):
+        channel = _BlockingStartChannel(config, message_handler)
+        created_channels.append(channel)
+        return channel
+
+    monkeypatch.setattr("src.infra.channel.feishu.manager.FeishuChannel", _create_channel)
+
+    manager = FeishuChannelManager()
+    manager._instance_id = "instance-a"
+
+    task = asyncio.create_task(
+        manager._start_user_client(_config(instance_id="inst-3", app_id="app-3"))
+    )
+    while not created_channels:
+        await asyncio.sleep(0)
+    await created_channels[0].started.wait()
+
+    assert fake_redis.values["feishu:lease:app-3"] == "instance-a"
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert "feishu:lease:app-3" in fake_redis.deleted
 
 
 @pytest.mark.asyncio
