@@ -46,6 +46,7 @@ export { uploadApi } from "./api/upload";
 export { versionApi } from "./api/version";
 export { healthApi } from "./api/health";
 export { teamApi } from "./api/team";
+export { scheduledTaskApi } from "./api/scheduledTask";
 export { projectApi } from "./api/project";
 export {
   revealedFileApi,

@@ -763,6 +763,17 @@ SETTING_DEFINITIONS: dict[str, dict] = {
         "depends_on": "ENABLE_IMAGE_GENERATION",
     },
     # ============================================
+    # Scheduled Task Settings
+    # ============================================
+    "ENABLE_SCHEDULED_TASK": {
+        "type": SettingType.BOOLEAN,
+        "category": SettingCategory.SCHEDULED_TASK,
+        "subcategory": "general",
+        "description": "settingDesc.ENABLE_SCHEDULED_TASK",
+        "default": False,
+        "frontend_visible": True,
+    },
+    # ============================================
     # MongoDB Settings
     # ============================================
     "MONGODB_URL": {
@@ -858,7 +869,7 @@ SETTING_DEFINITIONS: dict[str, dict] = {
         "category": SettingCategory.REDIS,
         "subcategory": "task",
         "description": "settingDesc.ARQ_WORKER_MAX_JOBS",
-        "default": 64,
+        "default": 128,
         "depends_on": {"key": "TASK_BACKEND", "value": "arq"},
     },
     "ARQ_JOB_TIMEOUT_SECONDS": {

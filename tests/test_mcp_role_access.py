@@ -80,9 +80,16 @@ class _FakeMCPStorage(StorageOperations):
             name=doc["name"],
             transport=MCPTransport(doc.get("transport", "streamable_http")),
             enabled=doc.get("enabled", True),
+            url=doc.get("url"),
+            headers=doc.get("headers"),
+            command=doc.get("command"),
+            env_keys=doc.get("env_keys"),
             is_system=is_system,
             can_edit=can_edit,
             allowed_roles=doc.get("allowed_roles", []),
+            role_quotas=doc.get("role_quotas", {}),
+            created_at=doc.get("created_at"),
+            updated_at=doc.get("updated_at"),
         )
 
     def _doc_to_config_dict(self, doc: dict[str, Any]) -> dict[str, Any]:

@@ -11,8 +11,8 @@ def test_task_backend_default_matches_settings_definition() -> None:
 def test_arq_worker_max_jobs_is_admin_setting_not_frontend_visible() -> None:
     definition = SETTING_DEFINITIONS["ARQ_WORKER_MAX_JOBS"]
 
-    assert Settings().ARQ_WORKER_MAX_JOBS == 64
-    assert definition["default"] == 64
+    assert Settings().ARQ_WORKER_MAX_JOBS == 128
+    assert definition["default"] == 128
     assert definition.get("frontend_visible", False) is False
 
 

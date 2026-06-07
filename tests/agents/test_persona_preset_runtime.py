@@ -55,6 +55,19 @@ def test_conversation_config_preserves_none_enabled_skills_for_global_fallback()
     assert config["enabled_skills"] is None
 
 
+def test_conversation_config_persists_user_timezone() -> None:
+    request = AgentRequest(message="hello", user_timezone="Asia/Shanghai")
+
+    config = build_conversation_config(
+        run_id="run-1",
+        agent_id="search",
+        request=request,
+        language="zh",
+    )
+
+    assert config["user_timezone"] == "Asia/Shanghai"
+
+
 def test_conversation_config_ignores_persona_snapshot_without_preset_id() -> None:
     snapshot = PersonaPresetSnapshot(
         preset_id="preset-1",

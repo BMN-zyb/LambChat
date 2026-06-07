@@ -16,6 +16,8 @@
 import importlib
 from typing import Any
 
+from src.kernel.config.base import settings
+
 _deepagents: Any = None
 try:
     _deepagents = importlib.import_module("deepagents")
@@ -32,6 +34,7 @@ DEFAULT_ROLE = "You are an intelligent assistant with tools and skills."
 
 _PERSONA_HEADING = "## Persona"
 
+
 # ---------------------------------------------------------------------------
 # Strip the identity line from BASE_AGENT_PROMPT so persona has full control.
 #
@@ -45,7 +48,15 @@ _PERSONA_HEADING = "## Persona"
 #
 # Using a bare provider key ("anthropic") covers all Anthropic models.
 # ---------------------------------------------------------------------------
-_BEHAVIOR_GUIDE = """You have access to tools and can respond with text and tool calls. The user can see your responses and tool outputs in real time.
+def _build_behavior_guide() -> str:
+    """Build the base behavior guide, conditionally including scheduled task instructions."""
+    scheduled_task_section = ""
+    if settings.ENABLE_SCHEDULED_TASK:
+        scheduled_task_section = """
+
+You can also **proactively send messages to the user on a schedule** using the `scheduled_task_create` tool. When the user asks you to remind them, notify them, send periodic reports, or check something regularly — create a scheduled task. The system will automatically execute it and deliver the results to the user's conversation. Do NOT claim you cannot proactively message the user; you CAN via scheduled tasks."""
+
+    return f"""You have access to tools and can respond with text and tool calls. The user can see your responses and tool outputs in real time.{scheduled_task_section}
 
 ## Core Behavior
 
@@ -87,6 +98,9 @@ Keep working until the task is fully complete. Don't stop partway and explain wh
 ## Progress Updates
 
 For longer tasks, provide brief progress updates at reasonable intervals — a concise sentence recapping what you've done and what's next."""
+
+
+_BEHAVIOR_GUIDE = _build_behavior_guide()
 
 if _HarnessProfile is not None and _register_harness_profile is not None:
     # Register on import — this is idempotent (additive merge).

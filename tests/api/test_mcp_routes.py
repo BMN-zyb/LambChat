@@ -51,8 +51,15 @@ async def test_list_mcp_servers_returns_paginated_response() -> None:
                     transport=MCPTransport.SSE,
                     enabled=True,
                     url=f"https://example.com/{i}",
+                    headers=None,
+                    command=None,
+                    env_keys=None,
                     is_system=False,
                     can_edit=True,
+                    allowed_roles=[],
+                    role_quotas={},
+                    created_at=None,
+                    updated_at=None,
                 )
                 for i in range(5)
             ]

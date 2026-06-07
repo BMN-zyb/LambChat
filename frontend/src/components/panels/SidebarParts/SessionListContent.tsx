@@ -1,6 +1,13 @@
 import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
+import {
   ChevronDown,
   ChevronsUpDown,
+  Clock,
   Search,
   FolderPlus,
   FolderOpen,
@@ -8,14 +15,17 @@ import {
   MoreHorizontal,
   UserRound,
   Users,
+  CalendarClock,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "../../../hooks/useAuth";
 import { Permission } from "../../../types/auth";
 import { LoadingSpinner } from "../../common/LoadingSpinner";
+import { SkeletonList } from "../../skeletons";
 import { BrandWordmark } from "../../common/BrandWordmark";
 import { getFullUrl, type BackendSession } from "../../../services/api";
+import { scheduledTaskApi } from "../../../services/api/scheduledTask";
 import type { ProjectItemHandle } from "../../sidebar/ProjectItem";
 import {
   formatUnreadCount,
@@ -24,11 +34,19 @@ import {
 } from "../../sidebar/unreadCounts";
 import { groupSessionsByTime } from "../sessionHelpers";
 import { ProjectItem } from "../../sidebar/ProjectItem";
+import {
+  ScheduledTaskSidebarItem,
+  type ScheduledTaskItemHandle,
+} from "../../sidebar/ScheduledTaskSidebarItem";
 import { SessionItem } from "../../sidebar/SessionItem";
 import { APP_NAME, GITHUB_URL } from "../../../constants";
 import { isSessionFavorite } from "../../sidebar/sessionFavorites";
 import type { Project } from "../../../types";
+import type { ScheduledTask } from "../../../types/scheduledTask";
 import { isSidebarProject } from "./projectFilters";
+import {
+  subscribeScheduledTaskMutation,
+} from "../../../stores/scheduledTaskMutationStore";
 
 export interface SessionActions {
   onDeleteSession: (id: string) => void;
@@ -52,6 +70,13 @@ export interface ProjectActions {
   onOpenNewProjectModal: () => void;
   onNewSessionInProject: (projectId: string) => void;
   onSetProjectRef: (id: string, handle: ProjectItemHandle | null) => void;
+}
+
+export interface ScheduledTaskActions {
+  onSetScheduledTaskRef: (
+    id: string,
+    handle: ScheduledTaskItemHandle | null,
+  ) => void;
 }
 
 interface SessionListContentProps {
@@ -80,8 +105,13 @@ interface SessionListContentProps {
   unreadBySession: UnreadBySession;
   sessionActions: SessionActions;
   projectActions: ProjectActions;
+  scheduledTaskActions: ScheduledTaskActions;
   isProjectsCollapsed: boolean;
   onToggleProjectsCollapsed: () => void;
+  isScheduledTasksCollapsed: boolean;
+  onToggleScheduledTasksCollapsed: () => void;
+  isNavCollapsed: boolean;
+  onToggleNavCollapsed: () => void;
   isChatsCollapsed: boolean;
   onToggleChatsCollapsed: () => void;
   autoExpandProjectId: string | null | undefined;
@@ -113,8 +143,11 @@ export function SessionListContent({
   unreadBySession,
   sessionActions,
   projectActions,
+  scheduledTaskActions,
   isProjectsCollapsed,
   onToggleProjectsCollapsed,
+  isScheduledTasksCollapsed,
+  onToggleScheduledTasksCollapsed,
   isChatsCollapsed,
   onToggleChatsCollapsed,
   autoExpandProjectId,
@@ -124,17 +157,84 @@ export function SessionListContent({
   const navigate = useNavigate();
   const { hasPermission } = useAuth();
   const canReadTeam = hasPermission(Permission.TEAM_READ);
+  const canReadScheduledTasks = hasPermission(Permission.SCHEDULED_TASK_READ);
+  const [scheduledTasks, setScheduledTasks] = useState<ScheduledTask[]>([]);
+  const [scheduledTaskTotal, setScheduledTaskTotal] = useState(0);
+  const [isScheduledTasksLoading, setIsScheduledTasksLoading] = useState(false);
+  const scheduledTaskUnreadByTaskRef = useRef(new Map<string, number>());
 
+  const loadScheduledTasks = useCallback(async () => {
+    setIsScheduledTasksLoading(true);
+    try {
+      const response = await scheduledTaskApi.list(0, 10);
+      setScheduledTasks(response.items);
+      setScheduledTaskTotal(response.total);
+    } catch {
+      setScheduledTasks([]);
+      setScheduledTaskTotal(0);
+    } finally {
+      setIsScheduledTasksLoading(false);
+    }
+  }, []);
+
+  // Re-fetch sidebar task list when a task is created/updated/deleted elsewhere
+  useEffect(() => {
+    return subscribeScheduledTaskMutation(() => {
+      if (canReadScheduledTasks && !isScheduledTasksCollapsed) {
+        void loadScheduledTasks();
+      }
+    });
+  }, [canReadScheduledTasks, isScheduledTasksCollapsed, loadScheduledTasks]);
+
+  useEffect(() => {
+    if (canReadScheduledTasks && !isScheduledTasksCollapsed) {
+      void loadScheduledTasks();
+    } else {
+      setScheduledTasks([]);
+      setScheduledTaskTotal(0);
+      scheduledTaskUnreadByTaskRef.current = new Map();
+    }
+  }, [canReadScheduledTasks, isScheduledTasksCollapsed, loadScheduledTasks]);
+
+  useEffect(() => {
+    const taskIds = new Set(scheduledTasks.map((task) => task.id));
+    const prev = scheduledTaskUnreadByTaskRef.current;
+    if (Array.from(prev.keys()).every((taskId) => taskIds.has(taskId))) {
+      return;
+    }
+    const next = new Map<string, number>();
+    for (const [taskId, unreadCount] of prev) {
+      if (taskIds.has(taskId)) next.set(taskId, unreadCount);
+    }
+    scheduledTaskUnreadByTaskRef.current = next;
+  }, [scheduledTasks]);
+
+  const visibleUncategorizedSessions = uncategorizedSessions.filter(
+    (session) => !session.metadata?.scheduled_task_id,
+  );
   const chatsUnreadCount = getUnreadCountForUncategorized({
-    loadedSessions: uncategorizedSessions,
+    loadedSessions: visibleUncategorizedSessions,
     unreadBySession,
   });
-  const groupedUncategorized = groupSessionsByTime(uncategorizedSessions, t);
+  const groupedUncategorized = groupSessionsByTime(
+    visibleUncategorizedSessions,
+    t,
+  );
+  const handleScheduledTaskUnreadChange = useCallback(
+    (taskId: string, unreadCount: number) => {
+      const prev = scheduledTaskUnreadByTaskRef.current;
+      if (prev.get(taskId) === unreadCount) return;
+      const next = new Map(prev);
+      next.set(taskId, unreadCount);
+      scheduledTaskUnreadByTaskRef.current = next;
+    },
+    [],
+  );
 
   return (
     <>
       {/* Header */}
-      <div className="flex items-center justify-between px-3 pt-3 pb-1 sm:px-4">
+      <div className="flex items-center justify-between px-3 pt-3 pb-3">
         <div className="flex h-7 items-center gap-1.5">
           <img
             src="/images/lamb.webp"
@@ -172,7 +272,7 @@ export function SessionListContent({
       </div>
 
       {/* Action buttons */}
-      <div className="flex flex-col gap-px px-2 py-2 space-y-1">
+      <div className="flex flex-col gap-px px-2 mb-2 space-y-1">
         <button
           onClick={onNewSession}
           className="sidebar-nav-btn w-full h-8 rounded-[10px] flex items-center gap-3 px-[9px] focus:outline-none transition-colors group"
@@ -218,6 +318,16 @@ export function SessionListContent({
           </button>
         )}
 
+        {canReadScheduledTasks && (
+          <button
+            onClick={() => navigate("/scheduled-tasks")}
+            className="sidebar-nav-btn w-full h-8 rounded-[10px] flex items-center gap-3 px-[9px] focus:outline-none transition-colors"
+          >
+            <CalendarClock size={20} />
+            <span>{t("nav.scheduled-tasks")}</span>
+          </button>
+        )}
+
         <button
           onClick={() => navigate("/files")}
           className="sidebar-nav-btn w-full h-8 rounded-[10px] flex items-center gap-3 px-[9px] focus:outline-none transition-colors"
@@ -257,9 +367,8 @@ export function SessionListContent({
             </span>
             <ChevronDown
               size={14}
-              className={`text-stone-300 dark:text-stone-600 transition-transform duration-200 ${
-                isProjectsCollapsed ? "-rotate-90" : ""
-              }`}
+              className={`text-stone-300 dark:text-stone-600 transition-transform duration-200 ${isProjectsCollapsed ? "-rotate-90" : ""
+                }`}
             />
           </div>
 
@@ -341,6 +450,77 @@ export function SessionListContent({
             <div className="h-px bg-stone-200/60 dark:bg-stone-700/40 mx-2 my-1" />
           )}
 
+          {canReadScheduledTasks && (
+            <>
+              {/* Scheduled tasks section */}
+              <div
+                onClick={onToggleScheduledTasksCollapsed}
+                className="flex items-center justify-between px-[9px] h-9 cursor-pointer select-none group/section"
+              >
+                <div className="flex min-w-0 items-center gap-2">
+                  <span className="text-[13px] font-medium text-stone-400 dark:text-stone-500 group-hover/section:text-stone-500 dark:group-hover/section:text-stone-400 transition-colors">
+                    {t("nav.scheduled-tasks")}
+                  </span>
+                </div>
+                <ChevronDown
+                  size={14}
+                  className={`text-stone-300 dark:text-stone-600 transition-transform duration-200 ${isScheduledTasksCollapsed ? "-rotate-90" : ""
+                    }`}
+                />
+              </div>
+
+              {!isScheduledTasksCollapsed && (
+                <>
+                  <button
+                    onClick={() => navigate("/scheduled-tasks")}
+                    className="sidebar-nav-btn w-full h-8 rounded-[10px] flex items-center gap-3 px-[9px] focus:outline-none transition-colors cursor-pointer"
+                  >
+                    <Clock size={20} />
+                    <span>{t("scheduledTask.create")}</span>
+                  </button>
+
+                  {isScheduledTasksLoading ? (
+                    <SkeletonList count={3} compact />
+                  ) : (
+                    scheduledTasks.map((task) => (
+                      <ScheduledTaskSidebarItem
+                        key={task.id}
+                        ref={(el) =>
+                          scheduledTaskActions.onSetScheduledTaskRef(task.id, el)
+                        }
+                        task={task}
+                        currentSessionId={currentSessionId}
+                        allProjects={projects}
+                        onSelectSession={sessionActions.onSelectSession}
+                        onDeleteSession={sessionActions.onDeleteSession}
+                        onMoveSession={sessionActions.onMoveSession}
+                        onToggleFavorite={sessionActions.onToggleFavorite}
+                        onShareSession={sessionActions.onShareSession}
+                        onUnreadCountChange={handleScheduledTaskUnreadChange}
+                        scrollRoot={scrollEl}
+                        draggingSessionId={sessionActions.draggingSessionId}
+                        unreadBySession={unreadBySession}
+                      />
+                    ))
+                  )}
+
+                  {scheduledTaskTotal > scheduledTasks.length && (
+                    <button
+                      onClick={() => navigate("/scheduled-tasks")}
+                      className="w-full h-8 rounded-[10px] px-[9px] text-left text-[13px] text-stone-400 transition-colors hover:bg-stone-100 hover:text-stone-600 dark:text-stone-500 dark:hover:bg-stone-800/40 dark:hover:text-stone-300"
+                    >
+                      {t("nav.more", "更多")}
+                    </button>
+                  )}
+                </>
+              )}
+
+              {!isScheduledTasksCollapsed && (
+                <div className="h-px bg-stone-200/60 dark:bg-stone-700/40 mx-2 my-1" />
+              )}
+            </>
+          )}
+
           {/* Uncategorized sessions (by time) */}
           {groupedUncategorized.length > 0 || isUncategorizedLoading ? (
             <>
@@ -360,41 +540,19 @@ export function SessionListContent({
                 </div>
                 <ChevronDown
                   size={14}
-                  className={`text-stone-300 dark:text-stone-600 transition-transform duration-200 ${
-                    isChatsCollapsed ? "-rotate-90" : ""
-                  }`}
+                  className={`text-stone-300 dark:text-stone-600 transition-transform duration-200 ${isChatsCollapsed ? "-rotate-90" : ""
+                    }`}
                 />
               </div>
 
               {!isChatsCollapsed && (
                 <>
                   {isUncategorizedLoading ? (
-                    <div className="space-y-px px-0">
-                      {Array.from({ length: 5 }).map((_, i) => (
-                        <div
-                          key={i}
-                          className="flex items-center gap-2 px-[9px] h-10 rounded-[10px]"
-                        >
-                          <div
-                            className="skeleton-line h-[13px] rounded-md flex-1"
-                            style={{
-                              width:
-                                i === 0
-                                  ? "70%"
-                                  : i === 1
-                                    ? "85%"
-                                    : i === 2
-                                      ? "55%"
-                                      : "65%",
-                            }}
-                          />
-                        </div>
-                      ))}
-                    </div>
+                    <SkeletonList count={5} compact />
                   ) : (
                     groupedUncategorized.map((group) => (
                       <div key={group.label}>
-                        <div className="px-[9px] h-7 flex items-center text-[13px] font-medium text-stone-400 dark:text-stone-500 select-none">
+                        <div className="px-[9px] h-8 flex items-center text-[13px] font-medium text-stone-400 dark:text-stone-500 select-none">
                           {group.label}
                         </div>
                         <div className="flex flex-col gap-px">

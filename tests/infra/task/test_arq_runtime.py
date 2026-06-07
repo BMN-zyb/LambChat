@@ -46,7 +46,7 @@ async def test_start_embedded_arq_worker_runs_with_signals_disabled(
     settings = SimpleNamespace(
         TASK_BACKEND="arq",
         ARQ_EMBEDDED_WORKER=True,
-        ARQ_WORKER_MAX_JOBS=64,
+        ARQ_WORKER_MAX_JOBS=128,
         ARQ_JOB_TIMEOUT_SECONDS=30,
         ARQ_QUEUE_NAME="lambchat:arq",
         REDIS_URL="redis://localhost:6379/0",
@@ -61,7 +61,7 @@ async def test_start_embedded_arq_worker_runs_with_signals_disabled(
     assert _FakeWorker.instances
     worker = _FakeWorker.instances[0]
     assert worker.kwargs["handle_signals"] is False
-    assert worker.kwargs["max_jobs"] == 64
+    assert worker.kwargs["max_jobs"] == 128
     assert worker.kwargs["job_timeout"] == 30
     assert worker.kwargs["queue_name"] == "lambchat:arq"
 

@@ -177,7 +177,7 @@ export function ProfileToolsTab() {
           ))}
         </div>
       ) : groupedByServer.length === 0 ? (
-        <div className="flex flex-col items-center justify-center py-8 text-stone-400 dark:text-stone-500">
+        <div className="flex flex-1 flex-col items-center justify-center text-stone-400 dark:text-stone-500">
           <Wrench
             size={32}
             className="mb-2 text-stone-300 dark:text-stone-600"

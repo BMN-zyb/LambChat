@@ -199,6 +199,7 @@ class TaskRecoveryService:
             ),
             "disabled_mcp_tools": session_metadata.get("disabled_mcp_tools") or None,
             "team_id": session_metadata.get("team_id"),
+            "recommendation_input": recovery_message,
         }
 
         concurrency_result = await limiter.claim_recovery_slot(

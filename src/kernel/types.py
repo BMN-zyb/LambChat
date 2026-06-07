@@ -97,6 +97,11 @@ class Permission(str, Enum):
     PERSONA_PRESET_WRITE = "persona_preset:write"
     PERSONA_PRESET_ADMIN = "persona_preset:admin"
 
+    # Scheduled Task
+    SCHEDULED_TASK_READ = "scheduled_task:read"
+    SCHEDULED_TASK_WRITE = "scheduled_task:write"
+    SCHEDULED_TASK_DELETE = "scheduled_task:delete"
+
     # Environment Variables
     ENVVAR_READ = "envvar:read"
     ENVVAR_WRITE = "envvar:write"

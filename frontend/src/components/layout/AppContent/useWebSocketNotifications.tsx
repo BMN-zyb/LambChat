@@ -23,6 +23,7 @@ interface UseWebSocketNotificationsOptions {
     unreadCount: number,
     projectId?: string | null,
     isFavorite?: boolean,
+    scheduledTaskId?: string | null,
   ) => void;
 }
 
@@ -48,6 +49,7 @@ export function useWebSocketNotifications({
         message?: string;
         unread_count?: number;
         project_id?: string | null;
+        scheduled_task_id?: string | null;
         is_favorite?: boolean;
       };
     }) => {
@@ -58,6 +60,7 @@ export function useWebSocketNotifications({
         message,
         unread_count,
         project_id,
+        scheduled_task_id,
         is_favorite,
       } = notification.data;
 
@@ -68,6 +71,7 @@ export function useWebSocketNotifications({
           unread_count,
           project_id,
           is_favorite,
+          scheduled_task_id,
         );
       }
 
@@ -88,7 +92,13 @@ export function useWebSocketNotifications({
 
       if (!shouldSurface && !shouldAttemptAppNotification) {
         sessionApi.markRead(session_id).catch(() => {});
-        onSessionUnreadRef.current?.(session_id, 0, project_id, is_favorite);
+        onSessionUnreadRef.current?.(
+          session_id,
+          0,
+          project_id,
+          is_favorite,
+          scheduled_task_id,
+        );
         return;
       }
 

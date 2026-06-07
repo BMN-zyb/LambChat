@@ -214,7 +214,7 @@ export function SessionMenu({
         style={{ background: "var(--theme-border)" }}
       />
 
-      <div className="py-1">
+      <div className="py-1.5 px-1.5 space-y-0.5">
         {/* Custom projects */}
         {customProjects.map((project) => {
           const isCurrent = currentProjectId === project.id;
@@ -222,23 +222,29 @@ export function SessionMenu({
             <button
               key={project.id}
               onClick={() => handleSelectProject(project.id)}
-              className={`flex w-full items-center gap-3 px-3 py-2.5 text-sm transition-colors ${
+              className={`flex w-full items-center gap-2.5 px-2.5 py-2 text-sm rounded-lg transition-all duration-150 ${
                 isCurrent
-                  ? "text-[var(--theme-primary)] bg-[var(--theme-primary-light)]"
-                  : "text-[var(--theme-text-secondary)] hover:text-[var(--theme-text)] hover:bg-[var(--theme-primary-light)]"
+                  ? "text-[var(--theme-primary)] bg-[var(--theme-primary-light)] shadow-[inset_0_0_0_1.5px_var(--theme-primary-light,theme(rgb(99_102_241/0.35)))]"
+                  : "text-[var(--theme-text-secondary)] hover:text-[var(--theme-text)] hover:bg-[var(--theme-bg-hover,rgba(0,0,0,0.04))]"
               }`}
             >
-              <DynamicIcon
-                name={project.icon}
-                size={16}
-                className={`shrink-0 ${
+              <span
+                className={`flex items-center justify-center w-7 h-7 rounded-md shrink-0 ${
                   isCurrent
-                    ? "text-[var(--theme-primary)]"
-                    : "text-[var(--theme-text-secondary)]"
+                    ? "bg-[var(--theme-primary-light)] text-[var(--theme-primary)]"
+                    : "bg-[var(--theme-bg-hover,rgba(0,0,0,0.04))] text-[var(--theme-text-secondary)]"
                 }`}
-              />
-              <span className="truncate flex-1 text-left">{project.name}</span>
-              {isCurrent && <Check size={14} className="shrink-0" />}
+              >
+                <DynamicIcon name={project.icon} size={14} />
+              </span>
+              <span className="truncate flex-1 text-left font-medium">
+                {project.name}
+              </span>
+              {isCurrent && (
+                <span className="flex items-center justify-center w-5 h-5 rounded-full bg-[var(--theme-primary)] text-white">
+                  <Check size={12} strokeWidth={3} />
+                </span>
+              )}
             </button>
           );
         })}
@@ -246,23 +252,28 @@ export function SessionMenu({
         {/* Uncategorized */}
         <button
           onClick={() => handleSelectProject(null)}
-          className={`flex w-full items-center gap-3 px-3 py-2.5 text-sm transition-colors ${
+          className={`flex w-full items-center gap-2.5 px-2.5 py-2 text-sm rounded-lg transition-all duration-150 ${
             currentProjectId === null
-              ? "text-[var(--theme-primary)] bg-[var(--theme-primary-light)]"
-              : "text-[var(--theme-text-secondary)] hover:text-[var(--theme-text)] hover:bg-[var(--theme-primary-light)]"
+              ? "text-[var(--theme-primary)] bg-[var(--theme-primary-light)] shadow-[inset_0_0_0_1.5px_var(--theme-primary-light,theme(rgb(99_102_241/0.35)))]"
+              : "text-[var(--theme-text-secondary)] hover:text-[var(--theme-text)] hover:bg-[var(--theme-bg-hover,rgba(0,0,0,0.04))]"
           }`}
         >
-          <Tag
-            size={16}
-            className={`shrink-0 ${
-              currentProjectId === null ? "text-[var(--theme-primary)]" : ""
+          <span
+            className={`flex items-center justify-center w-7 h-7 rounded-md shrink-0 ${
+              currentProjectId === null
+                ? "bg-[var(--theme-primary-light)] text-[var(--theme-primary)]"
+                : "bg-[var(--theme-bg-hover,rgba(0,0,0,0.04))] text-[var(--theme-text-secondary)]"
             }`}
-          />
-          <span className="truncate flex-1 text-left">
+          >
+            <Tag size={14} />
+          </span>
+          <span className="truncate flex-1 text-left font-medium">
             {t("sidebar.uncategorized")}
           </span>
           {currentProjectId === null && (
-            <Check size={14} className="shrink-0" />
+            <span className="flex items-center justify-center w-5 h-5 rounded-full bg-[var(--theme-primary)] text-white">
+              <Check size={12} strokeWidth={3} />
+            </span>
           )}
         </button>
       </div>
@@ -341,7 +352,7 @@ export function SessionMenu({
         backgroundColor: "var(--theme-bg-card)",
         borderColor: "var(--theme-border)",
       }}
-      className="w-56 rounded-xl border shadow-xl overflow-hidden animate-in fade-in zoom-in-95 duration-150 origin-top-right"
+      className="py-1 w-56 rounded-xl border shadow-xl overflow-hidden animate-in fade-in zoom-in-95 duration-150 origin-top-right"
     >
       {subPanel ? projectSubPanel : mainMenu}
     </div>,

@@ -197,6 +197,7 @@ class SearchAgent(BaseGraphAgent):
                 "disabled_mcp_tools": disabled_mcp_tools,
                 "base_url": kwargs.get("base_url", ""),  # 传递 base_url 给工具使用
                 "active_goal": kwargs.get("active_goal"),
+                "recommendation_input": kwargs.get("recommendation_input"),
             },
             "metadata": langsmith_metadata,
             "recursion_limit": settings.SESSION_MAX_RUNS_PER_SESSION,

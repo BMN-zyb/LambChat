@@ -53,6 +53,7 @@ class SettingCategory(str, Enum):
     MEMORY_SEARCH = "memory_search"
     MEMORY_STORAGE = "memory_storage"
     AUDIO_TRANSCRIPTION = "audio_transcription"
+    SCHEDULED_TASK = "scheduled_task"
 
 
 class JsonSchemaField(BaseModel):

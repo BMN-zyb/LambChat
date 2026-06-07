@@ -517,6 +517,149 @@ export function FeedbackPanelSkeleton() {
   );
 }
 
+/** Scheduled task panel: header + grid of task cards matching real layout */
+export function ScheduledTaskPanelSkeleton() {
+  return (
+    <div className="glass-shell scheduled-task-panel flex h-full min-h-0 flex-col animate-fade-in">
+      <PanelHeaderSkeleton hasSearch={false} />
+
+      <div className="flex-1 overflow-y-auto px-4 py-3 sm:p-6">
+        <div className="grid auto-grid-cols gap-3">
+          {Array.from({ length: 6 }).map((_, i) => (
+            <div key={i} className="glass-card scheduled-task-card">
+              <div className="scheduled-task-card__content">
+                {/* Title + status badge */}
+                <div className="scheduled-task-card__title-row">
+                  <SkeletonLine
+                    width={i % 2 === 0 ? "w-40 sm:w-56" : "w-32 sm:w-44"}
+                    className="!h-[15px] sm:!h-[15px]"
+                  />
+                  <SkeletonLine
+                    width="w-14 sm:w-16"
+                    className="!h-5 !rounded-full shrink-0"
+                  />
+                </div>
+
+                {/* Description (2-line clamped in real card) */}
+                <div className="space-y-1">
+                  <SkeletonLine width="w-full" className="!h-2.5 sm:!h-3" />
+                  <SkeletonLine
+                    width={i % 2 === 0 ? "w-4/5" : "w-2/3"}
+                    className="!h-2.5 sm:!h-3"
+                  />
+                </div>
+
+                {/* Meta pills — matches .scheduled-task-meta flex-wrap with bordered pill items */}
+                <div className="scheduled-task-meta">
+                  {[0, 1, 2].map((j) => (
+                    <SkeletonLine
+                      key={j}
+                      width={
+                        j === 0
+                          ? "w-24 sm:w-32"
+                          : j === 1
+                            ? "w-20 sm:w-28"
+                            : "w-16 sm:w-24"
+                      }
+                      className="!h-[26px] !rounded-full"
+                    />
+                  ))}
+                </div>
+
+                {/* Subtle last-run info — matches .scheduled-task-card__subtle */}
+                <div className="scheduled-task-card__subtle flex items-center gap-2">
+                  <SkeletonLine width="w-12 sm:w-14" className="!h-3" />
+                  <SkeletonLine width="w-20 sm:w-28" className="!h-3" />
+                  <SkeletonLine
+                    width="w-12 sm:w-14"
+                    className="!h-4 !rounded-full shrink-0"
+                  />
+                </div>
+              </div>
+
+              {/* Action buttons — matches .scheduled-task-card__actions (border-top, justify-end) */}
+              <div className="scheduled-task-card__actions">
+                {[0, 1, 2, 3].map((j) => (
+                  <div
+                    key={j}
+                    className="skeleton-line size-9 rounded-lg"
+                  />
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {/* Pagination placeholder */}
+        <div className="glass-divider bg-transparent px-4 py-4 sm:px-6 mt-2">
+          <div className="flex items-center justify-center gap-2">
+            <div className="skeleton-line size-8 rounded-lg" />
+            <div className="skeleton-line h-3 w-24" />
+            <div className="skeleton-line size-8 rounded-lg" />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** Task session list (drill-down from scheduled task panel): header with subtitle + back button + session cards */
+export function TaskSessionListSkeleton() {
+  return (
+    <div className="flex h-full min-h-0 flex-col animate-fade-in">
+      <PanelHeaderSkeleton hasSearch={false} hasSubtitle />
+      <div className="flex-1 overflow-y-auto px-4 py-3 sm:p-6">
+        <div className="scheduled-task-list">
+          {Array.from({ length: 8 }).map((_, i) => (
+            <div key={i} className="glass-card scheduled-task-session-card w-full text-left">
+              {/* Left indicator — matches .scheduled-task-session-card__indicator (2.5rem × 2.5rem) */}
+              <div className="scheduled-task-session-card__indicator">
+                <div className="skeleton-line size-4 rounded" />
+              </div>
+              {/* Body — matches .scheduled-task-session-card__body (grid, gap: 0.25rem) */}
+              <div className="scheduled-task-session-card__body">
+                <SkeletonLine
+                  width={i % 2 === 0 ? "w-2/3" : "w-1/2"}
+                  className="!h-[14px] sm:!h-[15px]"
+                />
+                <div className="scheduled-task-session-card__meta">
+                  <SkeletonLine
+                    width="w-16 sm:w-20"
+                    className="!h-2.5 !opacity-50"
+                  />
+                  <SkeletonLine
+                    width="w-3"
+                    className="!h-2.5 !opacity-30"
+                  />
+                  <SkeletonLine
+                    width="w-20 sm:w-28"
+                    className="!h-2.5 !opacity-50"
+                  />
+                </div>
+              </div>
+              {/* Trail — matches .scheduled-task-session-card__trail (unread badge + chevron) */}
+              <div className="scheduled-task-session-card__trail flex items-center gap-2 shrink-0">
+                {i % 3 === 0 && (
+                  <div className="skeleton-line size-5 rounded-full" />
+                )}
+                <div className="skeleton-line size-4 rounded shrink-0" />
+              </div>
+            </div>
+          ))}
+        </div>
+        {/* Pagination placeholder */}
+        <div className="glass-divider bg-transparent px-4 py-4 sm:px-6 mt-2">
+          <div className="flex items-center justify-center gap-2">
+            <div className="skeleton-line size-8 rounded-lg" />
+            <div className="skeleton-line h-3 w-24" />
+            <div className="skeleton-line size-8 rounded-lg" />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /** Channels page: card grid matching SkillBaseCard (.scb) structure */
 export function ChannelsGridSkeleton() {
   return (

@@ -14,7 +14,7 @@ import { useTranslation } from "react-i18next";
 import toast from "react-hot-toast";
 import { PanelHeader } from "../common/PanelHeader";
 import { LoadingSpinner } from "../common/LoadingSpinner";
-import { PanelLoadingState } from "../common/PanelLoadingState";
+import { MCPPanelSkeleton } from "../skeletons";
 import { Pagination } from "../common/Pagination";
 import { MCPServerCard } from "../mcp/MCPServerCard";
 import { MCPServerToolsSidebar } from "../mcp/MCPServerToolsSidebar";
@@ -385,7 +385,7 @@ export function MCPPanel() {
     isLoading && servers.length === 0 && searchQuery.trim().length === 0;
 
   if (isInitialLoading) {
-    return <PanelLoadingState text={t("common.loading", "加载中...")} />;
+    return <MCPPanelSkeleton />;
   }
 
   return (
@@ -442,7 +442,7 @@ export function MCPPanel() {
       {/* Servers Grid */}
       <div className="flex-1 overflow-y-auto py-2 sm:py-4 px-4">
         {filteredServers.length === 0 ? (
-          <div className="flex h-full flex-col items-center justify-center text-theme-text-secondary py-12">
+          <div className="flex h-full flex-col items-center justify-center text-theme-text-secondary">
             <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-stone-100 dark:bg-stone-800 mb-4">
               <FolderOpen
                 size={28}

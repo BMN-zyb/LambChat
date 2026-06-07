@@ -286,6 +286,15 @@ function MemoryPage() {
   return <AppContent key="memory" activeTab="memory" />;
 }
 
+function ScheduledTasksPage() {
+  useSEO({
+    title: "seo.scheduledTasks.title",
+    description: "seo.scheduledTasks.description",
+    path: "/scheduled-tasks",
+  });
+  return <AppContent key="scheduled-tasks" activeTab="scheduled-tasks" />;
+}
+
 // Auth page wrapper - redirects to /chat after successful login/register
 function AuthPageWrapper({
   initialMode,
@@ -563,6 +572,19 @@ function App() {
               element={
                 <ProtectedRoute>
                   <MemoryPage />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/scheduled-tasks"
+              element={
+                <ProtectedRoute
+                  permissions={[Permission.SCHEDULED_TASK_READ]}
+                  redirectTo="/chat"
+                  showToast
+                  toastMessage={t("errors.noPermission")}
+                >
+                  <ScheduledTasksPage />
                 </ProtectedRoute>
               }
             />

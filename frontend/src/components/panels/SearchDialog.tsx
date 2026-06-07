@@ -321,7 +321,7 @@ export function SearchDialog({
             >
               {/* Empty search results */}
               {hasQuery && allSessions.length === 0 && (
-                <div className="px-4 py-10 text-center">
+                <div className="flex h-full flex-col items-center justify-center px-4 text-center">
                   <p className="text-sm text-stone-400 dark:text-stone-500">
                     {t("sidebar.noSearchResults")}
                   </p>

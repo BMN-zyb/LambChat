@@ -42,6 +42,8 @@ import { AppShell } from "./AppShell";
 import { ChatView } from "./ChatView";
 import { shouldShowMessageOutline } from "./messageOutline";
 
+const SCHEDULED_TASK_DEFAULTS_KEY = "lambchat_scheduled_task_defaults";
+
 export interface ChatAppContentProps {
   showProfileModal: boolean;
   onCloseProfileModal: () => void;
@@ -378,6 +380,18 @@ export function ChatAppContent({
     setSessionAgentOption,
   ]);
 
+  useEffect(() => {
+    if (!currentAgent && !currentModelId && !currentModelValue) return;
+    localStorage.setItem(
+      SCHEDULED_TASK_DEFAULTS_KEY,
+      JSON.stringify({
+        agentId: currentAgent,
+        modelId: currentModelId,
+        modelValue: currentModelValue,
+      }),
+    );
+  }, [currentAgent, currentModelId, currentModelValue]);
+
   const handleSelectModel = useCallback(
     (modelId: string, modelValue: string) => {
       setCurrentModelId(modelId);
@@ -580,12 +594,13 @@ export function ChatAppContent({
   useWebSocketNotifications({
     sessionId,
     enabled: isAuthenticated,
-    onSessionUnread: (sid, count, projectId, isFavorite) => {
+    onSessionUnread: (sid, count, projectId, isFavorite, scheduledTaskId) => {
       sidebarRef.current?.updateSessionUnread(
         sid,
         count,
         projectId,
         isFavorite,
+        scheduledTaskId,
       );
     },
   });

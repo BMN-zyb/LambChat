@@ -160,6 +160,19 @@ async def fast_agent_node(state: Dict[str, Any], config: RunnableConfig) -> Dict
             )
             filtered_tools.append(search_tool)
 
+    # Diagnostic: log tool names passed to the LLM
+    if filtered_tools is not None:
+        tool_names = [getattr(t, "name", str(t)) for t in filtered_tools]
+        has_sched = any("scheduled_task" in n for n in tool_names)
+        logger.info(
+            "[FastAgent] Passing %d tools to create_deep_agent (scheduled_task=%s): %s",
+            len(filtered_tools),
+            has_sched,
+            tool_names,
+        )
+    else:
+        logger.warning("[FastAgent] filtered_tools is None — no tools will be passed to LLM!")
+
     # 创建内层 graph (deep agent)
     checkpointer_start = time.time()
     inner_checkpointer = await get_async_checkpointer(thread_id=state.get("session_id"))
@@ -274,6 +287,7 @@ async def fast_agent_node(state: Dict[str, Any], config: RunnableConfig) -> Dict
     # 注意：checkpointer + add_messages reducer 会自动维护历史消息，
     # 只需传入新消息，避免与 checkpoint 中的历史消息重复。
     user_input = state.get("input", "")
+    recommendation_input = configurable.get("recommendation_input") or user_input
     if supports_vision:
         attachments = await inline_image_attachments_as_data_urls(
             attachments,
@@ -285,12 +299,12 @@ async def fast_agent_node(state: Dict[str, Any], config: RunnableConfig) -> Dict
     logger.info("[FastAgent] Creating AgentEventProcessor")
     event_processor = AgentEventProcessor(presenter, base_url=configurable.get("base_url", ""))
 
-    if user_input and settings.ENABLE_RECOMMEND_QUESTIONS:
+    if recommendation_input and settings.ENABLE_RECOMMEND_QUESTIONS:
         from src.agents.core.recommendations import schedule_recommend_questions_from_state
 
         schedule_recommend_questions_from_state(
             presenter,
-            user_input,
+            recommendation_input,
             inner_graph,
             inner_config,
         )

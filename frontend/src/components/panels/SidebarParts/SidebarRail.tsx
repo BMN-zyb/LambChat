@@ -1,7 +1,8 @@
 import {
   MessageSquarePlus,
   Search,
-  Clock,
+  CalendarClock,
+  History,
   MoreHorizontal,
   FolderOpen,
   UserRound,
@@ -25,6 +26,7 @@ interface SidebarRailProps {
   onOpenSearch: () => void;
   onOpenRecentChats: () => void;
   onOpenFileLibrary: () => void;
+  onOpenScheduledTasks: () => void;
   onOpenPersonaPlaza: () => void;
   onOpenTeamBuilder: () => void;
   onOpenSkills: () => void;
@@ -45,6 +47,7 @@ export function SidebarRail({
   onOpenSearch,
   onOpenRecentChats,
   onOpenFileLibrary,
+  onOpenScheduledTasks,
   onOpenPersonaPlaza,
   onOpenTeamBuilder,
   hasMoreMenuItems,
@@ -57,6 +60,7 @@ export function SidebarRail({
   const { t } = useTranslation();
   const { hasPermission } = useAuth();
   const canReadTeam = hasPermission(Permission.TEAM_READ);
+  const canReadScheduledTasks = hasPermission(Permission.SCHEDULED_TASK_READ);
 
   return (
     <nav
@@ -138,6 +142,17 @@ export function SidebarRail({
             <Users size={20} />
           </button>
         )}
+        {canReadScheduledTasks && (
+          <button
+            type="button"
+            onClick={onOpenScheduledTasks}
+            className={railBtn}
+            title={t("nav.scheduled-tasks")}
+            aria-label={t("nav.scheduled-tasks")}
+          >
+            <CalendarClock size={20} />
+          </button>
+        )}
         <button
           type="button"
           onClick={onOpenFileLibrary}
@@ -155,7 +170,7 @@ export function SidebarRail({
           title={t("sidebar.recentChats")}
           aria-label={t("sidebar.recentChats")}
         >
-          <Clock size={20} />
+          <History size={20} />
           {unreadCount > 0 && (
             <span className="absolute -top-0 right-0 flex h-3.5 min-w-[14px] items-center justify-center rounded-full bg-gradient-to-br from-red-400 to-rose-500 px-0.5 text-[9px] font-bold leading-none text-white shadow-[0_1px_3px_rgba(239,68,68,0.4)] ring-1 ring-white/20">
               {unreadCount > 99 ? "99+" : unreadCount}

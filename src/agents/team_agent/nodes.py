@@ -542,6 +542,7 @@ async def team_router_node(state: Dict[str, Any], config: RunnableConfig) -> Dic
     }
 
     # 构建传入的新消息（包含附件）
+    recommendation_input = configurable.get("recommendation_input") or user_input
     if supports_vision:
         attachments = await inline_image_attachments_as_data_urls(
             attachments,
@@ -558,12 +559,12 @@ async def team_router_node(state: Dict[str, Any], config: RunnableConfig) -> Dic
         subagent_avatars=subagent_avatars,
     )
 
-    if user_input and settings.ENABLE_RECOMMEND_QUESTIONS:
+    if recommendation_input and settings.ENABLE_RECOMMEND_QUESTIONS:
         from src.agents.core.recommendations import schedule_recommend_questions_from_state
 
         schedule_recommend_questions_from_state(
             presenter,
-            user_input,
+            recommendation_input,
             inner_graph,
             inner_config,
         )

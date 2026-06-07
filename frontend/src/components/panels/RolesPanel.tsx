@@ -17,7 +17,7 @@ import { useTranslation } from "react-i18next";
 import toast from "react-hot-toast";
 import { PanelHeader } from "../common/PanelHeader";
 import { LoadingSpinner } from "../common/LoadingSpinner";
-import { PanelLoadingState } from "../common/PanelLoadingState";
+import { RolesPanelSkeleton } from "../skeletons";
 import { Pagination } from "../common/Pagination";
 import { EditorSidebar } from "../common/EditorSidebar";
 import { ConfirmDialog } from "../common/ConfirmDialog";
@@ -628,7 +628,7 @@ export function RolesPanel() {
     isLoading && roles.length === 0 && searchQuery.trim().length === 0;
 
   if (isInitialLoading) {
-    return <PanelLoadingState text={t("common.loading", "加载中...")} />;
+    return <RolesPanelSkeleton />;
   }
 
   return (

@@ -76,6 +76,7 @@ class TaskExecutor:
         persona_system_prompt: Optional[str] = None,
         disabled_mcp_tools: Optional[List[str]] = None,
         display_message: Optional[str] = None,
+        recommendation_input: Optional[str] = None,
         team_id: Optional[str] = None,
         active_goal: Optional[Dict[str, Any]] = None,
     ) -> None:
@@ -170,6 +171,7 @@ class TaskExecutor:
                 enabled_skills=enabled_skills,
                 persona_system_prompt=persona_system_prompt,
                 disabled_mcp_tools=disabled_mcp_tools,
+                recommendation_input=recommendation_input,
                 team_id=team_id,
                 active_goal=active_goal,
             ):
@@ -440,6 +442,9 @@ class TaskExecutor:
                     notification["data"]["unread_count"] = getattr(session, "unread_count", 0)
                     notification["data"]["project_id"] = (
                         session.metadata.get("project_id") if session.metadata else None
+                    )
+                    notification["data"]["scheduled_task_id"] = (
+                        session.metadata.get("scheduled_task_id") if session.metadata else None
                     )
                     notification["data"]["is_favorite"] = is_session_favorite(
                         session.metadata,

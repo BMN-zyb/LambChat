@@ -307,6 +307,7 @@ async def agent_node(state: Dict[str, Any], config: RunnableConfig) -> Dict[str,
     # 注意：checkpointer + add_messages reducer 会自动维护历史消息，
     # 只需传入新消息，避免与 checkpoint 中的历史消息重复。
     user_input = state.get("input", "")
+    recommendation_input = configurable.get("recommendation_input") or user_input
     if supports_vision:
         attachments = await inline_image_attachments_as_data_urls(
             attachments,
@@ -318,12 +319,12 @@ async def agent_node(state: Dict[str, Any], config: RunnableConfig) -> Dict[str,
     logger.info("[SearchAgent] Creating AgentEventProcessor")
     event_processor = AgentEventProcessor(presenter, base_url=configurable.get("base_url", ""))
 
-    if user_input and settings.ENABLE_RECOMMEND_QUESTIONS:
+    if recommendation_input and settings.ENABLE_RECOMMEND_QUESTIONS:
         from src.agents.core.recommendations import schedule_recommend_questions_from_state
 
         schedule_recommend_questions_from_state(
             presenter,
-            user_input,
+            recommendation_input,
             inner_graph,
             inner_config,
         )

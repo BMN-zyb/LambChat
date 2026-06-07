@@ -248,6 +248,8 @@ def build_conversation_config(
             conversation_config["persona_avatar"] = request.persona_snapshot.avatar
     if request.project_id:
         conversation_config["project_id"] = request.project_id
+    if request.user_timezone:
+        conversation_config["user_timezone"] = request.user_timezone
     if agent_id == "team" and request.team_id:
         conversation_config["team_id"] = request.team_id
     return conversation_config
@@ -291,6 +293,7 @@ async def _execute_agent_stream(
     disabled_mcp_tools: list[str] | None = None,
     team_id: str | None = None,
     active_goal: dict | None = None,
+    recommendation_input: str | None = None,
 ):
     """执行 Agent 并流式输出事件（供 TaskManager 调用）"""
     from src.infra.task.manager import TaskInterruptedError
@@ -320,6 +323,7 @@ async def _execute_agent_stream(
             team_id=team_id,
             active_goal=active_goal,
             goal_started_at=started_at,
+            recommendation_input=recommendation_input,
         ):
             if event.get("event") == "goal:end":
                 goal_end_emitted = True
@@ -448,6 +452,7 @@ async def chat_stream(
         "disabled_mcp_tools": request.disabled_mcp_tools,
         "team_id": request.team_id,
         "active_goal": active_goal_data,
+        "recommendation_input": request.message,
     }
 
     # 检查并发限制
@@ -552,6 +557,7 @@ async def chat_stream(
             persona_system_prompt=request.persona_system_prompt,
             disabled_mcp_tools=request.disabled_mcp_tools,
             display_message=request.message,
+            recommendation_input=request.message,
             trace_id=trace_id,
             team_id=request.team_id,
             active_goal=active_goal_data,
@@ -575,6 +581,7 @@ async def chat_stream(
             persona_system_prompt=request.persona_system_prompt,
             disabled_mcp_tools=request.disabled_mcp_tools,
             display_message=request.message,
+            recommendation_input=request.message,
             team_id=request.team_id,
             trace_id=trace_id,
             active_goal=active_goal_data,

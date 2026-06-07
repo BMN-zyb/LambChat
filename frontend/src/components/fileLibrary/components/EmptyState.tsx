@@ -23,7 +23,7 @@ export function EmptyState({
   /* Empty states */
   if (!hasFiles) {
     return (
-      <div className="flex flex-col items-center justify-center h-72 gap-5">
+      <div className="flex flex-col items-center justify-center flex-1 gap-5">
         {/* Illustration */}
         <div className="relative">
           <div className="w-20 h-20 rounded-2xl bg-gradient-to-br from-theme-bg-subtle to-theme-bg dark:from-theme-bg-subtle dark:to-theme-bg flex items-center justify-center border border-theme-border">

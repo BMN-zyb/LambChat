@@ -21,6 +21,8 @@ export {
   RolesPanelSkeleton,
   MCPPanelSkeleton,
   FeedbackPanelSkeleton,
+  ScheduledTaskPanelSkeleton,
+  TaskSessionListSkeleton,
   ChannelsGridSkeleton,
   ChannelConfigSkeleton,
   AgentPanelSkeleton,

@@ -12,7 +12,7 @@ import {
   X,
 } from "lucide-react";
 import { PanelHeader } from "../../common/PanelHeader";
-import { PanelLoadingState } from "../../common/PanelLoadingState";
+import { SkillsPanelSkeleton } from "../../skeletons";
 import { Pagination } from "../../common/Pagination";
 import { SkillCard } from "../../skill/SkillCard";
 import type { SkillResponse } from "../../../types";
@@ -110,7 +110,7 @@ export function SkillsList({
     isLoading && filteredSkills.length === 0 && !hasActiveFilters;
 
   if (isInitialLoading) {
-    return <PanelLoadingState text={t("common.loading", "加载中...")} />;
+    return <SkillsPanelSkeleton />;
   }
 
   const filterMenu = availableTags.length > 0 && (

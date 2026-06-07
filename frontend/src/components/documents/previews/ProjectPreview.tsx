@@ -147,7 +147,7 @@ export default function ProjectPreview({
 
   if (Object.keys(config.files).length === 0) {
     return (
-      <div className="flex flex-col items-center justify-center py-16 gap-4">
+      <div className="flex h-full flex-col items-center justify-center gap-4">
         <AlertCircle size={32} className="text-amber-500" />
         <p className="text-sm text-stone-500 dark:text-stone-400">
           {t("project.noFiles", "没有可预览的文件")}

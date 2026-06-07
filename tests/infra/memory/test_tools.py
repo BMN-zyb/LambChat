@@ -408,6 +408,9 @@ def test_start_memory_compaction_agent_registers_unified_scheduler_job(monkeypat
     registered = []
 
     class FakeScheduler:
+        def register_job(self, job):
+            registered.append(job)
+
         def register_interval_job(self, job):
             registered.append(job)
 
@@ -437,7 +440,8 @@ def test_start_memory_compaction_agent_registers_unified_scheduler_job(monkeypat
     job = registered[0]
     assert job.id == "memory.compaction"
     assert job.enabled() is True
-    assert job.interval_seconds() == 123
+    trigger = job.trigger()
+    assert trigger.interval_length == 123
     assert job.run_on_start is False
 
 

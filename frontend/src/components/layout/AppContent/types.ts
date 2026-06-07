@@ -13,4 +13,5 @@ export type TabType =
   | "files"
   | "notifications"
   | "memory"
-  | "team";
+  | "team"
+  | "scheduled-tasks";

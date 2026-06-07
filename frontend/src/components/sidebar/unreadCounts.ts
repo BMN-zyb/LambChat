@@ -4,6 +4,7 @@ import { isSessionFavorite } from "./sessionFavorites";
 export interface UnreadEntry {
   count: number;
   projectId: string | null;
+  scheduledTaskId?: string | null;
   isFavorite?: boolean;
 }
 
@@ -15,6 +16,7 @@ export function mergeUnreadUpdate(
     sessionId: string;
     unreadCount: number;
     projectId?: string | null;
+    scheduledTaskId?: string | null;
     isFavorite?: boolean;
   },
 ): UnreadBySession {
@@ -28,9 +30,16 @@ export function mergeUnreadUpdate(
   next.set(update.sessionId, {
     count: update.unreadCount,
     projectId: update.projectId ?? previous?.projectId ?? null,
+    scheduledTaskId:
+      update.scheduledTaskId ?? previous?.scheduledTaskId ?? null,
     isFavorite: update.isFavorite ?? previous?.isFavorite ?? false,
   });
   return next;
+}
+
+function getScheduledTaskId(session: BackendSession): string | null {
+  const value = session.metadata?.scheduled_task_id;
+  return typeof value === "string" ? value : null;
 }
 
 export function getUnreadCountForProject({
@@ -65,18 +74,58 @@ export function getUnreadCountForUncategorized({
   unreadBySession: UnreadBySession;
 }): number {
   const loadedIds = new Set(loadedSessions.map((session) => session.id));
+  const loadedCount = loadedSessions
+    .filter((session) => getScheduledTaskId(session) === null)
+    .reduce(
+      (total, session) => total + Math.max(0, session.unread_count ?? 0),
+      0,
+    );
+  const externalCount = Array.from(unreadBySession.entries()).reduce(
+    (total, [sessionId, entry]) =>
+      entry.projectId === null &&
+      !entry.scheduledTaskId &&
+      !loadedIds.has(sessionId)
+        ? total + entry.count
+        : total,
+    0,
+  );
+  return loadedCount + externalCount;
+}
+
+export function getUnreadCountForScheduledTask({
+  scheduledTaskId,
+  loadedSessions,
+  unreadBySession,
+}: {
+  scheduledTaskId: string;
+  loadedSessions: BackendSession[];
+  unreadBySession: UnreadBySession;
+}): number {
+  const loadedIds = new Set(loadedSessions.map((session) => session.id));
   const loadedCount = loadedSessions.reduce(
     (total, session) => total + Math.max(0, session.unread_count ?? 0),
     0,
   );
   const externalCount = Array.from(unreadBySession.entries()).reduce(
     (total, [sessionId, entry]) =>
-      entry.projectId === null && !loadedIds.has(sessionId)
+      entry.scheduledTaskId === scheduledTaskId && !loadedIds.has(sessionId)
         ? total + entry.count
         : total,
     0,
   );
   return loadedCount + externalCount;
+}
+
+export function getExternalUnreadCountForScheduledTasks(
+  unreadBySession: UnreadBySession,
+  excludedTaskIds: ReadonlySet<string> = new Set(),
+): number {
+  return Array.from(unreadBySession.values()).reduce((total, entry) => {
+    if (!entry.scheduledTaskId || excludedTaskIds.has(entry.scheduledTaskId)) {
+      return total;
+    }
+    return total + entry.count;
+  }, 0);
 }
 
 export function getUnreadCountForFavorites(

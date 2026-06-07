@@ -505,6 +505,39 @@ class RoleStorage:
                 )
                 # 清除 get_by_name 可能缓存的 None，避免新建角色后查询命中空缓存
                 await self.invalidate_cache(role_data["name"])
+            elif role_data["name"] == "user":
+                migration_key = "scheduled_task_permissions_v1"
+                raw_role = await self.collection.find_one(
+                    {"name": role_data["name"]},
+                    {"permissions": 1, "migrations": 1},
+                )
+                migrations = (raw_role or {}).get("migrations") or {}
+                if not migrations.get(migration_key):
+                    now = utc_now()
+                    scheduled_task_permissions = [
+                        Permission.SCHEDULED_TASK_READ.value,
+                        Permission.SCHEDULED_TASK_WRITE.value,
+                        Permission.SCHEDULED_TASK_DELETE.value,
+                    ]
+                    await self.collection.update_one(
+                        {"name": role_data["name"]},
+                        {
+                            "$addToSet": {
+                                "permissions": {"$each": scheduled_task_permissions},
+                            },
+                            "$set": {
+                                f"migrations.{migration_key}": True,
+                                "updated_at": now,
+                            },
+                        },
+                    )
+                    await self.invalidate_cache(role_data["name"])
+                    try:
+                        from src.api.deps import clear_auth_cache
+
+                        clear_auth_cache()
+                    except Exception:
+                        pass
             elif role_data.get("is_system", False):
                 # 系统角色：更新权限列表、描述、限制和is_system标记
                 now = utc_now()

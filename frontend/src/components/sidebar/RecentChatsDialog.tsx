@@ -233,7 +233,7 @@ export function RecentChatsDialog({
         {isLoading ? (
           renderLoadingRows(6)
         ) : sessions.length === 0 ? (
-          <div className="text-center py-10 text-xs text-stone-400 dark:text-stone-500">
+          <div className="flex h-full flex-col items-center justify-center text-center text-xs text-stone-400 dark:text-stone-500">
             {t("sidebar.noSessions") || "No recent chats"}
           </div>
         ) : (

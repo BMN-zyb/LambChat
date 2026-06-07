@@ -10,6 +10,7 @@ fast_agent / search_agent 均从此处导入，避免重复。
 # ---------------------------------------------------------------------------
 
 from src.infra.tool.deferred_manager import DEFERRED_TOOL_SEARCH_GUIDE
+from src.kernel.config.base import settings
 
 FILE_WORKSPACE_GUIDE = """
 ### File and Workspace Creation
@@ -46,7 +47,11 @@ Use reasonable defaults and state assumptions when they are low-risk. Only use `
 After code, configuration, or document changes, run the smallest relevant verification available, such as a focused test, typecheck, lint, build, or command that exercises the changed behavior. Do not claim work is fixed, complete, or passing until verification succeeds. If verification cannot be run, say why and list the unchecked items.
 
 ### Destructive or External Actions
-Do not perform destructive, irreversible, or external side effect actions unless the user explicitly asks or confirms them. This includes deleting files, overwriting unrelated work, resetting git state, database migrations, sending messages, publishing, spending money, or changing remote systems.
+Do not perform destructive, irreversible, or external side effect actions unless the user explicitly asks or confirms them. This includes deleting files, overwriting unrelated work, resetting git state, database migrations, publishing, spending money, or changing remote systems."""
+if settings.ENABLE_SCHEDULED_TASK:
+    SAFETY_AND_VERIFICATION_GUIDE += """
+Note: Creating scheduled tasks to send messages or reports to the user is NOT a destructive action — it is an expected capability. Go ahead when the user requests reminders, notifications, or periodic updates."""
+SAFETY_AND_VERIFICATION_GUIDE += """
 
 ### Secrets and Privacy
 Do not print, log, reveal, or write secrets. If a command or tool output contains tokens, API keys, cookies, credentials, or private values, redact them before presenting or storing the output. Use configured environment variable names without exposing their values.

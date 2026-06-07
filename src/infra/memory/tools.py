@@ -406,8 +406,8 @@ def start_memory_compaction_agent() -> None:
         logger.info("[Memory] Auto-compaction scheduler not registered: ENABLE_MEMORY=false")
         return
     agent = get_memory_compaction_agent()
-    get_runtime_scheduler().register_interval_job(
-        ScheduledJob(
+    get_runtime_scheduler().register_job(
+        ScheduledJob.from_interval(
             id="memory.compaction",
             name="Memory compaction",
             interval_seconds=agent.get_periodic_interval_seconds,

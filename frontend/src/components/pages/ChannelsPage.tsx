@@ -193,7 +193,7 @@ export function ChannelsPage() {
         <div className="flex-1 overflow-y-auto py-4">
           <div className="mx-auto max-w-full">
             {channelTypes.length === 0 ? (
-              <div className="flex flex-col items-center justify-center py-16 text-center xl:py-20 2xl:py-24">
+              <div className="flex h-full flex-col items-center justify-center text-center">
                 <div className="relative">
                   <div className="absolute inset-0 rounded-full bg-[var(--theme-primary)]/20" />
                   <div className="relative flex h-20 w-20 items-center justify-center rounded-full bg-[var(--theme-primary-light)]">

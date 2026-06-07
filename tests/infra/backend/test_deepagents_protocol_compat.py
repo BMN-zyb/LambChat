@@ -37,8 +37,11 @@ class _FakeSkillStorage:
             for skill_name, user_id in skill_keys
         }
 
-    async def get_all_user_skill_names(self, user_id: str) -> list[str]:
-        return sorted(self.files.keys())
+    async def get_all_user_skill_names(
+        self, user_id: str, limit: int | None = None
+    ) -> list[str]:
+        names = sorted(self.files.keys())
+        return names[:limit] if limit is not None else names
 
 
 class _FakeFilesAPI:

@@ -12,6 +12,7 @@ import { ChatInput } from "../../chat/ChatInput";
 import { WelcomePage } from "../../chat/WelcomePage";
 import { Virtuoso, type ListRange } from "react-virtuoso";
 import { ApprovalPanel } from "../../panels/ApprovalPanel";
+import { SessionScheduledTasksButton } from "../../panels/ScheduledTaskPanel";
 import {
   ChatSkeleton,
   ChatSkeletonMessagesOnly,
@@ -116,6 +117,12 @@ export function ChatView({
   const navigate = useNavigate();
   const { user } = useAuth();
   const sessionRunning = isSessionRunning(messages, isLoading);
+  const scheduledTasksRefreshKey = [
+    sessionId ?? "",
+    currentRunId ?? "",
+    messages.length,
+    isLoading ? "loading" : "idle",
+  ].join(":");
   const hasVisibleStreamingMessage = messages.some(
     (message) => message.role === "assistant" && message.isStreaming,
   );
@@ -431,6 +438,10 @@ export function ChatView({
         ref={messagesContainerRef}
         className="relative flex-1 min-h-0 overflow-hidden"
       >
+        <SessionScheduledTasksButton
+          sessionId={sessionId}
+          refreshKey={scheduledTasksRefreshKey}
+        />
         {messages.length === 0 ? (
           isLoading ? (
             <ChatSkeleton count={5} />

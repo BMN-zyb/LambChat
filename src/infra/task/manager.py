@@ -245,6 +245,7 @@ class BackgroundTaskManager:
         disabled_mcp_tools: Optional[List[str]] = None,
         session_name: Optional[str] = None,
         display_message: Optional[str] = None,
+        recommendation_input: Optional[str] = None,
         team_id: Optional[str] = None,
         trace_id: Optional[str] = None,
         active_goal: Optional[Dict[str, Any]] = None,
@@ -328,6 +329,7 @@ class BackgroundTaskManager:
                     persona_system_prompt=persona_system_prompt,
                     disabled_mcp_tools=disabled_mcp_tools,
                     display_message=display_message,
+                    recommendation_input=recommendation_input,
                     team_id=team_id,
                     existing_trace_id=trace_id or None,
                     active_goal=active_goal,
@@ -360,6 +362,7 @@ class BackgroundTaskManager:
         disabled_mcp_tools: Optional[List[str]] = None,
         session_name: Optional[str] = None,
         display_message: Optional[str] = None,
+        recommendation_input: Optional[str] = None,
         trace_id: Optional[str] = None,
         user_message_written: bool = False,
         payload_store: Optional[TaskArqPayloadStore] = None,
@@ -421,6 +424,7 @@ class BackgroundTaskManager:
                     "user_message_written": user_message_written,
                     "team_id": team_id,
                     "active_goal": active_goal,
+                    "recommendation_input": recommendation_input,
                 },
             )
 

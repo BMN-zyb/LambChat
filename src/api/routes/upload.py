@@ -31,6 +31,16 @@ from src.api.routes.file_type import (
     get_file_category,
     get_permission_for_category,
 )
+from src.api.routes.upload_signed_urls import (
+    SignedUrlItem,
+    SignedUrlRequest,
+    SignedUrlResponse,
+    get_signed_urls,
+    get_single_signed_url,
+)
+from src.api.routes.upload_signed_urls import (
+    router as signed_url_router,
+)
 from src.infra.async_utils import run_blocking_io
 from src.infra.async_utils.background_tasks import BestEffortTaskLimiter
 from src.infra.auth.rbac import check_permission
@@ -46,12 +56,19 @@ from src.kernel.schemas.user import TokenPayload
 
 logger = get_logger(__name__)
 
+__all__ = [
+    "SignedUrlItem",
+    "SignedUrlRequest",
+    "SignedUrlResponse",
+    "get_signed_urls",
+    "get_single_signed_url",
+]
+
 _file_record_storage = FileRecordStorage()
 _upload_delete_tasks = BestEffortTaskLimiter("upload delete", max_tasks=8)
 
 UPLOAD_READ_CHUNK_SIZE = 1024 * 1024
 UPLOAD_SPOOL_MEMORY_LIMIT = 2 * 1024 * 1024
-SIGNED_URL_KEYS_MAX = 100
 
 
 async def drain_upload_delete_tasks() -> None:
@@ -783,159 +800,7 @@ async def get_storage_config(
     }
 
 
-# ============================================================================
-# Signed URL API (for private buckets)
-# ============================================================================
-
-
-class SignedUrlRequest(BaseModel):
-    """Request model for getting signed URLs"""
-
-    keys: list[str] = Field(
-        ...,
-        min_length=1,
-        max_length=SIGNED_URL_KEYS_MAX,
-        description="List of S3 object keys to get signed URLs for",
-    )
-    expires: int = Field(
-        default=3600,
-        ge=60,
-        le=86400,
-        description="URL expiration time in seconds (default 1 hour, max 24 hours)",
-    )
-
-
-class SignedUrlItem(BaseModel):
-    """Single signed URL result"""
-
-    key: str
-    url: str | None = None
-    error: str | None = None
-
-
-class SignedUrlResponse(BaseModel):
-    """Response model for signed URLs"""
-
-    urls: list[SignedUrlItem]
-    expires_in: int
-
-
-@router.post(
-    "/signed-urls",
-    response_model=SignedUrlResponse,
-    dependencies=[Depends(require_permissions("file:upload"))],
-)
-async def get_signed_urls(
-    body: SignedUrlRequest,
-    req: Request,
-    current_user: TokenPayload = Depends(get_current_user_required),
-) -> SignedUrlResponse:
-    """
-    Get presigned URLs for private S3 objects
-
-    This endpoint generates temporary signed URLs that can be used to access
-    private files stored in S3. The URLs expire after the specified time.
-
-    Args:
-        request: Contains list of S3 keys and optional expiration time
-        current_user: Current authenticated user
-
-    Returns:
-        List of signed URLs for each requested key
-    """
-    storage = await get_or_init_storage()
-
-    base_url = _get_base_url(req)
-
-    # Local storage: return proxy URLs directly
-    if storage.is_local:
-        urls = []
-        for key in body.keys:
-            try:
-                exists = await storage.file_exists(key)
-                if exists:
-                    urls.append(SignedUrlItem(key=key, url=f"{base_url}/api/upload/file/{key}"))
-                else:
-                    urls.append(SignedUrlItem(key=key, error="File not found"))
-            except Exception as e:
-                urls.append(SignedUrlItem(key=key, error=str(e)))
-        return SignedUrlResponse(urls=urls, expires_in=0)
-
-    # Check if bucket is private (need signed URLs)
-    if storage._config.public_bucket:
-        # Public bucket - return direct URLs instead
-        urls = []
-        for key in body.keys:
-            try:
-                url = await storage.get_file_url(key)
-                urls.append(SignedUrlItem(key=key, url=url))
-            except Exception as e:
-                urls.append(SignedUrlItem(key=key, error=str(e)))
-        return SignedUrlResponse(urls=urls, expires_in=0)  # expires_in=0 means no expiration
-
-    # Private bucket - generate presigned URLs
-    urls = []
-    for key in body.keys:
-        try:
-            url = await storage.get_presigned_url(key, body.expires)
-            urls.append(SignedUrlItem(key=key, url=url))
-        except Exception as e:
-            logger.warning(f"Failed to generate signed URL for {key}: {e}")
-            urls.append(SignedUrlItem(key=key, error=str(e)))
-
-    return SignedUrlResponse(urls=urls, expires_in=body.expires)
-
-
-@router.get(
-    "/signed-url",
-    response_model=SignedUrlItem,
-    dependencies=[Depends(require_permissions("file:upload"))],
-)
-async def get_single_signed_url(
-    key: str,
-    request: Request,
-    expires: int = 3600,
-    current_user: TokenPayload = Depends(get_current_user_required),
-) -> SignedUrlItem:
-    """
-    Get a single presigned URL for a private S3 object
-
-    Convenience endpoint for getting a single signed URL.
-
-    Args:
-        key: S3 object key
-        expires: URL expiration time in seconds (default 1 hour)
-        current_user: Current authenticated user
-
-    Returns:
-        Signed URL for the requested key
-    """
-    # Validate expires range
-    if expires < 60 or expires > 86400:
-        raise HTTPException(
-            status_code=400,
-            detail="expires must be between 60 and 86400 seconds",
-        )
-
-    storage = await get_or_init_storage()
-
-    base_url = _get_base_url(request)
-
-    try:
-        if storage.is_local:
-            exists = await storage.file_exists(key)
-            if not exists:
-                return SignedUrlItem(key=key, error="File not found")
-            return SignedUrlItem(key=key, url=f"{base_url}/api/upload/file/{key}")
-        # If bucket is public, return direct URL
-        if storage._config.public_bucket:
-            url = await storage.get_file_url(key)
-        else:
-            url = await storage.get_presigned_url(key, expires)
-        return SignedUrlItem(key=key, url=url)
-    except Exception as e:
-        logger.warning(f"Failed to generate signed URL for {key}: {e}")
-        return SignedUrlItem(key=key, error=str(e))
+router.include_router(signed_url_router)
 
 
 @router.get("/file/{key:path}")

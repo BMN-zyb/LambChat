@@ -19,6 +19,7 @@ import {
 } from "lucide-react";
 import toast from "react-hot-toast";
 import { PanelHeader } from "../../common/PanelHeader";
+import { PanelLoadingState } from "../../common/PanelLoadingState";
 import { Pagination } from "../../common/Pagination";
 import { Checkbox } from "../../common/Checkbox";
 import { BatchActionBar } from "../SkillsPanel/BatchActionBar";
@@ -294,12 +295,7 @@ export function MemoryPanel() {
       {/* List */}
       <div className="flex-1 overflow-y-auto py-2 sm:py-4 px-4 sm:p-6">
         {isLoading && memories.length === 0 ? (
-          <div className="flex h-40 items-center justify-center">
-            <div className="relative h-8 w-8">
-              <div className="absolute inset-0 rounded-full border-2 border-[var(--theme-border)]" />
-              <div className="absolute inset-0 rounded-full border-2 border-transparent border-t-[var(--theme-text-secondary)] animate-spin will-change-transform" />
-            </div>
-          </div>
+          <PanelLoadingState />
         ) : !isLoading && memories.length === 0 ? (
           <div className="flex h-full flex-col items-center justify-center text-center">
             <div className="mb-4 flex h-16 w-16 items-center justify-center rounded-full bg-[var(--glass-bg)]">

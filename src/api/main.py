@@ -36,6 +36,7 @@ from src.api.routes import (
     project,
     revealed_file,
     role,
+    scheduled_task,
     session,
     share,
     skill,
@@ -669,6 +670,10 @@ def create_app() -> FastAPI:
     app.include_router(notification.router, prefix="/api/notifications", tags=["Notifications"])
     # Generic channel configuration
     app.include_router(channels.router, prefix="/api/channels", tags=["Channels"])
+    # Scheduled tasks
+    app.include_router(
+        scheduled_task.router, prefix="/api/scheduled-tasks", tags=["Scheduled Tasks"]
+    )
     # WebSocket 路由: /ws 用于实时通知
     app.include_router(websocket.router, tags=["WebSocket"])
 

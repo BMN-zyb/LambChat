@@ -174,6 +174,7 @@ class TeamAgent(BaseGraphAgent):
                 "base_url": kwargs.get("base_url", ""),
                 "team_id": team_id,
                 "active_goal": kwargs.get("active_goal"),
+                "recommendation_input": kwargs.get("recommendation_input"),
             },
             "metadata": langsmith_metadata,
             "recursion_limit": settings.SESSION_MAX_RUNS_PER_SESSION,

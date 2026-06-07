@@ -8,11 +8,13 @@ from typing import Any, get_args, get_origin
 from langchain_core.tools import BaseTool
 
 from src.infra.mcp.storage import MCPStorage
+from src.infra.role.storage import RoleStorage
 from src.infra.tool.audio_transcribe_tool import get_audio_transcribe_tool
 from src.infra.tool.env_var_tool import get_env_var_tools
 from src.infra.tool.image_generation_tool import get_image_generation_tool
 from src.infra.tool.mcp_client import MCPToolWithRetry
 from src.infra.tool.persona_preset_tool import get_persona_preset_tools
+from src.infra.tool.scheduled_task_tool import get_scheduled_task_tools
 from src.infra.tool.team_tool import get_team_tools
 from src.kernel.config import settings
 from src.kernel.schemas.mcp import (
@@ -21,12 +23,23 @@ from src.kernel.schemas.mcp import (
     MCPToolPolicy,
     MCPTransport,
 )
+from src.kernel.types import Permission
 
 INTERNAL_MCP_SERVER_NAME = "lambchat_internal"
+
+_SCHEDULED_TASK_TOOL_PERMISSIONS = {
+    "scheduled_task_create": Permission.SCHEDULED_TASK_WRITE.value,
+    "scheduled_task_list": Permission.SCHEDULED_TASK_READ.value,
+    "scheduled_task_update": Permission.SCHEDULED_TASK_WRITE.value,
+    "scheduled_task_delete": Permission.SCHEDULED_TASK_DELETE.value,
+}
 
 
 def build_internal_tools() -> list[BaseTool]:
     """Build the internal tool set that LambChat exposes to agents."""
+    from src.infra.logging import get_logger
+
+    logger = get_logger(__name__)
     tools: list[BaseTool] = []
 
     if settings.ENABLE_IMAGE_GENERATION:
@@ -35,9 +48,31 @@ def build_internal_tools() -> list[BaseTool]:
     if settings.ENABLE_AUDIO_TRANSCRIPTION:
         tools.append(get_audio_transcribe_tool())
 
+    if settings.ENABLE_SCHEDULED_TASK:
+        try:
+            scheduled_tools = get_scheduled_task_tools()
+            tools.extend(scheduled_tools)
+            logger.info(
+                "[InternalRegistry] ENABLE_SCHEDULED_TASK=True, added %d scheduled task tools: %s",
+                len(scheduled_tools),
+                [t.name for t in scheduled_tools],
+            )
+        except Exception as e:
+            logger.error(
+                "[InternalRegistry] Failed to load scheduled task tools: %s", e, exc_info=True
+            )
+    else:
+        logger.info("[InternalRegistry] ENABLE_SCHEDULED_TASK=False, skipping scheduled task tools")
+
     tools.extend(get_env_var_tools())
     tools.extend(get_persona_preset_tools())
     tools.extend(get_team_tools())
+
+    logger.info(
+        "[InternalRegistry] Total %d internal tools built: %s",
+        len(tools),
+        [t.name for t in tools],
+    )
     return tools
 
 
@@ -47,11 +82,17 @@ def build_internal_server_response() -> MCPServerResponse:
         name=INTERNAL_MCP_SERVER_NAME,
         transport=MCPTransport.SANDBOX,
         enabled=True,
+        url=None,
+        headers=None,
+        command=None,
+        env_keys=None,
         is_system=True,
         is_internal=True,
         can_edit=True,
         allowed_roles=[],
         role_quotas={},
+        created_at=None,
+        updated_at=None,
     )
 
 
@@ -78,6 +119,35 @@ def _is_tool_allowed(
     if not policy.allowed_roles:
         return True
     return bool(set(user_roles or []).intersection(policy.allowed_roles))
+
+
+async def _resolve_permissions_for_roles(user_roles: list[str] | None) -> set[str]:
+    if not user_roles:
+        return set()
+
+    storage = RoleStorage()
+    permissions: set[str] = set()
+    for role_name in user_roles:
+        try:
+            role = await storage.get_by_name(role_name)
+        except Exception:
+            continue
+        if not role:
+            continue
+        for permission in role.permissions:
+            permissions.add(permission if isinstance(permission, str) else permission.value)
+    return permissions
+
+
+def _is_tool_allowed_by_business_permission(
+    tool_name: str,
+    *,
+    user_permissions: set[str],
+) -> bool:
+    required_permission = _SCHEDULED_TASK_TOOL_PERMISSIONS.get(tool_name)
+    if required_permission is None:
+        return True
+    return required_permission in user_permissions
 
 
 def _schema_type_from_annotation(annotation: Any) -> str:
@@ -164,10 +234,16 @@ async def get_internal_tools_for_user(
         return []
 
     policies = await get_internal_tool_policies()
+    user_permissions = await _resolve_permissions_for_roles(user_roles)
     wrapped: list[BaseTool] = []
     for tool in tools:
         policy = _policy_for_tool(policies, tool.name)
         if not _is_tool_allowed(policy=policy, user_roles=user_roles, is_admin=is_admin):
+            continue
+        if not _is_tool_allowed_by_business_permission(
+            tool.name,
+            user_permissions=user_permissions,
+        ):
             continue
 
         wrapped.append(
@@ -193,10 +269,16 @@ async def get_internal_tool_infos(
     """Return tool metadata for the virtual internal server."""
     del user_id
     policies = await get_internal_tool_policies()
+    user_permissions = await _resolve_permissions_for_roles(user_roles)
     infos: list[MCPToolInfo] = []
     for tool in build_internal_tools():
         policy = _policy_for_tool(policies, tool.name)
         if not _is_tool_allowed(policy=policy, user_roles=user_roles, is_admin=is_admin):
+            continue
+        if not _is_tool_allowed_by_business_permission(
+            tool.name,
+            user_permissions=user_permissions,
+        ):
             continue
 
         parameters = _extract_tool_parameters(tool)

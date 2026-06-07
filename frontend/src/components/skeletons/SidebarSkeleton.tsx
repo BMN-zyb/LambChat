@@ -70,7 +70,7 @@ function SidebarExpandedSkeleton() {
       }}
     >
       {/* Header area — app icon (h-7) + name + collapse button */}
-      <div className="flex items-center justify-between px-3 pt-3 pb-1 sm:px-4">
+      <div className="flex items-center justify-between px-3 pt-3 pb-3">
         <div className="flex h-7 items-center gap-1.5">
           <div className="skeleton-line h-7 rounded-full shrink-0" />
           <div className="skeleton-line h-7 w-20 rounded-md" />
@@ -79,7 +79,7 @@ function SidebarExpandedSkeleton() {
       </div>
 
       {/* Action buttons — NewChat, Search, PersonaPlaza, TeamBuilder, FileLibrary, More */}
-      <div className="flex flex-col gap-px px-2 py-2 space-y-1">
+      <div className="flex flex-col gap-px px-2 mb-2 space-y-1">
         {/* New Chat */}
         <div className="w-full h-8 rounded-[10px] flex items-center gap-3 px-[9px]">
           <div className="skeleton-line size-5 rounded-md shrink-0" />

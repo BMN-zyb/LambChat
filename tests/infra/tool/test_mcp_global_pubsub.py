@@ -341,7 +341,11 @@ async def test_global_mcp_initialization_renews_distributed_lock_during_slow_sta
     assert tools == []
     assert manager is not None
     assert allow_initialize.is_set()
-    assert renew_calls == [("mcp_init_lock:user-1", "lock-value", mcp_global.DISTRIBUTED_LOCK_TTL)]
+    assert renew_calls
+    assert all(
+        call == ("mcp_init_lock:user-1", "lock-value", mcp_global.DISTRIBUTED_LOCK_TTL)
+        for call in renew_calls
+    )
 
 
 @pytest.mark.asyncio

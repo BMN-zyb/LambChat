@@ -1,44 +1,64 @@
 import { SkeletonLine } from "./primitives";
 
-/** Matches PanelHeader layout: icon box (size-12, gradient bg) + title + optional search + actions */
+/**
+ * Matches PanelHeader layout:
+ *   - Icon box: size-10/lg:size-11 rounded-lg subtle-bg + ring
+ *   - Title (text-base/lg:text-lg) + optional subtitle
+ *   - Desktop action buttons
+ *   - Mobile menu button (when !hasSearch)
+ *   - Optional search row
+ */
 export function PanelHeaderSkeleton({
   hasSearch = true,
+  hasSubtitle = false,
 }: {
   hasSearch?: boolean;
+  hasSubtitle?: boolean;
 }) {
   return (
     <div className="panel-header">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex min-w-0 items-center gap-3">
-          {/* Icon box — matches real PanelHeader: size-12 lg:size-14 rounded-xl gradient + shadow + ring */}
+      <div className="panel-header__top flex flex-wrap items-center justify-between gap-3 lg:gap-4">
+        {/* Identity — icon box + title */}
+        <div className="panel-header__identity flex min-w-0 items-center gap-3 lg:gap-4">
+          {/* Icon box — matches real PanelHeader: size-10 lg:size-11 rounded-lg subtle-bg + ring-1 */}
           <div
-            className="flex size-12 flex-shrink-0 items-center justify-center rounded-xl shadow-sm ring-1 ring-stone-200/60 dark:ring-stone-700/50 lg:size-14"
+            className="flex size-10 flex-shrink-0 items-center justify-center rounded-lg ring-1 lg:size-11"
             style={{
-              background:
-                "linear-gradient(to bottom right, var(--theme-bg-card), color-mix(in srgb, var(--theme-bg) 80%, white))",
+              backgroundColor: "var(--theme-bg-subtle, color-mix(in srgb, var(--theme-bg) 80%, white))",
+              borderColor: "var(--theme-border)",
             }}
           >
-            <div className="skeleton-line size-5 lg:size-[22px] rounded-md" />
+            <div className="skeleton-line size-5 rounded-md" />
           </div>
           <div className="min-w-0">
             <SkeletonLine
               width="w-28 sm:w-36 xl:w-48"
-              className="!h-[22px] sm:!h-6"
+              className="!h-4 sm:!h-[18px]"
             />
-            <SkeletonLine
-              width="w-40 sm:w-52 xl:w-64"
-              className="!h-3.5 sm:!h-4 mt-0.5"
-            />
+            {hasSubtitle && (
+              <SkeletonLine
+                width="w-40 sm:w-52 xl:w-64"
+                className="!h-3 sm:!h-[14px] mt-0.5 !opacity-60"
+              />
+            )}
           </div>
         </div>
-        <div className="flex flex-nowrap flex-shrink-0 items-center gap-1.5 sm:gap-2">
-          <div className="skeleton-line h-9 w-20 sm:w-24 xl:w-28 rounded-lg" />
-          <div className="skeleton-line h-9 w-9 rounded-lg sm:hidden" />
-          <div className="skeleton-line h-9 w-20 sm:w-24 xl:w-28 rounded-lg hidden sm:block" />
+
+        {/* Desktop action buttons */}
+        <div className="panel-header__desktop-actions flex flex-nowrap flex-shrink-0 items-center gap-1.5 sm:gap-2">
+          <div className="skeleton-line h-10 w-24 sm:w-28 rounded-lg" />
+          <div className="skeleton-line h-10 w-24 sm:w-28 rounded-lg hidden sm:block" />
         </div>
+
+        {/* Mobile menu button (shown when no search row, matching real PanelHeader mobile-menu pattern) */}
+        {!hasSearch && (
+          <div className="skeleton-line size-9 rounded-lg sm:hidden" />
+        )}
       </div>
+
+      {/* Search row */}
       {hasSearch && (
-        <div className="mt-2 flex items-center gap-2 sm:mt-3 lg:mt-4">
+        <div className="panel-header__search-row mt-2 flex items-center gap-2 sm:mt-3 lg:mt-4">
           <div className="skeleton-line h-10 flex-1 rounded-lg" />
         </div>
       )}

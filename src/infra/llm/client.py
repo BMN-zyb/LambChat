@@ -133,7 +133,9 @@ def _langchain_profile(profile: Optional[dict]) -> Optional[dict]:
         return None
 
     allowed_keys = set(LangChainModelProfile.__annotations__)
-    return {key: value for key, value in profile.items() if key in allowed_keys}
+    return {
+        key: value for key, value in profile.items() if key in allowed_keys and value is not None
+    }
 
 
 async def _lookup_stored_api_key(

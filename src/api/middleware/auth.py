@@ -72,6 +72,17 @@ class AuthMiddleware(BaseHTTPMiddleware):
         accept = request.headers.get("accept", "")
         return "text/html" in accept.lower()
 
+    @staticmethod
+    def _cors_response(request: Request, status_code: int, content: dict) -> JSONResponse:
+        """Build a JSONResponse with CORS headers so browsers don't block it."""
+        origin = request.headers.get("origin", "")
+        response = JSONResponse(status_code=status_code, content=content)
+        if origin:
+            response.headers["Access-Control-Allow-Origin"] = origin
+            response.headers["Access-Control-Allow-Credentials"] = "true"
+            response.headers["Vary"] = "Origin"
+        return response
+
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
 
@@ -95,7 +106,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
         # All other paths require an Authorization header
         auth_header = request.headers.get("Authorization")
         if not auth_header or not auth_header.startswith("Bearer "):
-            return JSONResponse(
+            return self._cors_response(
+                request,
                 status_code=401,
                 content={"detail": "Not authenticated"},
             )

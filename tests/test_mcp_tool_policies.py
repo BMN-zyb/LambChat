@@ -105,6 +105,108 @@ async def test_internal_tool_policies_filter_blocked_tools(
 
 
 @pytest.mark.asyncio
+async def test_internal_scheduled_task_tool_infos_follow_role_permissions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.infra.tool import internal_registry
+
+    class _FakeRoleStorage:
+        async def get_by_name(self, name: str):
+            assert name == "reader"
+            return SimpleNamespace(
+                permissions=["scheduled_task:read"],
+            )
+
+    async def _empty_policies():
+        return {}
+
+    monkeypatch.setattr(internal_registry.settings, "ENABLE_IMAGE_GENERATION", False)
+    monkeypatch.setattr(internal_registry.settings, "ENABLE_AUDIO_TRANSCRIPTION", False)
+    monkeypatch.setattr(internal_registry.settings, "ENABLE_SCHEDULED_TASK", True)
+    monkeypatch.setattr(internal_registry, "RoleStorage", lambda: _FakeRoleStorage(), raising=False)
+    monkeypatch.setattr(internal_registry, "get_internal_tool_policies", _empty_policies)
+
+    infos = await internal_registry.get_internal_tool_infos(
+        user_id="user-1",
+        user_roles=["reader"],
+        is_admin=False,
+    )
+
+    names = {info.name for info in infos}
+    assert {"scheduled_task_list"} <= names
+    assert "scheduled_task_create" not in names
+    assert "scheduled_task_update" not in names
+    assert "scheduled_task_delete" not in names
+
+
+@pytest.mark.asyncio
+async def test_internal_scheduled_task_tools_follow_role_permissions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.infra.tool import internal_registry
+
+    class _FakeRoleStorage:
+        async def get_by_name(self, name: str):
+            assert name == "writer"
+            return SimpleNamespace(
+                permissions=["scheduled_task:write"],
+            )
+
+    async def _empty_policies():
+        return {}
+
+    monkeypatch.setattr(internal_registry.settings, "ENABLE_IMAGE_GENERATION", False)
+    monkeypatch.setattr(internal_registry.settings, "ENABLE_AUDIO_TRANSCRIPTION", False)
+    monkeypatch.setattr(internal_registry.settings, "ENABLE_SCHEDULED_TASK", True)
+    monkeypatch.setattr(internal_registry, "RoleStorage", lambda: _FakeRoleStorage(), raising=False)
+    monkeypatch.setattr(internal_registry, "get_internal_tool_policies", _empty_policies)
+
+    tools = await internal_registry.get_internal_tools_for_user(
+        user_id="user-1",
+        user_roles=["writer"],
+        is_admin=False,
+    )
+
+    names = {tool.name for tool in tools}
+    assert {
+        "scheduled_task_create",
+        "scheduled_task_update",
+    } <= names
+    assert "scheduled_task_list" not in names
+    assert "scheduled_task_delete" not in names
+
+
+@pytest.mark.asyncio
+async def test_internal_scheduled_task_tools_require_permissions_even_for_admin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.infra.tool import internal_registry
+
+    class _FakeRoleStorage:
+        async def get_by_name(self, name: str):
+            assert name == "admin-without-task"
+            return SimpleNamespace(permissions=["mcp:admin"])
+
+    async def _empty_policies():
+        return {}
+
+    monkeypatch.setattr(internal_registry.settings, "ENABLE_IMAGE_GENERATION", False)
+    monkeypatch.setattr(internal_registry.settings, "ENABLE_AUDIO_TRANSCRIPTION", False)
+    monkeypatch.setattr(internal_registry.settings, "ENABLE_SCHEDULED_TASK", True)
+    monkeypatch.setattr(internal_registry, "RoleStorage", lambda: _FakeRoleStorage(), raising=False)
+    monkeypatch.setattr(internal_registry, "get_internal_tool_policies", _empty_policies)
+
+    infos = await internal_registry.get_internal_tool_infos(
+        user_id="admin-1",
+        user_roles=["admin-without-task"],
+        is_admin=True,
+    )
+
+    names = {info.name for info in infos}
+    assert not any(name.startswith("scheduled_task_") for name in names)
+
+
+@pytest.mark.asyncio
 async def test_internal_image_generate_tool_infos_include_supported_parameters(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

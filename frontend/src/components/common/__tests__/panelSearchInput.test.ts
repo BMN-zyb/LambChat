@@ -73,7 +73,7 @@ test("panel headers move mobile actions into a search-row overflow menu", () => 
   assert.match(componentsCss, /\.panel-header__mobile-menu-accessory/);
   assert.match(
     componentsCss,
-    /\.panel-header__actions > :is\(button, a\),[\s\S]*?\.panel-header__search-actions > \.flex > :is\(button, a\)\s*\{[\s\S]*?height:\s*2\.5rem;[\s\S]*?min-height:\s*2\.5rem;/,
+    /\.panel-header__actions > :is\(button, a, select\),[\s\S]*?\.panel-header__search-actions > \.flex > :is\(button, a, select\)\s*\{[\s\S]*?height:\s*2\.5rem;[\s\S]*?min-height:\s*2\.5rem;/,
   );
   assert.match(
     componentsCss,

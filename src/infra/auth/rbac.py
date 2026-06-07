@@ -172,6 +172,10 @@ class RBACManager:
                     # Persona Preset
                     Permission.PERSONA_PRESET_READ.value,
                     Permission.PERSONA_PRESET_WRITE.value,
+                    # Scheduled Task
+                    Permission.SCHEDULED_TASK_READ.value,
+                    Permission.SCHEDULED_TASK_WRITE.value,
+                    Permission.SCHEDULED_TASK_DELETE.value,
                 ],
                 "limits": {"max_channels": 10},
                 "is_system": False,

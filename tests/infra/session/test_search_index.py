@@ -681,4 +681,4 @@ async def test_session_indexes_are_initialized_once_across_instances() -> None:
         SessionStorage._indexes_done = original_done
         SessionStorage._indexes_lock = original_lock
 
-    assert len(shared_collection.created_indexes) == 6
+    assert len(shared_collection.created_indexes) == 7

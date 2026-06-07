@@ -240,6 +240,19 @@ PERMISSION_METADATA: dict[str, dict[str, str]] = {
         "label": "管理全局角色预设",
         "description": "创建、发布、归档和删除全局角色预设",
     },
+    # Scheduled Task
+    Permission.SCHEDULED_TASK_READ.value: {
+        "label": "读取定时任务",
+        "description": "查看定时任务、运行历史和任务会话",
+    },
+    Permission.SCHEDULED_TASK_WRITE.value: {
+        "label": "管理定时任务",
+        "description": "创建、编辑、暂停、恢复和手动执行定时任务",
+    },
+    Permission.SCHEDULED_TASK_DELETE.value: {
+        "label": "删除定时任务",
+        "description": "删除自己的定时任务",
+    },
     # Notification
     Permission.NOTIFICATION_MANAGE.value: {
         "label": "管理通知",
@@ -386,6 +399,14 @@ PERMISSION_GROUPS_CONFIG: list[PermissionGroupConfig] = [
             Permission.PERSONA_PRESET_READ.value,
             Permission.PERSONA_PRESET_WRITE.value,
             Permission.PERSONA_PRESET_ADMIN.value,
+        ],
+    },
+    {
+        "name": "定时任务",
+        "permissions": [
+            Permission.SCHEDULED_TASK_READ.value,
+            Permission.SCHEDULED_TASK_WRITE.value,
+            Permission.SCHEDULED_TASK_DELETE.value,
         ],
     },
     {

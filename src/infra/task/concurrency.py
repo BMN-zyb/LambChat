@@ -618,6 +618,9 @@ class UserConcurrencyLimiter:
                         persona_system_prompt=persona_system_prompt,
                         disabled_mcp_tools=disabled_mcp_tools,
                         display_message=task_ctx.get("display_message") if task_ctx else None,
+                        recommendation_input=task_ctx.get("recommendation_input")
+                        if task_ctx
+                        else None,
                         team_id=team_id,
                         active_goal=active_goal,
                     )

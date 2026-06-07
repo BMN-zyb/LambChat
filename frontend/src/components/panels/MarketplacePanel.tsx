@@ -3,7 +3,7 @@ import { X, ShoppingBag, Plus, RotateCw, Tag, ChevronDown } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import toast from "react-hot-toast";
 import { PanelHeader } from "../common/PanelHeader";
-import { PanelLoadingState } from "../common/PanelLoadingState";
+import { MarketplacePanelSkeleton } from "../skeletons";
 import { ConfirmDialog } from "../common/ConfirmDialog";
 import { SkillFormSidebar } from "./SkillsPanel/SkillFormSidebar";
 import { useMarketplace } from "../../hooks/useMarketplace";
@@ -340,7 +340,7 @@ export function MarketplacePanel({ embedded = false }: MarketplacePanelProps) {
     isLoading && skills.length === 0 && !hasActiveFilters;
 
   if (isInitialLoading) {
-    return <PanelLoadingState text={t("common.loading", "加载中...")} />;
+    return <MarketplacePanelSkeleton />;
   }
 
   return (

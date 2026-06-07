@@ -358,11 +358,16 @@ async def test_fast_agent_node_passes_existing_state_messages_to_concurrent_reco
             "presenter": presenter,
             "base_url": "",
             "agent_options": {},
+            "recommendation_input": "hello",
         }
     }
 
     await fast_nodes.fast_agent_node(
-        {"input": "hello", "session_id": "session-1", "attachments": []},
+        {
+            "input": "[User message sent at: 2026-06-06 18:42:00 +00:00 UTC] hello",
+            "session_id": "session-1",
+            "attachments": [],
+        },
         config,
     )
     await asyncio.sleep(0)
