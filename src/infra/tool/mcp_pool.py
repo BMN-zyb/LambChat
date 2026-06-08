@@ -6,6 +6,7 @@ MCP 服务器连接池
 """
 
 import asyncio
+import inspect
 import time
 from typing import Any, Optional, Set
 
@@ -52,11 +53,11 @@ async def _close_client(client: MultiServerMCPClient) -> None:
     try:
         if hasattr(client, "close"):
             result = client.close()
-            if asyncio.iscoroutine(result):
+            if inspect.isawaitable(result):
                 await result
         elif hasattr(client, "__aexit__"):
             result = client.__aexit__(None, None, None)  # type: ignore[func-returns-value]
-            if asyncio.iscoroutine(result):
+            if inspect.isawaitable(result):
                 await result
     except Exception as e:
         logger.debug(f"[MCP Pool] Error closing client: {e}")

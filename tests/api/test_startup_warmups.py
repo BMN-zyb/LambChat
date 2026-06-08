@@ -205,6 +205,7 @@ async def test_cancel_background_tasks_awaits_task_cleanup() -> None:
 
     assert task.cancelled() is True
     assert cleanup_finished is True
+    assert app.state.cleanup_task is None
 
 
 @pytest.mark.asyncio
@@ -337,6 +338,9 @@ async def test_cancel_lifespan_background_tasks_for_shutdown_cancels_registered_
 
     assert all(task.cancelled() for task in tasks)
     assert set(cleanup_calls) == set(api_main._LIFESPAN_BACKGROUND_TASK_NAMES)
+    assert all(
+        getattr(state, task_name) is None for task_name in api_main._LIFESPAN_BACKGROUND_TASK_NAMES
+    )
 
 
 @pytest.mark.asyncio

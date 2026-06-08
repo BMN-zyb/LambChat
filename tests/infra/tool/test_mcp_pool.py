@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from src.infra.tool import mcp_pool
@@ -11,6 +13,15 @@ class _FakeClient:
 
     async def close(self) -> None:
         self.close_calls += 1
+
+
+class _FutureCloseClient:
+    def __init__(self) -> None:
+        self.close_future: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+
+    def close(self) -> asyncio.Future[None]:
+        asyncio.get_running_loop().call_later(0.01, self.close_future.set_result, None)
+        return self.close_future
 
 
 @pytest.fixture(autouse=True)
@@ -57,6 +68,15 @@ async def test_mcp_pool_closes_discarded_duplicate_connection() -> None:
     assert tools == ["tool-1"]
     assert existing.close_calls == 0
     assert duplicate.close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_mcp_pool_close_client_awaits_future_returned_by_close() -> None:
+    client = _FutureCloseClient()
+
+    await mcp_pool._close_client(client)  # type: ignore[arg-type]
+
+    assert client.close_future.done() is True
 
 
 @pytest.mark.asyncio

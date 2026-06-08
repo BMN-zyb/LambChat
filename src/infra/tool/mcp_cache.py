@@ -11,6 +11,7 @@ MCP 工具缓存模块（混合缓存实现）
 
 import asyncio
 import hashlib
+import inspect
 import json
 import time
 from dataclasses import dataclass, field
@@ -88,11 +89,11 @@ async def _close_client(client: MultiServerMCPClient) -> None:
         # MultiServerMCPClient may have cleanup methods
         if hasattr(client, "close"):
             result = client.close()
-            if asyncio.iscoroutine(result):
+            if inspect.isawaitable(result):
                 await result
         elif hasattr(client, "__aexit__"):
             result = client.__aexit__(None, None, None)  # type: ignore[func-returns-value]
-            if asyncio.iscoroutine(result):
+            if inspect.isawaitable(result):
                 await result
     except Exception as e:
         logger.debug(f"Error closing MCP client: {e}")

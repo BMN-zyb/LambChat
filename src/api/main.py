@@ -264,7 +264,10 @@ async def _cancel_background_tasks(app: FastAPI, *task_names: str) -> None:
     tasks = []
     for task_name in task_names:
         task = getattr(app.state, task_name, None)
-        if task and not task.done():
+        if task is None:
+            continue
+        setattr(app.state, task_name, None)
+        if not task.done():
             task.cancel()
             tasks.append(task)
     if tasks:
