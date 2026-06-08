@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 from datetime import datetime
 from unittest.mock import MagicMock
@@ -431,6 +432,10 @@ async def test_list_teams_fetches_count_and_preferences_concurrently():
 
     class _Collection:
         async def count_documents(self, query):
+            for _ in range(10):
+                if user_collection.find_one_started:
+                    break
+                await asyncio.sleep(0)
             assert user_collection.find_one_started is True
             assert query == {"owner_user_id": owner_user_id}
             return 1
@@ -453,6 +458,42 @@ async def test_list_teams_fetches_count_and_preferences_concurrently():
     s._user_collection = user_collection
 
     teams, total = await s.list_teams(owner_user_id=owner_user_id, skip=0, limit=10)
+
+    assert teams == []
+    assert total == 1
+    assert pipelines
+
+
+@pytest.mark.asyncio
+async def test_list_teams_accepts_future_returned_by_motor_count_documents():
+    owner_user_id = str(ObjectId())
+    pipelines: list[list[dict]] = []
+
+    class _Cursor:
+        def __aiter__(self):
+            self._iter = iter([])
+            return self
+
+        async def __anext__(self):
+            raise StopAsyncIteration
+
+    class _Collection:
+        def count_documents(self, query):
+            assert query == {"owner_user_id": owner_user_id}
+            future = asyncio.get_running_loop().create_future()
+            future.set_result(1)
+            return future
+
+        def aggregate(self, pipeline):
+            pipelines.append(pipeline)
+            return _Cursor()
+
+    s = TeamStorage()
+    s._collection = _Collection()
+    user_coll, _users = _make_fake_user_collection()
+    s._user_collection = user_coll
+
+    teams, total = await s.list_teams(owner_user_id=owner_user_id, skip=0, limit=50)
 
     assert teams == []
     assert total == 1

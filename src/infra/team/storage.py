@@ -398,9 +398,10 @@ class TeamStorage:
             if tag_filter:
                 query["tags"] = tag_filter
 
-        pref_task = asyncio.create_task(self._get_user_team_preference(owner_user_id))
-        total_task = asyncio.create_task(self.collection.count_documents(query))
-        total, pref = await asyncio.gather(total_task, pref_task)
+        total, pref = await asyncio.gather(
+            self.collection.count_documents(query),
+            self._get_user_team_preference(owner_user_id),
+        )
         if total == 0:
             return [], 0
 
