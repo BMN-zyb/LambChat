@@ -85,6 +85,27 @@ async def test_close_store_releases_singleton_and_calls_backend_close() -> None:
 
 
 @pytest.mark.asyncio
+async def test_close_store_awaits_future_returned_by_backend_close() -> None:
+    class _FutureClosableStore:
+        def __init__(self) -> None:
+            self.close_future: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+
+        def close(self) -> asyncio.Future[None]:
+            asyncio.get_running_loop().call_later(0.01, self.close_future.set_result, None)
+            return self.close_future
+
+    store = _FutureClosableStore()
+    store_module._store_instance = store
+    store_module._store_initialized = True
+
+    await store_module.close_store()
+
+    assert store.close_future.done() is True
+    assert store_module._store_instance is None
+    assert store_module._store_initialized is False
+
+
+@pytest.mark.asyncio
 async def test_abatch_limits_concurrent_operations(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

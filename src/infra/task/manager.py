@@ -7,6 +7,7 @@ Background Task Manager - 后台任务管理器
 """
 
 import asyncio
+import inspect
 from collections.abc import Awaitable
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -105,12 +106,12 @@ class BackgroundTaskManager:
         close = getattr(arq_pool, "close", None)
         if close is not None:
             result = close()
-            if asyncio.iscoroutine(result):
+            if inspect.isawaitable(result):
                 await result
         wait_closed = getattr(arq_pool, "wait_closed", None)
         if wait_closed is not None:
             result = wait_closed()
-            if asyncio.iscoroutine(result):
+            if inspect.isawaitable(result):
                 await result
 
     async def _persist_initial_user_message(

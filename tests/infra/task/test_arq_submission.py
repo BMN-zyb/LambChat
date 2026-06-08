@@ -35,6 +35,27 @@ class _FakeArqPool:
         self.wait_closed_calls += 1
 
 
+class _FutureCloseArqPool(_FakeArqPool):
+    def __init__(self) -> None:
+        super().__init__()
+        self.close_future: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        self.wait_closed_future: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+
+    def close(self) -> asyncio.Future[None]:
+        self.close_calls += 1
+        asyncio.get_running_loop().call_later(0.01, self.close_future.set_result, None)
+        return self.close_future
+
+    def wait_closed(self) -> asyncio.Future[None]:
+        self.wait_closed_calls += 1
+        asyncio.get_running_loop().call_later(
+            0.01,
+            self.wait_closed_future.set_result,
+            None,
+        )
+        return self.wait_closed_future
+
+
 class _LockCheckingArqPool(_FakeArqPool):
     def __init__(self, manager: BackgroundTaskManager) -> None:
         super().__init__()
@@ -202,6 +223,21 @@ async def test_submit_arq_reuses_manager_owned_pool_until_shutdown(
 
     assert created_pools[0].close_calls == 1
     assert created_pools[0].wait_closed_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_shutdown_awaits_future_returned_by_arq_pool_close_methods() -> None:
+    manager = BackgroundTaskManager()
+    arq_pool = _FutureCloseArqPool()
+    manager._arq_pool = arq_pool
+
+    await manager.shutdown()
+
+    assert arq_pool.close_calls == 1
+    assert arq_pool.wait_closed_calls == 1
+    assert arq_pool.close_future.done() is True
+    assert arq_pool.wait_closed_future.done() is True
+    assert manager._arq_pool is None
 
 
 @pytest.mark.asyncio

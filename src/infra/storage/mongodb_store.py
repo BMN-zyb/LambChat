@@ -19,6 +19,7 @@ MongoDB Store 实现
 from __future__ import annotations
 
 import asyncio
+import inspect
 from collections.abc import Iterable
 from datetime import datetime
 from itertools import islice
@@ -546,7 +547,7 @@ async def close_store() -> None:
 
     try:
         result = close()
-        if asyncio.iscoroutine(result):
+        if inspect.isawaitable(result):
             await result
     except Exception as e:
         logger.warning("Error closing store singleton: %s", e)

@@ -4,8 +4,8 @@ OAuth 认证服务
 支持 Google、GitHub、Apple OAuth 登录。
 """
 
-import asyncio
 import base64
+import inspect
 import json
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Dict, Optional
@@ -108,7 +108,7 @@ class OAuthService:
                 continue
             try:
                 result = close()
-                if asyncio.iscoroutine(result):
+                if inspect.isawaitable(result):
                     await result
             except Exception as e:
                 logger.warning("Failed to close OAuth client: %s", e)

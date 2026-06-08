@@ -1,6 +1,7 @@
 """Native Memory Backend — MongoDB-backed, zero external dependencies."""
 
 import asyncio
+import inspect
 import uuid
 from datetime import timedelta
 from typing import Any, Callable, Optional
@@ -467,7 +468,7 @@ class NativeMemoryBackend(MemoryBackend):
             return None
         try:
             result = await run_blocking_io(self._embedding_fn, text)
-            if asyncio.iscoroutine(result):
+            if inspect.isawaitable(result):
                 return await result
             return result
         except Exception as e:

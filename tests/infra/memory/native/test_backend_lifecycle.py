@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 
 from src.infra.memory.client.native import backend as backend_module
@@ -74,3 +76,26 @@ async def test_maybe_embed_offloads_sync_embedding_function(
 
     assert result == [1.0, 2.0]
     assert calls == [sync_embedding]
+
+
+@pytest.mark.asyncio
+async def test_maybe_embed_awaits_future_returned_by_embedding_function(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = NativeMemoryBackend()
+
+    def future_embedding(text: str) -> asyncio.Future[list[float]]:
+        assert text == "hello"
+        future = asyncio.get_running_loop().create_future()
+        asyncio.get_running_loop().call_later(0.01, future.set_result, [3.0, 4.0])
+        return future
+
+    async def fake_run_blocking_io(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    backend._embedding_fn = future_embedding
+    monkeypatch.setattr(backend_module, "run_blocking_io", fake_run_blocking_io)
+
+    result = await backend._maybe_embed("hello")
+
+    assert result == [3.0, 4.0]
