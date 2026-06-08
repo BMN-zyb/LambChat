@@ -28,7 +28,7 @@ LambChat is built for teams who want more than a chatbot UI. It gives you a comp
 
 | Agent Runtime | Tools and MCP | Skills and Memory | Production Infra |
 |---|---|---|---|
-| Deep agent graphs, streaming output, sub-agents, thinking mode, and human approval. | System and user MCP, encrypted secrets, tool cache, upload/reveal tools, and sandbox execution. | Skill marketplace, GitHub sync, persona presets, model routing, and MongoDB-backed memory. | FastAPI, React 19, auth/RBAC, tracing, health checks, storage, realtime sync, and deployment assets. |
+| Deep agent graphs, streaming output, sub-agents, thinking mode, scheduled runs, and human approval. | System and user MCP, encrypted secrets, tool cache, upload/reveal tools, and sandbox execution. | Skill marketplace, GitHub sync, persona presets, model routing, and MongoDB-backed memory. | FastAPI, React 19, auth/RBAC, tracing, health checks, arq tasks, realtime sync, and deployment assets. |
 
 ## 📸 Product Preview
 
@@ -79,6 +79,7 @@ LambChat is built for teams who want more than a chatbot UI. It gives you a comp
 - **Streaming Output** — Native SSE support
 - **Sub-agents** — Multi-level delegation
 - **Thinking Mode** — Extended thinking for Anthropic models
+- **Scheduled Tasks** — Cron, interval, date, and manual task triggers with persisted scheduler state
 - **Human-in-the-Loop** — Approval system with countdown timer, auto-extension, and urgent-state styling
 - **Persona Presets** — Reusable persona configuration with permissions and runtime binding
 
@@ -127,10 +128,11 @@ LambChat is built for teams who want more than a chatbot UI. It gives you a comp
 <summary><b>🔐 Infra, Realtime, and Frontend</b></summary>
 
 - **Realtime** — Redis + MongoDB dual-write, WebSocket, auto-reconnect, and shared-session updates
+- **Task Runtime** — Local or Redis-backed arq execution with embedded worker lifecycle
 - **Security** — JWT, RBAC, bcrypt, OAuth (Google/GitHub/Apple), email verification, CAPTCHA, and sandbox controls
 - **Observability** — LangSmith tracing, structured logging, health checks, and distributed memory diagnostics
 - **Channels** — Native Feishu integration plus an extensible multi-channel architecture
-- **Frontend Stack** — React 19, Vite 6, TailwindCSS 3.4, dark/light theme, rich content rendering, and responsive multi-device layouts
+- **Frontend Stack** — React 19, Vite 6, TailwindCSS 3.4, PWA workers, Capacitor mobile builds, Tauri desktop shell, rich rendering, and responsive layouts
 - **i18n** — English, Chinese, Japanese, Korean, and Russian
 
 </details>
@@ -154,27 +156,56 @@ Multiple setting categories can be configured through the UI or environment vari
 | Tracing | LangSmith and tracing |
 | User | User management, registration, default role |
 | Memory | Memory system (native) |
+| Scheduler | Dynamic scheduled tasks and runtime registration |
+| Task Runtime | Local execution or arq queue settings |
 
 ## 🚀 Quick Start
 
 ### Prerequisites
 
-- Python 3.12+ · Node.js 18+ · pnpm · MongoDB · Redis
+- Python 3.12+
+- uv
+- Node.js 18+
+- pnpm 10+
+- MongoDB
+- Redis
 
-### Setup
+### Docker
 
 ```bash
 git clone https://github.com/Yanyutin753/LambChat.git
 cd LambChat
 
-# Docker (recommended)
-cd deploy && cp .env.example .env   # Edit with your config
-docker compose up -d
-
-# Or local development
+cd deploy
 cp .env.example .env   # Edit with your config
-make install-pnpm      # Install pnpm if not present
-make install && make dev
+docker compose up -d
+```
+
+Open **http://localhost:8000**.
+
+### Local Development
+
+Install dependencies:
+
+```bash
+cp .env.example .env   # Edit with your config
+make install-all
+```
+
+Run the backend and frontend together:
+
+```bash
+make dev-all
+```
+
+Backend: **http://127.0.0.1:8000**
+Frontend dev server: **http://127.0.0.1:3001**
+
+You can also run them separately:
+
+```bash
+make dev            # FastAPI backend: uv run python main.py
+make frontend-dev   # Vite frontend
 ```
 
 <details>
@@ -198,6 +229,12 @@ MONGODB_PASSWORD=your-mongo-password
 # Optional: Configure Redis connection
 REDIS_URL=redis://localhost:6379/0
 REDIS_PASSWORD=your-redis-password
+
+# Optional: enable scheduled tasks
+ENABLE_SCHEDULED_TASK=true
+
+# Optional: choose task execution backend
+TASK_BACKEND=arq  # local or arq
 ```
 
 ::: tip
@@ -206,33 +243,58 @@ LLM models are configured through the **Model Config UI** after deployment — n
 
 </details>
 
-Open **http://localhost:8000**
-
 ### Code Quality
 
 ```bash
 make format       # Format (ruff format)
 make lint         # Lint (ruff check)
 make typecheck    # Type check (mypy)
+make test         # Backend tests (pytest)
 make check-all    # Run all checks (lint + typecheck + test)
+```
+
+### Frontend, Mobile, and Docs
+
+```bash
+cd frontend
+pnpm run build             # TypeScript + Vite build
+pnpm run packaged:build    # Build packaged frontend assets
+pnpm run mobile:sync       # Build and sync Capacitor projects
+pnpm run package:desktop   # Package desktop app assets
+
+cd ..
+pnpm run docs:dev          # VitePress docs site
+pnpm run docs:build
 ```
 
 ### Project Structure
 
 ```text
-src/
-├── agents/         # Agent implementations and runtime graphs
-├── api/            # FastAPI routes, admin endpoints, middleware
-├── infra/          # Core services: auth, llm, mcp, tools, storage, tasks, sharing, memory
-├── kernel/         # Schemas, config, constants, and shared types
-└── skills/         # Built-in skills
-frontend/
-├── src/components/ # UI components, panels, and landing sections
-├── src/hooks/      # Frontend hooks
-├── src/i18n/       # Locale files
-└── src/styles/     # Shared styles and design tokens
-tests/              # Backend and integration tests
-deploy/             # Docker deployment assets
+.
+├── main.py                  # Uvicorn entrypoint for src.api.main:app
+├── src/
+│   ├── agents/              # Core, fast, search, and team agent graphs
+│   ├── api/                 # FastAPI app, middleware, and route modules
+│   │   └── routes/          # Chat, auth, MCP, skills, files, scheduler, teams, etc.
+│   ├── infra/               # Runtime services: auth, llm, mcp, scheduler, task, storage, memory
+│   └── kernel/              # Settings, schemas, config definitions, and shared types
+├── frontend/
+│   ├── src/                 # React app source
+│   │   ├── components/      # Chat, panels, pages, auth, skill, MCP, team, file UI
+│   │   ├── services/        # API clients and browser service integrations
+│   │   ├── stores/          # Frontend state stores
+│   │   ├── i18n/            # Locale files and tests
+│   │   └── workers/         # Browser/PWA workers
+│   ├── android/             # Capacitor Android project
+│   ├── ios/                 # Capacitor iOS project
+│   ├── src-tauri/           # Tauri desktop shell
+│   └── scripts/             # Frontend build, packaging, and i18n scripts
+├── docs/                    # VitePress documentation
+├── deploy/                  # Docker Compose deployment
+├── k8s/                     # Kubernetes manifests
+├── nginx/                   # Reverse proxy config
+├── scripts/                 # Sandbox and maintenance utilities
+└── tests/                   # Backend, API, infra, agent, and unit tests
 ```
 
 ## ⭐ Star History
