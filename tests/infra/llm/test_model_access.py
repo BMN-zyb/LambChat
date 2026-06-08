@@ -62,6 +62,40 @@ async def test_clear_cache_by_model_tracks_and_drains_async_client_close() -> No
 
 
 @pytest.mark.asyncio
+async def test_clear_cache_by_model_accepts_future_returned_by_async_client_close() -> None:
+    loop = asyncio.get_running_loop()
+    close_future = loop.create_future()
+    loop.call_later(0.01, close_future.set_result, None)
+
+    class _FakeAsyncClient:
+        def aclose(self):
+            return close_future
+
+    class _FakeModel:
+        async_client = _FakeAsyncClient()
+
+    LLMClient._model_cache.clear()
+    LLMClient._model_cache[
+        (
+            "openai",
+            "gpt-test",
+            0.7,
+            None,
+            "sk-test",
+            None,
+            None,
+            None,
+            3,
+        )
+    ] = _FakeModel()  # type: ignore[assignment]
+
+    assert LLMClient.clear_cache_by_model() == 1
+    await LLMClient.drain_close_tasks(timeout=1)
+
+    assert close_future.done() is True
+
+
+@pytest.mark.asyncio
 async def test_close_cached_models_closes_and_clears_all_model_instances() -> None:
     closed: list[str] = []
 

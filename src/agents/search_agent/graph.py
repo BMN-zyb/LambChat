@@ -219,7 +219,7 @@ class SearchAgent(BaseGraphAgent):
         try:
             # 直接执行 graph（用 ainvoke 而非 astream，因为不需要处理流式事件）
             # 事件由 agent_node 内部通过 presenter.emit 直接保存
-            graph_task = asyncio.create_task(self._graph.ainvoke(initial_state, config))
+            graph_task = asyncio.ensure_future(self._graph.ainvoke(initial_state, config))
             self._stream_tasks[presenter.run_id] = graph_task
 
             await graph_task

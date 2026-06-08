@@ -194,7 +194,7 @@ class TeamAgent(BaseGraphAgent):
         )
 
         try:
-            graph_task = asyncio.create_task(self._graph.ainvoke(initial_state, config))
+            graph_task = asyncio.ensure_future(self._graph.ainvoke(initial_state, config))
             self._stream_tasks[presenter.run_id] = graph_task
 
             await graph_task

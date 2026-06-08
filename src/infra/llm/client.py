@@ -23,7 +23,7 @@ from src.kernel.exceptions import AuthorizationError
 from src.kernel.schemas.model import ModelConfig
 
 logger = get_logger(__name__)
-_close_tasks: set[asyncio.Task[None]] = set()
+_close_tasks: set[asyncio.Future[None]] = set()
 
 # ── Provider 注册表 ──
 # 每个条目: provider_slug → (协议类型, 模型名前缀列表)
@@ -191,14 +191,14 @@ def _safe_close_client(model_instance: BaseChatModel) -> None:
         )
         if _client and hasattr(_client, "aclose"):
 
-            def _on_close_done(t: asyncio.Task) -> None:
+            def _on_close_done(t: asyncio.Future[None]) -> None:
                 _close_tasks.discard(t)
                 if not t.cancelled():
                     exc = t.exception()
                     if exc:
                         logger.debug(f"Failed to close LLM client connections: {exc}")
 
-            task = asyncio.create_task(_client.aclose())
+            task = asyncio.ensure_future(_client.aclose())
             _close_tasks.add(task)
             task.add_done_callback(_on_close_done)
     except Exception as e:

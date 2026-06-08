@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 from typing import Any, Callable
 
 from arq.worker import Worker
@@ -21,7 +22,7 @@ class EmbeddedArqRuntime:
     def __init__(self, worker_factory: Callable[..., Any] = Worker) -> None:
         self._worker_factory = worker_factory
         self._worker: Any | None = None
-        self._task: asyncio.Task | None = None
+        self._task: asyncio.Future | None = None
 
     @property
     def is_running(self) -> bool:
@@ -45,7 +46,7 @@ class EmbeddedArqRuntime:
             ctx={"payload_store": TaskArqPayloadStore()},
             allow_abort_jobs=True,
         )
-        self._task = asyncio.create_task(self._worker.async_run())
+        self._task = asyncio.ensure_future(self._worker.async_run())
         logger.info("Embedded arq worker started")
 
     async def stop(self) -> None:
@@ -53,7 +54,7 @@ class EmbeddedArqRuntime:
             close = getattr(self._worker, "close", None)
             if close is not None:
                 result = close()
-                if asyncio.iscoroutine(result):
+                if inspect.isawaitable(result):
                     await result
 
         if self._task is not None and not self._task.done():

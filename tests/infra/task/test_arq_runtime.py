@@ -70,6 +70,81 @@ async def test_start_embedded_arq_worker_runs_with_signals_disabled(
 
 
 @pytest.mark.asyncio
+async def test_start_embedded_arq_worker_accepts_future_returned_by_async_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FutureRunWorkerWithFuture(_FakeWorker):
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__(*args, **kwargs)
+            self.run_future = asyncio.get_running_loop().create_future()
+
+        def async_run(self) -> asyncio.Future[None]:
+            return self.run_future
+
+        async def close(self) -> None:
+            if not self.run_future.done():
+                self.run_future.set_result(None)
+
+    _FakeWorker.instances.clear()
+    settings = SimpleNamespace(
+        TASK_BACKEND="arq",
+        ARQ_EMBEDDED_WORKER=True,
+        ARQ_WORKER_MAX_JOBS=128,
+        ARQ_JOB_TIMEOUT_SECONDS=30,
+        ARQ_QUEUE_NAME="lambchat:arq",
+        REDIS_URL="redis://localhost:6379/0",
+        REDIS_PASSWORD=None,
+    )
+    monkeypatch.setattr(arq_runtime, "settings", settings)
+
+    runtime = arq_runtime.EmbeddedArqRuntime(worker_factory=_FutureRunWorkerWithFuture)
+    await runtime.start()
+
+    assert runtime.is_running is True
+
+    await runtime.stop()
+    assert runtime.is_running is False
+
+
+@pytest.mark.asyncio
+async def test_stop_embedded_arq_worker_awaits_future_returned_by_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FutureCloseWorker(_FakeWorker):
+        close_done = False
+
+        def close(self) -> asyncio.Future[None]:
+            future = asyncio.get_running_loop().create_future()
+
+            def _finish_close() -> None:
+                type(self).close_done = True
+                self.closed.set()
+                future.set_result(None)
+
+            asyncio.get_running_loop().call_later(0.01, _finish_close)
+            return future
+
+    _FutureCloseWorker.close_done = False
+    _FakeWorker.instances.clear()
+    settings = SimpleNamespace(
+        TASK_BACKEND="arq",
+        ARQ_EMBEDDED_WORKER=True,
+        ARQ_WORKER_MAX_JOBS=128,
+        ARQ_JOB_TIMEOUT_SECONDS=30,
+        ARQ_QUEUE_NAME="lambchat:arq",
+        REDIS_URL="redis://localhost:6379/0",
+        REDIS_PASSWORD=None,
+    )
+    monkeypatch.setattr(arq_runtime, "settings", settings)
+
+    runtime = arq_runtime.EmbeddedArqRuntime(worker_factory=_FutureCloseWorker)
+    await runtime.start()
+    await runtime.stop()
+
+    assert _FutureCloseWorker.close_done is True
+
+
+@pytest.mark.asyncio
 async def test_stop_arq_runtime_releases_global_singleton() -> None:
     runtime = arq_runtime.EmbeddedArqRuntime(worker_factory=_FakeWorker)
     arq_runtime._runtime = runtime

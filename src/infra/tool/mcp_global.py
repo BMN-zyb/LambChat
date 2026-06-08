@@ -32,7 +32,7 @@ _global_entries: dict[str, "GlobalMCPEntry"] = {}
 _local_locks: dict[str, asyncio.Lock] = {}
 
 # 后台任务追踪集合
-_background_tasks: Set[asyncio.Task] = set()
+_background_tasks: Set[asyncio.Future] = set()
 
 # 清理计数器（用于定期清理检查）
 _cleanup_counter = 0
@@ -351,7 +351,7 @@ async def mark_init_done(user_id: str) -> None:
         logger.warning(f"[Global MCP] Failed to mark init done for {user_id}: {e}")
 
 
-def _track_background_task(task: asyncio.Task) -> None:
+def _track_background_task(task: asyncio.Future) -> None:
     """追踪后台任务，完成后自动从集合中移除"""
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
@@ -360,11 +360,11 @@ def _track_background_task(task: asyncio.Task) -> None:
 def _schedule_manager_close(manager: "MCPClientManager") -> None:
     """Schedule manager cleanup only when an event loop is available."""
     try:
-        loop = asyncio.get_running_loop()
+        asyncio.get_running_loop()
     except RuntimeError:
         return
     try:
-        task = loop.create_task(manager.close())
+        task = asyncio.ensure_future(manager.close())
         _track_background_task(task)
     except Exception:
         pass

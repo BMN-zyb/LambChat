@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import pytest
@@ -46,6 +47,17 @@ class _CapturingGraph:
         return {}
 
 
+class _FutureGraph:
+    def __init__(self) -> None:
+        self.config: dict[str, Any] | None = None
+
+    def ainvoke(self, _state: dict[str, Any], config: dict[str, Any]) -> asyncio.Future[dict]:
+        self.config = config
+        future = asyncio.get_running_loop().create_future()
+        asyncio.get_running_loop().call_soon(future.set_result, {})
+        return future
+
+
 async def _drain_stream(agent: Any, graph: _CapturingGraph) -> None:
     agent._initialized = True
     agent._graph = graph
@@ -85,3 +97,26 @@ async def test_agent_stream_passes_active_goal_to_node_config(
         "objective": "ship it",
         "rubric": "- done",
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("module", "agent_cls", "context_name"),
+    [
+        (fast_graph, fast_graph.FastAgent, "FastAgentContext"),
+        (search_graph, search_graph.SearchAgent, "SearchAgentContext"),
+        (team_graph, team_graph.TeamAgent, "TeamAgentContext"),
+    ],
+)
+async def test_agent_stream_accepts_future_returned_by_graph_ainvoke(
+    monkeypatch: pytest.MonkeyPatch,
+    module: Any,
+    agent_cls: Any,
+    context_name: str,
+) -> None:
+    monkeypatch.setattr(module, context_name, _DummyContext)
+    graph = _FutureGraph()
+
+    await _drain_stream(agent_cls(), graph)
+
+    assert graph.config is not None

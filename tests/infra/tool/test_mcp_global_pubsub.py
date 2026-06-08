@@ -179,6 +179,25 @@ async def test_close_global_mcp_cache_closes_managers_without_publishing(
     assert fake_redis.published == []
 
 
+@pytest.mark.asyncio
+async def test_schedule_manager_close_accepts_future_returned_by_close() -> None:
+    class _FutureCloseManager:
+        def __init__(self) -> None:
+            self.close_future: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+
+        def close(self) -> asyncio.Future[None]:
+            asyncio.get_running_loop().call_later(0.01, self.close_future.set_result, None)
+            return self.close_future
+
+    mcp_global._background_tasks.clear()
+    manager = _FutureCloseManager()
+
+    mcp_global._schedule_manager_close(manager)  # type: ignore[arg-type]
+    await mcp_global.drain_background_tasks(timeout=1)
+
+    assert manager.close_future.done() is True
+
+
 def test_global_mcp_cache_uses_configured_max_entries(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
