@@ -35,7 +35,6 @@ import {
   resolveDefaultModelSelection,
 } from "./modelSelection";
 import { getRestoredModelSelection } from "./sessionState";
-import { buildEffectiveSkills } from "./skillAvailability";
 import { getTeamRouteRequest } from "./teamRouteState";
 import { resolvePersonaAgentId } from "../../../hooks/useAgent/agentSelection";
 import { AppShell } from "./AppShell";
@@ -98,7 +97,7 @@ export function ChatAppContent({
     fetchSkills,
     enabledCount: totalEnabledSkillCount,
     totalCount: totalSkillCount,
-  } = useSkills({ enabled: enableSkills });
+  } = useSkills({ enabled: enableSkills, listParams: { limit: 100 } });
 
   const canReadPersonaPresets = hasPermission(Permission.PERSONA_PRESET_READ);
   const canManagePersonaPresets =
@@ -474,20 +473,6 @@ export function ChatAppContent({
     });
   }, [tools, sessionConfig.disabledMcpTools]);
 
-  const effectiveSkills = useMemo(() => {
-    return buildEffectiveSkills({
-      skills,
-      skillsLoading,
-      personaSkillNames: sessionConfig.personaSnapshot?.skill_names,
-      disabledSkillNames: sessionConfig.disabledSkills,
-    });
-  }, [
-    skills,
-    sessionConfig.disabledSkills,
-    sessionConfig.personaSnapshot,
-    skillsLoading,
-  ]);
-
   const effectiveToggleTool = useCallback(
     (toolName: string) => {
       const tool = tools.find((t) => t.name === toolName);
@@ -548,8 +533,8 @@ export function ChatAppContent({
 
   const effectiveToggleSkillCategory = useCallback(
     async (category: SkillSource, enabled: boolean): Promise<boolean> => {
-      effectiveSkills
-        .filter((s) => s.source === category)
+      skills
+        .filter((s) => s.enabled && s.source === category)
         .forEach((s) => {
           const isInSessionDisabled = sessionConfig.disabledSkills.includes(
             s.name,
@@ -562,24 +547,26 @@ export function ChatAppContent({
         });
       return true;
     },
-    [effectiveSkills, sessionConfig.disabledSkills, toggleSessionSkill],
+    [skills, sessionConfig.disabledSkills, toggleSessionSkill],
   );
 
   const effectiveToggleAllSkills = useCallback(
     async (enabled: boolean): Promise<boolean> => {
-      effectiveSkills.forEach((s) => {
-        const isInSessionDisabled = sessionConfig.disabledSkills.includes(
-          s.name,
-        );
-        if (enabled && isInSessionDisabled) {
-          toggleSessionSkill(s.name);
-        } else if (!enabled && !isInSessionDisabled) {
-          toggleSessionSkill(s.name);
-        }
-      });
+      skills
+        .filter((s) => s.enabled)
+        .forEach((s) => {
+          const isInSessionDisabled = sessionConfig.disabledSkills.includes(
+            s.name,
+          );
+          if (enabled && isInSessionDisabled) {
+            toggleSessionSkill(s.name);
+          } else if (!enabled && !isInSessionDisabled) {
+            toggleSessionSkill(s.name);
+          }
+        });
       return true;
     },
-    [effectiveSkills, sessionConfig.disabledSkills, toggleSessionSkill],
+    [skills, sessionConfig.disabledSkills, toggleSessionSkill],
   );
 
   const effectiveEnabledToolsCount = useMemo(
@@ -846,7 +833,7 @@ export function ChatAppContent({
           toolsLoading={toolsLoading}
           enabledToolsCount={effectiveEnabledToolsCount}
           totalToolsCount={totalToolsCount}
-          skills={effectiveSkills}
+          skills={skills}
           onToggleSkill={effectiveToggleSkill}
           onToggleSkillCategory={effectiveToggleSkillCategory}
           onToggleAllSkills={effectiveToggleAllSkills}
