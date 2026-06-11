@@ -40,6 +40,7 @@ import { resolvePersonaAgentId } from "../../../hooks/useAgent/agentSelection";
 import { AppShell } from "./AppShell";
 import { ChatView } from "./ChatView";
 import { shouldShowMessageOutline } from "./messageOutline";
+import { buildEffectiveSkills, countEnabledSkills } from "./skillAvailability";
 
 const SCHEDULED_TASK_DEFAULTS_KEY = "lambchat_scheduled_task_defaults";
 const CHAT_SKILL_LIST_PARAMS = { limit: 100 };
@@ -96,8 +97,6 @@ export function ChatAppContent({
     pendingSkillNames,
     isMutating: skillsMutating,
     fetchSkills,
-    enabledCount: totalEnabledSkillCount,
-    totalCount: totalSkillCount,
   } = useSkills({ enabled: enableSkills, listParams: CHAT_SKILL_LIST_PARAMS });
 
   const canReadPersonaPresets = hasPermission(Permission.PERSONA_PRESET_READ);
@@ -474,6 +473,26 @@ export function ChatAppContent({
     });
   }, [tools, sessionConfig.disabledMcpTools]);
 
+  const effectiveSkills = useMemo(
+    () =>
+      buildEffectiveSkills({
+        skills,
+        skillsLoading,
+        personaSkillNames: sessionConfig.personaSnapshot?.skill_names,
+        disabledSkillNames: sessionConfig.disabledSkills,
+      }),
+    [
+      skills,
+      skillsLoading,
+      sessionConfig.personaSnapshot?.skill_names,
+      sessionConfig.disabledSkills,
+    ],
+  );
+  const effectiveEnabledSkillsCount = useMemo(
+    () => countEnabledSkills(effectiveSkills),
+    [effectiveSkills],
+  );
+
   const effectiveToggleTool = useCallback(
     (toolName: string) => {
       const tool = tools.find((t) => t.name === toolName);
@@ -834,15 +853,15 @@ export function ChatAppContent({
           toolsLoading={toolsLoading}
           enabledToolsCount={effectiveEnabledToolsCount}
           totalToolsCount={totalToolsCount}
-          skills={skills}
+          skills={effectiveSkills}
           onToggleSkill={effectiveToggleSkill}
           onToggleSkillCategory={effectiveToggleSkillCategory}
           onToggleAllSkills={effectiveToggleAllSkills}
           skillsLoading={skillsLoading}
           pendingSkillNames={pendingSkillNames}
           skillsMutating={skillsMutating}
-          enabledSkillsCount={totalEnabledSkillCount}
-          totalSkillsCount={totalSkillCount}
+          enabledSkillsCount={effectiveEnabledSkillsCount}
+          totalSkillsCount={effectiveSkills.length}
           enableSkills={enableSkills}
           personaPresets={personaPresets}
           personaPresetsTotal={personaPresetsTotal}
