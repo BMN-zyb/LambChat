@@ -54,6 +54,10 @@
 
 - Update README and README_CN with scheduled tasks and task runtime details
 
+### 🔧 Desktop
+
+- Auto-clean app data (localStorage, webview cache) on version upgrade — ensures fresh state after install
+
 ---
 
 ## v2.5.0 (2026-06-04)
