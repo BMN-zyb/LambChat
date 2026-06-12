@@ -310,7 +310,11 @@ def test_create_model_does_not_forward_app_only_profile_keys() -> None:
             "gpt-4.1",
             temperature=0.7,
             api_key="sk-test",
-            profile={"max_input_tokens": 128000, "supports_vision": True},
+            profile={
+                "max_input_tokens": 128000,
+                "supports_vision": True,
+                "image_url_to_base64": True,
+            },
         )
 
     assert model.profile == {"max_input_tokens": 128000}

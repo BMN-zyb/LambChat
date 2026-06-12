@@ -17,6 +17,7 @@ export function withoutScheduledTaskModelOptions(
   delete next.model;
   delete next._resolved_model_config;
   delete next._resolved_supports_vision;
+  delete next._resolved_image_url_to_base64;
   delete next._resolved_fallback_model;
   delete next._resolved_model_profile;
   return next;

@@ -68,6 +68,7 @@ function getCachedModelList<T>(url: string): Promise<T> {
 export interface ModelProfile {
   max_input_tokens?: number;
   supports_vision?: boolean;
+  image_url_to_base64?: boolean;
 }
 
 /** LLM API provider type (dynamic, from backend PROVIDER_REGISTRY) */

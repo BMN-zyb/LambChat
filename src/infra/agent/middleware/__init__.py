@@ -1,6 +1,7 @@
 """DeepAgent middleware: retry, prompt injection, tool interception, and prompt caching."""
 
 from src.infra.agent.middleware.code_interpreter import create_code_interpreter_middleware
+from src.infra.agent.middleware.image_url import ImageUrlToBase64Middleware
 from src.infra.agent.middleware.prompt_caching import PromptCachingMiddleware
 from src.infra.agent.middleware.prompt_injection import (
     EnvVarPromptMiddleware,
@@ -25,6 +26,7 @@ __all__ = [
     "create_code_interpreter_middleware",
     "EmptyContentRetryMiddleware",
     "EnvVarPromptMiddleware",
+    "ImageUrlToBase64Middleware",
     "MCPQuotaMiddleware",
     "MemoryIndexMiddleware",
     "ModelFallbackMiddleware",

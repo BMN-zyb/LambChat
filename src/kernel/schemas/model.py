@@ -16,6 +16,10 @@ class ModelProfile(BaseModel):
         False,
         description="Whether this model accepts image input",
     )
+    image_url_to_base64: Optional[bool] = Field(
+        False,
+        description="Whether image_url blocks should be converted to base64 data URLs before model calls",
+    )
 
 
 class ModelConfig(BaseModel):

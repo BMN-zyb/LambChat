@@ -103,6 +103,18 @@ function renderModelTags(model: ModelConfig, compact: boolean) {
       </span>,
     );
   }
+  if (model.profile?.image_url_to_base64) {
+    tags.push(
+      <span
+        key="image-url-base64"
+        className={`glass-tag glass-tag--accent ${
+          compact ? "text-[10px]" : "text-xs"
+        }`}
+      >
+        img:b64
+      </span>,
+    );
+  }
   return tags;
 }
 
@@ -113,7 +125,8 @@ function modelHasTags(model: ModelConfig) {
     model.api_base ||
     model.temperature != null ||
     model.max_tokens != null ||
-    model.profile?.max_input_tokens != null
+    model.profile?.max_input_tokens != null ||
+    model.profile?.image_url_to_base64
   );
 }
 

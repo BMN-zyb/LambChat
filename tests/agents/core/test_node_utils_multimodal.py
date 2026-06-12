@@ -7,6 +7,7 @@ from src.agents.core import node_utils
 from src.agents.core.node_utils import (
     build_human_message,
     inline_image_attachments_as_data_urls,
+    resolve_model_image_url_to_base64,
 )
 
 
@@ -101,6 +102,28 @@ async def test_inline_image_attachments_uses_existing_url_without_download(monke
     assert "data_url" not in attachments[0]
 
 
+@pytest.mark.asyncio
+async def test_inline_image_attachments_converts_existing_url_when_enabled(monkeypatch):
+    storage = FakeImageStorage()
+
+    async def fake_get_or_init_storage():
+        return storage
+
+    monkeypatch.setattr(
+        "src.infra.storage.s3.service.get_or_init_storage",
+        fake_get_or_init_storage,
+    )
+
+    attachments = await inline_image_attachments_as_data_urls(
+        [image_attachment()],
+        force_data_url=True,
+    )
+
+    assert storage.downloaded_keys == ["uploads/img.png"]
+    assert attachments[0]["url"] is None
+    assert attachments[0]["data_url"] == "data:image/png;base64,aW1hZ2UtYnl0ZXM="
+
+
 class FakeImageStorage:
     def __init__(self) -> None:
         self.downloaded_keys: list[str] = []
@@ -166,7 +189,7 @@ async def test_inline_image_attachments_offloads_base64_file_encoding(monkeypatc
     attachments = await inline_image_attachments_as_data_urls([image_attachment(url="")])
 
     assert attachments[0]["data_url"] == "data:image/png;base64,aW1hZ2UtYnl0ZXM="
-    assert calls == ["_base64_encode_file"]
+    assert calls == ["seek", "_base64_encode_file"]
 
 
 @pytest.mark.asyncio
@@ -270,11 +293,15 @@ class FakeStorage:
     async def get(self, model_id):
         if model_id == "vision-id":
             return SimpleNamespace(profile=SimpleNamespace(supports_vision=True))
+        if model_id == "base64-id":
+            return SimpleNamespace(profile=SimpleNamespace(image_url_to_base64=True))
         return None
 
     async def get_by_value(self, value):
         if value == "text-model":
             return SimpleNamespace(profile=SimpleNamespace(supports_vision=False))
+        if value == "base64-model":
+            return SimpleNamespace(profile=SimpleNamespace(image_url_to_base64=True))
         return None
 
 
@@ -295,5 +322,131 @@ async def test_resolve_model_supports_vision_defaults_false(monkeypatch):
         lambda: FakeStorage(),
     )
 
+    assert await node_utils.resolve_model_supports_vision(None, "text-model") is False
+    assert await node_utils.resolve_model_supports_vision(None, "missing") is False
+
+
+@pytest.mark.asyncio
+async def test_resolve_model_image_url_to_base64_uses_model_profile(monkeypatch):
+    monkeypatch.setattr(
+        "src.infra.agent.model_storage.get_model_storage",
+        lambda: FakeStorage(),
+    )
+
+    assert await resolve_model_image_url_to_base64("base64-id", None) is True
+    assert await resolve_model_image_url_to_base64(None, "base64-model") is True
+    assert await resolve_model_image_url_to_base64(None, "missing") is False
+
+
+# ---------------------------------------------------------------------------
+# Fix #1: build_human_message prefers data_url over url when url is None
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_force_data_url_emits_data_url_in_human_message(monkeypatch):
+    """When force_data_url=True, build_human_message should use the data_url."""
+    storage = FakeImageStorage()
+
+    async def fake_get_or_init_storage():
+        return storage
+
+    monkeypatch.setattr(
+        "src.infra.storage.s3.service.get_or_init_storage",
+        fake_get_or_init_storage,
+    )
+
+    attachments = await inline_image_attachments_as_data_urls(
+        [image_attachment()],
+        force_data_url=True,
+    )
+
+    message = build_human_message("describe", attachments, supports_vision=True)
+    assert isinstance(message.content, list)
+    img_block = message.content[1]
+    assert img_block["image_url"]["url"] == "data:image/png;base64,aW1hZ2UtYnl0ZXM="
+
+
+@pytest.mark.asyncio
+async def test_force_data_url_cleared_url_not_double_downloaded_by_middleware(monkeypatch):
+    """After force_data_url clears url, the middleware should skip data: URLs."""
+    storage = FakeImageStorage()
+
+    async def fake_get_or_init_storage():
+        return storage
+
+    monkeypatch.setattr(
+        "src.infra.storage.s3.service.get_or_init_storage",
+        fake_get_or_init_storage,
+    )
+
+    attachments = await inline_image_attachments_as_data_urls(
+        [image_attachment()],
+        force_data_url=True,
+    )
+    # The middleware checks url.startswith("data:") — url is now None so no re-download
+    assert attachments[0]["url"] is None
+    assert attachments[0]["data_url"].startswith("data:")
+
+
+# ---------------------------------------------------------------------------
+# Fix #3: SSRF protection — private / non-http URLs are rejected
+# ---------------------------------------------------------------------------
+
+
+def test_is_private_url_blocks_loopback():
+    from src.agents.core.node_utils import _is_private_url
+
+    assert _is_private_url("http://127.0.0.1/image.png") is True
+    assert _is_private_url("http://localhost/image.png") is True
+    assert _is_private_url("http://169.254.169.254/meta") is True
+    assert _is_private_url("http://10.0.0.1/img") is True
+    assert _is_private_url("http://192.168.1.1/img") is True
+    assert _is_private_url("ftp://evil.com/img") is True
+    assert _is_private_url("file:///etc/passwd") is True
+
+
+def test_is_private_url_allows_public():
+    from src.agents.core.node_utils import _is_private_url
+
+    assert _is_private_url("https://cdn.example.com/photo.jpg") is False
+    assert _is_private_url("https://images.example.com/img.png") is False
+
+
+@pytest.mark.asyncio
+async def test_download_image_url_rejects_private_address():
+    from src.agents.core.node_utils import _download_image_url_as_data_url
+
+    # httpx is available but URL is private — should return None
+    result = await _download_image_url_as_data_url(
+        "http://127.0.0.1/secret.png", "image/png", max_bytes=1024
+    )
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_download_image_url_rejects_non_http_scheme():
+    from src.agents.core.node_utils import _download_image_url_as_data_url
+
+    result = await _download_image_url_as_data_url(
+        "file:///etc/passwd", "image/png", max_bytes=1024
+    )
+    assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Fix #2: shared _resolve_model_profile_bool — verify both wrappers still work
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_resolve_model_supports_vision_still_works_via_shared_helper(monkeypatch):
+    """Ensure DRY refactor didn't break the existing resolve path."""
+    monkeypatch.setattr(
+        "src.infra.agent.model_storage.get_model_storage",
+        lambda: FakeStorage(),
+    )
+
+    assert await node_utils.resolve_model_supports_vision("vision-id", None) is True
     assert await node_utils.resolve_model_supports_vision(None, "text-model") is False
     assert await node_utils.resolve_model_supports_vision(None, "missing") is False

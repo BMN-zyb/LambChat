@@ -18,7 +18,7 @@ class _ModelStorage:
                 label="Allowed",
                 api_key="sk-secret",
                 fallback_model="fallback-enabled",
-                profile=ModelProfile(supports_vision=True),
+                profile=ModelProfile(supports_vision=True, image_url_to_base64=True),
                 enabled=True,
             )
         if model_id == "fallback-enabled":
@@ -137,6 +137,7 @@ async def test_validate_agent_model_access_allows_role_model_id(
     assert agent_options["_resolved_model_config"]["api_key"] is None
     assert agent_options["_resolved_fallback_model"] == "openai/gpt-fallback"
     assert agent_options["_resolved_supports_vision"] is True
+    assert agent_options["_resolved_image_url_to_base64"] is True
 
 
 @pytest.mark.asyncio

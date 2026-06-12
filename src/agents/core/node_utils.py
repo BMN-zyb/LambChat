@@ -7,8 +7,9 @@ Agent 节点共享工具函数
 from __future__ import annotations
 
 import base64
+import ipaddress
 from tempfile import SpooledTemporaryFile
-from urllib.parse import quote
+from urllib.parse import quote, unquote, urlsplit
 
 from langchain_core.messages import HumanMessage
 
@@ -73,13 +74,19 @@ async def resolve_fallback_model(
     return None
 
 
-async def resolve_model_supports_vision(
+async def _resolve_model_profile_bool(
+    attr_name: str,
     model_id: str | None,
     selected_model: str | None,
     *,
     log_prefix: str = "",
 ) -> bool:
-    """Resolve whether the selected model is configured for image input."""
+    """Resolve a boolean flag from the model's profile.
+
+    Shared lookup logic used by resolve_model_supports_vision and
+    resolve_model_image_url_to_base64 to avoid duplicating the
+    model-storage fetch boilerplate.
+    """
     if not model_id and not selected_model:
         return False
 
@@ -94,13 +101,37 @@ async def resolve_model_supports_vision(
         elif selected_model:
             db_model = await storage.get_by_value(selected_model)
     except Exception as e:
-        logger.warning("%s Failed to lookup model vision capability: %s", log_prefix, e)
+        logger.warning("%s Failed to lookup model profile (%s): %s", log_prefix, attr_name, e)
         return False
 
     if not db_model or not getattr(db_model, "profile", None):
         return False
 
-    return bool(getattr(db_model.profile, "supports_vision", False))
+    return bool(getattr(db_model.profile, attr_name, False))
+
+
+async def resolve_model_supports_vision(
+    model_id: str | None,
+    selected_model: str | None,
+    *,
+    log_prefix: str = "",
+) -> bool:
+    """Resolve whether the selected model is configured for image input."""
+    return await _resolve_model_profile_bool(
+        "supports_vision", model_id, selected_model, log_prefix=log_prefix
+    )
+
+
+async def resolve_model_image_url_to_base64(
+    model_id: str | None,
+    selected_model: str | None,
+    *,
+    log_prefix: str = "",
+) -> bool:
+    """Resolve whether image_url blocks should be converted to base64 data URLs."""
+    return await _resolve_model_profile_bool(
+        "image_url_to_base64", model_id, selected_model, log_prefix=log_prefix
+    )
 
 
 def _is_image_attachment(attachment: dict) -> bool:
@@ -113,6 +144,56 @@ def _attachment_url_from_key(key: object, base_url: str) -> str:
     clean_base_url = base_url.rstrip("/")
     quoted_key = quote(str(key).lstrip("/"), safe="/")
     return f"{clean_base_url}/api/upload/file/{quoted_key}"
+
+
+def _upload_key_from_image_url(url: str) -> str | None:
+    if url.startswith("data:"):
+        return None
+
+    parsed = urlsplit(url)
+    path = unquote(parsed.path or url)
+    marker = "/api/upload/file/"
+    if marker not in path:
+        return None
+
+    key = path.split(marker, 1)[1].lstrip("/")
+    return key or None
+
+
+_PRIVATE_NETWORKS = [
+    ipaddress.ip_network("127.0.0.0/8"),
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+    ipaddress.ip_network("169.254.0.0/16"),
+    ipaddress.ip_network("::1/128"),
+    ipaddress.ip_network("fc00::/7"),
+    ipaddress.ip_network("fe80::/10"),
+]
+
+_BLOCKED_HOSTNAMES = frozenset({"localhost", "localhost.localdomain"})
+
+
+def _is_private_url(url: str) -> bool:
+    """Return True if *url* points to a private / loopback / link-local address.
+
+    Blocks SSRF via httpx fallback in ``_download_image_url_as_data_url``.
+    Non-http schemes are also rejected.
+    """
+    parsed = urlsplit(url)
+    scheme = (parsed.scheme or "").lower()
+    if scheme not in ("http", "https"):
+        return True
+    hostname = parsed.hostname
+    if not hostname:
+        return True
+    if hostname.lower() in _BLOCKED_HOSTNAMES:
+        return True
+    try:
+        addr = ipaddress.ip_address(hostname)
+        return any(addr in net for net in _PRIVATE_NETWORKS)
+    except ValueError:
+        return False
 
 
 def _base64_encode_file(file) -> str:
@@ -139,6 +220,56 @@ async def _download_image_as_data_url(
         downloaded_size = await storage.download_to_file(str(key), spooled)
         if isinstance(downloaded_size, int) and downloaded_size > max_bytes:
             return None
+        await run_blocking_io(spooled.seek, 0)
+        encoded = await run_blocking_io(_base64_encode_file, spooled)
+    return f"data:{mime_type};base64,{encoded}"
+
+
+async def _download_image_url_as_data_url(
+    url: str,
+    mime_type: str,
+    *,
+    max_bytes: int,
+) -> str | None:
+    key = _upload_key_from_image_url(url)
+    if key:
+        from src.infra.storage.s3.service import get_or_init_storage
+
+        storage = await get_or_init_storage()
+        return await _download_image_as_data_url(
+            storage,
+            key,
+            mime_type,
+            max_bytes=max_bytes,
+        )
+
+    if _is_private_url(url):
+        logger.warning("Refusing to inline private/internal image URL: %s", url)
+        return None
+
+    try:
+        import httpx
+    except Exception:
+        logger.warning("Cannot inline remote image URL without httpx: %s", url)
+        return None
+
+    with SpooledTemporaryFile(
+        max_size=IMAGE_DATA_URL_SPOOL_MAX_MEMORY_BYTES,
+        mode="w+b",
+    ) as spooled:
+        downloaded_size = 0
+        async with httpx.AsyncClient(follow_redirects=True, timeout=30.0) as client:
+            async with client.stream("GET", url) as response:
+                response.raise_for_status()
+                content_type = response.headers.get("content-type", "").split(";", 1)[0].strip()
+                if content_type.startswith("image/"):
+                    mime_type = content_type
+                async for chunk in response.aiter_bytes():
+                    downloaded_size += len(chunk)
+                    if downloaded_size > max_bytes:
+                        return None
+                    await run_blocking_io(spooled.write, chunk)
+        await run_blocking_io(spooled.seek, 0)
         encoded = await run_blocking_io(_base64_encode_file, spooled)
     return f"data:{mime_type};base64,{encoded}"
 
@@ -148,6 +279,7 @@ async def inline_image_attachments_as_data_urls(
     *,
     base_url: str = "",
     max_inline_bytes: int = IMAGE_DATA_URL_INLINE_MAX_BYTES,
+    force_data_url: bool = False,
 ) -> list[dict]:
     """Return image attachments with URLs preferred over in-memory data URLs."""
     if not attachments:
@@ -161,16 +293,44 @@ async def inline_image_attachments_as_data_urls(
             inlined.append(attachment)
             continue
 
-        if attachment.get("url") or attachment.get("data_url"):
+        if attachment.get("data_url"):
+            inlined.append(attachment)
+            continue
+
+        existing_url = attachment.get("url")
+        if existing_url and not force_data_url:
             inlined.append(attachment)
             continue
 
         key = attachment.get("key")
+        mime_type = attachment.get("mime_type") or attachment.get("mimeType") or "image/jpeg"
+
+        if existing_url and force_data_url:
+            size = attachment.get("size")
+            if isinstance(size, int) and size > max_inline_bytes:
+                inlined.append(attachment)
+                continue
+            try:
+                data_url = await _download_image_url_as_data_url(
+                    str(existing_url),
+                    mime_type,
+                    max_bytes=max_inline_bytes,
+                )
+                if data_url is None:
+                    inlined.append(attachment)
+                    continue
+            except Exception as e:
+                logger.warning("Failed to inline image URL %s: %s", existing_url, e)
+                inlined.append(attachment)
+                continue
+            inlined.append({**attachment, "data_url": data_url, "url": None})
+            continue
+
         if not key:
             inlined.append(attachment)
             continue
 
-        if base_url:
+        if base_url and not force_data_url:
             inlined.append(
                 {
                     **attachment,
@@ -189,7 +349,6 @@ async def inline_image_attachments_as_data_urls(
                 from src.infra.storage.s3.service import get_or_init_storage
 
                 storage = await get_or_init_storage()
-            mime_type = attachment.get("mime_type") or attachment.get("mimeType") or "image/jpeg"
             data_url = await _download_image_as_data_url(
                 storage,
                 key,
@@ -208,6 +367,7 @@ async def inline_image_attachments_as_data_urls(
             {
                 **attachment,
                 "data_url": data_url,
+                "url": None,
             }
         )
 

@@ -19,6 +19,7 @@ from src.agents.core.node_utils import (
     emit_token_usage,
     inline_image_attachments_as_data_urls,
     resolve_fallback_model,
+    resolve_model_image_url_to_base64,
     resolve_model_supports_vision,
 )
 from src.agents.core.persona import build_persona_prompt_sections
@@ -37,6 +38,7 @@ from src.agents.search_agent.prompt import (
 from src.infra.agent import AgentEventProcessor
 from src.infra.agent.middleware import (
     EnvVarPromptMiddleware,
+    ImageUrlToBase64Middleware,
     MCPQuotaMiddleware,
     PromptCachingMiddleware,
     SandboxMCPMiddleware,
@@ -119,6 +121,12 @@ async def agent_node(state: Dict[str, Any], config: RunnableConfig) -> Dict[str,
             model_id, selected_model, log_prefix="[Agent]"
         )
     supports_vision = bool(supports_vision)
+    image_url_to_base64 = agent_options.get("_resolved_image_url_to_base64")
+    if image_url_to_base64 is None:
+        image_url_to_base64 = await resolve_model_image_url_to_base64(
+            model_id, selected_model, log_prefix="[Agent]"
+        )
+    image_url_to_base64 = bool(image_url_to_base64)
 
     # 多租户隔离
     tenant_id = context.user_id or "default"
@@ -194,6 +202,8 @@ async def agent_node(state: Dict[str, Any], config: RunnableConfig) -> Dict[str,
         ToolResultBinaryMiddleware(base_url=search_base_url),
         SubagentActivityMiddleware(backend=backend),
     ]
+    if image_url_to_base64:
+        subagent_middleware.append(ImageUrlToBase64Middleware())
     if subagent_prompt_sections:
         subagent_middleware.append(SectionPromptMiddleware(sections=subagent_prompt_sections))
     if sandbox_backend:
@@ -228,6 +238,8 @@ async def agent_node(state: Dict[str, Any], config: RunnableConfig) -> Dict[str,
     )
     user_middleware.append(MCPQuotaMiddleware(user_id=context.user_id))
     user_middleware.append(ToolResultBinaryMiddleware(base_url=search_base_url))
+    if image_url_to_base64:
+        user_middleware.append(ImageUrlToBase64Middleware())
     # Prompt sections: one SectionPromptMiddleware instance, multiple ordered blocks.
     # Duplicate middleware classes are rejected by langchain's agent factory.
     _prompt_sections = [
@@ -312,6 +324,7 @@ async def agent_node(state: Dict[str, Any], config: RunnableConfig) -> Dict[str,
         attachments = await inline_image_attachments_as_data_urls(
             attachments,
             base_url=configurable.get("base_url", ""),
+            force_data_url=image_url_to_base64,
         )
     new_message = build_human_message(user_input, attachments, supports_vision=supports_vision)
 

@@ -100,6 +100,7 @@ export interface SettingResetResponse {
 export interface ModelProfile {
   max_input_tokens?: number;
   supports_vision?: boolean;
+  image_url_to_base64?: boolean;
 }
 
 export interface AvailableModelConfig {

@@ -57,6 +57,9 @@ export const ModelFormModal = ({
   const [formSupportsVision, setFormSupportsVision] = useState(
     Boolean(model?.profile?.supports_vision),
   );
+  const [formImageUrlToBase64, setFormImageUrlToBase64] = useState(
+    Boolean(model?.profile?.image_url_to_base64),
+  );
   const [formProvider, setFormProvider] = useState(model?.provider || "");
   const [formIcon, setFormIcon] = useState(model?.icon || "");
   const [formFallbackModel, setFormFallbackModel] = useState(
@@ -83,6 +86,7 @@ export const ModelFormModal = ({
     const profile: ModelProfile = {
       ...(maxInputTokens ? { max_input_tokens: maxInputTokens } : {}),
       supports_vision: formSupportsVision,
+      image_url_to_base64: formImageUrlToBase64,
     };
 
     if (
@@ -154,6 +158,7 @@ export const ModelFormModal = ({
     formMaxTokens,
     formMaxInputTokens,
     formSupportsVision,
+    formImageUrlToBase64,
     formProvider,
     formIcon,
     formFallbackModel,
@@ -376,6 +381,28 @@ export const ModelFormModal = ({
                   </span>
                   <span className="es-hint block">
                     {t("agentConfig.supportsVisionHint")}
+                  </span>
+                </span>
+              </label>
+            </div>
+            <div className="es-field">
+              <label className="flex items-start gap-2 text-sm text-theme-text cursor-pointer">
+                <Checkbox
+                  checked={formImageUrlToBase64}
+                  onChange={() =>
+                    setFormImageUrlToBase64((checked) => !checked)
+                  }
+                  className="mt-1"
+                />
+                <span>
+                  <span className="block font-medium">
+                    {t("agentConfig.imageUrlToBase64", "图片链接转 base64")}
+                  </span>
+                  <span className="es-hint block">
+                    {t(
+                      "agentConfig.imageUrlToBase64Hint",
+                      "发给模型前把 image_url 自动转成 data URL",
+                    )}
                   </span>
                 </span>
               </label>

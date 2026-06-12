@@ -18,6 +18,7 @@ from src.agents.core.node_utils import (
     emit_token_usage,
     inline_image_attachments_as_data_urls,
     resolve_fallback_model,
+    resolve_model_image_url_to_base64,
     resolve_model_supports_vision,
 )
 from src.agents.core.persona import build_persona_prompt_sections
@@ -31,6 +32,7 @@ from src.agents.fast_agent.context import FastAgentContext
 from src.agents.fast_agent.prompt import FAST_SYSTEM_PROMPT
 from src.infra.agent import AgentEventProcessor
 from src.infra.agent.middleware import (
+    ImageUrlToBase64Middleware,
     PromptCachingMiddleware,
     SectionPromptMiddleware,
     ToolResultBinaryMiddleware,
@@ -108,6 +110,12 @@ async def fast_agent_node(state: Dict[str, Any], config: RunnableConfig) -> Dict
             model_id, selected_model, log_prefix="[FastAgent]"
         )
     supports_vision = bool(supports_vision)
+    image_url_to_base64 = agent_options.get("_resolved_image_url_to_base64")
+    if image_url_to_base64 is None:
+        image_url_to_base64 = await resolve_model_image_url_to_base64(
+            model_id, selected_model, log_prefix="[FastAgent]"
+        )
+    image_url_to_base64 = bool(image_url_to_base64)
 
     # 多租户隔离
     tenant_id = context.user_id or "default"
@@ -189,6 +197,8 @@ async def fast_agent_node(state: Dict[str, Any], config: RunnableConfig) -> Dict
         ToolResultBinaryMiddleware(base_url=subagent_base_url),
         SubagentActivityMiddleware(backend=backend),
     ]
+    if image_url_to_base64:
+        subagent_middleware.append(ImageUrlToBase64Middleware())
     if subagent_prompt_sections:
         subagent_middleware.append(SectionPromptMiddleware(sections=subagent_prompt_sections))
     if context.deferred_manager is not None:
@@ -220,6 +230,8 @@ async def fast_agent_node(state: Dict[str, Any], config: RunnableConfig) -> Dict
         fallback_model=fallback_model_value, thinking=thinking_config
     )
     user_middleware.append(ToolResultBinaryMiddleware(base_url=subagent_base_url))
+    if image_url_to_base64:
+        user_middleware.append(ImageUrlToBase64Middleware())
     # Skills + memory guide: session-static (one SectionPromptMiddleware, multiple blocks)
     # persona_sections returns 0-2 blocks (role + behavior) for fine-grained KV cache
     _prompt_sections = [
@@ -292,6 +304,7 @@ async def fast_agent_node(state: Dict[str, Any], config: RunnableConfig) -> Dict
         attachments = await inline_image_attachments_as_data_urls(
             attachments,
             base_url=configurable.get("base_url", ""),
+            force_data_url=image_url_to_base64,
         )
     new_message = build_human_message(user_input, attachments, supports_vision=supports_vision)
 

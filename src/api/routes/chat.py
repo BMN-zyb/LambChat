@@ -114,6 +114,9 @@ async def _attach_resolved_model_options(agent_options: dict, model: ModelConfig
     agent_options["_resolved_supports_vision"] = bool(
         getattr(model.profile, "supports_vision", False)
     )
+    agent_options["_resolved_image_url_to_base64"] = bool(
+        getattr(model.profile, "image_url_to_base64", False)
+    )
     if model.api_key:
         from src.infra.llm.models_service import set_cached_api_key
 
