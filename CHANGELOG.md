@@ -1,5 +1,35 @@
 # Changelog
 
+## v2.5.2 (2026-06-14)
+
+### ✨ New Features
+
+- **Web Push Notifications** — VAPID key management and public key endpoint (#web-push)
+- **Scheduled Task Management Tools** — New tools for managing scheduled tasks
+- **Persona Editor Enhancements** — ConfigPanelErrorCallout component and preset persistence
+- **Memory Recall & Store** — New memory components with detailed UI and test coverage
+- **Subagent Block** — Parts prop support for richer subagent rendering
+- **i18n Updates** — Added 'loading' message and restored 'table' entry across multiple languages
+
+### 🐛 Bug Fixes
+
+- Improve markdown stripping in AskHumanItem
+- Fix setPersonaPreset missing from useEffect dependencies in ChatAppContent
+
+### 🔒 Security
+
+- Web push notification VAPID key integration and test coverage
+
+### ♻️ Refactors
+
+- Refactor code structure for improved readability and maintainability
+- Enhance loading spinner colors across multiple components
+
+### 🧪 Tests
+
+- Memory recall and tool argument tests
+- VAPID public key endpoint test case
+
 ## v2.5.1 (2026-06-13)
 
 ### ✨ New Features
