@@ -15,6 +15,7 @@ import { ThemeProvider } from "./contexts/ThemeContext";
 import { ErrorBoundary } from "./components/common/ErrorBoundary";
 import { SelectionActionPopover } from "./components/common/SelectionActionPopover.tsx";
 import { useSEO } from "./hooks/usePageTitle";
+import { GITHUB_URL } from "./constants";
 import { Permission } from "./types";
 import { sessionApi } from "./services/api";
 import {
@@ -297,6 +298,21 @@ function ScheduledTasksPage() {
   return <AppContent key="scheduled-tasks" activeTab="scheduled-tasks" />;
 }
 
+function GitHubPage() {
+  useSEO({
+    title: "LambChat GitHub",
+    description: "seo.landing.description",
+    path: "/github",
+    omitSuffix: true,
+  });
+
+  useEffect(() => {
+    window.location.replace(GITHUB_URL);
+  }, []);
+
+  return null;
+}
+
 // Auth page wrapper - redirects to /chat after successful login/register
 function AuthPageWrapper({
   initialMode,
@@ -430,6 +446,12 @@ function App() {
         <Suspense fallback={<ChatPageSkeleton />}>
           <Routes>
             <Route path="/" element={<LandingPage />} />
+            <Route path="/interface" element={<LandingPage />} />
+            <Route path="/features" element={<LandingPage />} />
+            <Route path="/architecture" element={<LandingPage />} />
+            <Route path="/dashboard" element={<LandingPage />} />
+            <Route path="/responsive" element={<LandingPage />} />
+            <Route path="/github" element={<GitHubPage />} />
             {/* Auth routes */}
             <Route path="/auth/login" element={<AuthPageWrapper />} />
             <Route

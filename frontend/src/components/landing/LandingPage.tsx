@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback, useMemo } from "react";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import { ImageViewer } from "../common/ImageViewer";
 import { useAuth } from "../../hooks/useAuth";
@@ -8,7 +8,11 @@ import { useSEO } from "../../hooks/usePageTitle";
 import { useScrollReveal } from "./hooks/useScrollReveal";
 import { useScrollProgress } from "./hooks/useScrollProgress";
 import { useActiveSection } from "./hooks/useActiveSection";
-import { SECTION_IDS } from "./constants";
+import {
+  SECTION_ID_BY_ROUTE,
+  SECTION_IDS,
+  SECTION_ROUTE_BY_ID,
+} from "./constants";
 import { MAIN_SHOTS, MGMT_SHOTS, RESPONSIVE_SHOTS } from "./data";
 import { Navbar } from "./components/Navbar";
 import { MobileMenu } from "./components/MobileMenu";
@@ -23,10 +27,17 @@ import { Footer } from "./components/Footer";
 import { ScrollButtons } from "./components/ScrollButtons";
 
 export function LandingPage() {
+  const location = useLocation();
+  const currentSectionId = SECTION_ID_BY_ROUTE[location.pathname];
+  const seoPath =
+    currentSectionId || location.pathname === "/github"
+      ? location.pathname
+      : "/";
+
   useSEO({
     title: "seo.landing.title",
     description: "seo.landing.description",
-    path: "/",
+    path: seoPath,
     omitSuffix: true,
   });
   const navigate = useNavigate();
@@ -122,10 +133,27 @@ export function LandingPage() {
     }
   }, [navigate, isAuthenticated, isLoading]);
 
-  const scrollToSection = useCallback((id: string) => {
-    setMobileMenuOpen(false);
-    document.getElementById(id)?.scrollIntoView({ behavior: "smooth" });
-  }, []);
+  const scrollToSection = useCallback(
+    (id: string) => {
+      setMobileMenuOpen(false);
+      const route = SECTION_ROUTE_BY_ID[id];
+      if (route && window.location.pathname !== route) {
+        navigate(route, { replace: false });
+      }
+      document.getElementById(id)?.scrollIntoView({ behavior: "smooth" });
+    },
+    [navigate],
+  );
+
+  useEffect(() => {
+    if (!currentSectionId) return;
+
+    window.requestAnimationFrame(() => {
+      document
+        .getElementById(currentSectionId)
+        ?.scrollIntoView({ behavior: "auto" });
+    });
+  }, [currentSectionId]);
 
   const scrollToTop = useCallback(
     () => window.scrollTo({ top: 0, behavior: "smooth" }),

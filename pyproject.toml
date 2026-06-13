@@ -56,6 +56,7 @@ dependencies = [
     "apscheduler>=3.11.0",
     "langchain-quickjs>=0.1.0",
     "arq>=0.28.0",
+    "pywebpush>=2.0.0",
 ]
 
 [dependency-groups]

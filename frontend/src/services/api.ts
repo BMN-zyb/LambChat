@@ -48,6 +48,7 @@ export { healthApi } from "./api/health";
 export { teamApi } from "./api/team";
 export { scheduledTaskApi } from "./api/scheduledTask";
 export { projectApi } from "./api/project";
+export { pushApi } from "./api/push";
 export {
   revealedFileApi,
   type RevealedFileItem,

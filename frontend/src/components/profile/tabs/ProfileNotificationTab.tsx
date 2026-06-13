@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Check, AlertCircle } from "lucide-react";
 import { useBrowserNotification } from "../../../hooks/useBrowserNotification";
+import { useWebPush } from "../../../hooks/useWebPush";
 import {
   appNotificationService,
   type AppNotificationPermission,
@@ -14,6 +15,12 @@ export function ProfileNotificationTab() {
     isSupported,
     permission: browserPermission,
   } = useBrowserNotification();
+  const {
+    status: pushStatus,
+    subscribe: subscribePush,
+    unsubscribe: unsubscribePush,
+  } = useWebPush();
+  const isPushLoading = pushStatus === "loading";
   const appRuntime = appNotificationService.getRuntime();
   const isAppNotificationRuntime = appRuntime !== "unsupported";
   const [appPermission, setAppPermission] = useState<
@@ -29,6 +36,18 @@ export function ProfileNotificationTab() {
     }
     const result = await appNotificationService.requestPermission();
     setAppPermission(result === "granted" ? "granted" : "denied");
+  };
+  const handlePushSubscribe = async () => {
+    if (isAppNotificationRuntime) {
+      // For native apps, browser notification permission might not be needed
+      await subscribePush();
+      return;
+    }
+    // For browser/PWA, ensure notification permission is granted first
+    if (browserPermission !== "granted") {
+      await requestBrowserPermission();
+    }
+    await subscribePush();
   };
 
   return (
@@ -84,6 +103,43 @@ export function ProfileNotificationTab() {
               {t("profile.realtimeNotificationDesc")}
             </p>
           </div>
+        </div>
+      </div>
+
+      {/* Web Push Notification */}
+      <div className="rounded-xl bg-stone-50 dark:bg-stone-700/50 p-3.5 sm:p-4">
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <h4 className="font-medium text-sm text-stone-900 dark:text-stone-100">
+              {t("profile.pushNotification")}
+            </h4>
+            <p className="text-xs text-stone-500 dark:text-stone-400 mt-1 leading-relaxed">
+              {t("profile.pushNotificationDesc")}
+            </p>
+          </div>
+          {pushStatus === "subscribed" ? (
+            <button
+              onClick={unsubscribePush}
+              disabled={isPushLoading}
+              className="shrink-0 px-3 py-1.5 text-xs bg-red-500 hover:bg-red-600 text-white rounded-lg transition-colors font-medium disabled:opacity-50"
+            >
+              {t("profile.pushDisabled")}
+            </button>
+          ) : pushStatus === "unavailable" || pushStatus === "loading" ? (
+            <span className="shrink-0 text-xs text-stone-400 mt-0.5">
+              {pushStatus === "loading"
+                ? t("profile.loading") || "..."
+                : t("profile.notSupported")}
+            </span>
+          ) : (
+            <button
+              onClick={handlePushSubscribe}
+              disabled={isPushLoading}
+              className="shrink-0 px-3 py-1.5 text-xs bg-amber-500 hover:bg-amber-600 text-white rounded-lg transition-colors font-medium disabled:opacity-50"
+            >
+              {t("profile.pushEnabled")}
+            </button>
+          )}
         </div>
       </div>
     </div>

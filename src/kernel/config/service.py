@@ -41,6 +41,8 @@ def _mark_runtime_secret_as_explicit(key: str) -> None:
         settings._jwt_secret_key_generated = False
     elif key == "MCP_ENCRYPTION_SALT":
         settings._mcp_encryption_salt_generated = False
+    elif key == "VAPID_PUBLIC_KEY":
+        settings._vapid_keys_generated = False
 
 
 async def _reset_checkpoint_runtime_state(reason: str) -> None:
@@ -96,6 +98,39 @@ async def initialize_settings() -> None:
 
     logger.info(f"[Settings] Loaded {loaded_count} settings into cache")
     logger.info(f"[Settings] REDIS_URL = {settings.REDIS_URL}")
+
+    # Persist auto-generated VAPID keys to database so they survive restarts
+    if settings._vapid_keys_generated and _settings_service is not None:
+        try:
+            from datetime import datetime, timezone
+
+            collection = _settings_service._storage._get_collection()
+            now = datetime.now(timezone.utc).isoformat()
+            for key in ("VAPID_PUBLIC_KEY", "VAPID_PRIVATE_KEY"):
+                value = getattr(settings, key, "")
+                if value:
+                    await collection.update_one(
+                        {"_id": key},
+                        {
+                            "$set": {
+                                "value": value,
+                                "type": "string",
+                                "category": "push",
+                                "description": f"Auto-generated VAPID {key} for Web Push",
+                                "default_value": "",
+                                "updated_at": now,
+                                "updated_by": "system",
+                            }
+                        },
+                        upsert=True,
+                    )
+                    logger.info(f"[Settings] Persisted auto-generated {key} to database")
+            _settings_cache["VAPID_PUBLIC_KEY"] = settings.VAPID_PUBLIC_KEY
+            _settings_cache["VAPID_PRIVATE_KEY"] = settings.VAPID_PRIVATE_KEY
+            settings._vapid_keys_generated = False
+            logger.info("[Settings] VAPID keys persisted to database successfully")
+        except Exception as exc:
+            logger.warning("[Settings] Failed to persist auto-generated VAPID keys: %s", exc)
 
 
 async def refresh_settings(key: Optional[str] = None) -> None:

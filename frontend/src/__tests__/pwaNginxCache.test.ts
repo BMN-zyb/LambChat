@@ -18,6 +18,10 @@ test("nginx serves stable icon assets with immutable long-lived caching", () => 
     nginxSource,
     /location \/icons\/ \{[^}]*max-age=31536000, immutable/s,
   );
+  assert.match(
+    nginxSource,
+    /location = \/favicon\.ico \{[^}]*max-age=31536000, immutable/s,
+  );
 });
 
 test("nginx keeps only the chat event stream open for 24 hours", () => {

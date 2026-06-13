@@ -15,6 +15,52 @@ Authentication and CAPTCHA settings.
 If `JWT_SECRET_KEY` is not set, a random key is generated at startup. This means all active sessions will be invalidated on every restart. **Always set a stable key in production.**
 :::
 
+## Web Push (VAPID)
+
+VAPID keys are used to authenticate browser Web Push notifications.
+
+| Variable | Default | Sensitive | Description |
+|----------|---------|-----------|-------------|
+| `VAPID_PUBLIC_KEY` | _(auto-generated)_ | No | Public VAPID key sent to browsers for push subscription. |
+| `VAPID_PRIVATE_KEY` | _(auto-generated)_ | Yes | Private VAPID key used by the server to sign push requests. |
+| `VAPID_SUBJECT` | `mailto:admin@example.com` | No | Contact subject included in VAPID claims. Use a `mailto:` address or an HTTPS URL you control. |
+
+::: warning
+For production and multi-instance deployments, set a stable VAPID key pair. If the key pair changes, existing browser push subscriptions may stop receiving notifications and users may need to subscribe again.
+:::
+
+Generate a key pair from the project root:
+
+```bash
+uv run python - <<'PY'
+import base64
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.serialization import (
+    Encoding,
+    NoEncryption,
+    PrivateFormat,
+    PublicFormat,
+)
+
+private_key = ec.generate_private_key(ec.SECP256R1())
+private_der = private_key.private_bytes(
+    Encoding.DER,
+    PrivateFormat.PKCS8,
+    NoEncryption(),
+)
+public_raw = private_key.public_key().public_bytes(
+    Encoding.X962,
+    PublicFormat.UncompressedPoint,
+)
+
+print("VAPID_PUBLIC_KEY=" + base64.urlsafe_b64encode(public_raw).decode())
+print("VAPID_PRIVATE_KEY=" + base64.urlsafe_b64encode(private_der).decode())
+print("VAPID_SUBJECT=mailto:admin@example.com")
+PY
+```
+
+Then paste the output into `.env` or your production secret manager. Change `VAPID_SUBJECT` to your real administrator email, for example `mailto:ops@example.com`.
+
 ## Cloudflare Turnstile (CAPTCHA)
 
 | Variable | Default | Sensitive | Description |
@@ -43,6 +89,11 @@ JWT_SECRET_KEY=your-stable-secret-key-at-least-32-chars
 JWT_ALGORITHM=HS256
 ACCESS_TOKEN_EXPIRE_HOURS=24
 REFRESH_TOKEN_EXPIRE_DAYS=7
+
+# Web Push (VAPID)
+VAPID_PUBLIC_KEY=your-generated-vapid-public-key
+VAPID_PRIVATE_KEY=your-generated-vapid-private-key
+VAPID_SUBJECT=mailto:ops@example.com
 
 # Turnstile CAPTCHA
 TURNSTILE_ENABLED=true

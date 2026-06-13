@@ -34,6 +34,7 @@ from src.api.routes import (
     notification,
     persona_preset,
     project,
+    push,
     revealed_file,
     role,
     scheduled_task,
@@ -292,6 +293,9 @@ async def _close_route_dependency_singletons() -> None:
 
     await feedback.close_feedback_manager()
     await notification.close_notification_manager()
+    from src.infra.push.manager import close_push_manager
+
+    await close_push_manager()
     await close_revealed_file_storage()
     await upload.close_upload_route_dependencies()
     await close_persona_preset_manager()
@@ -356,6 +360,12 @@ def _startup_index_initializers():
         await NotificationStorage().create_indexes()
         logger.info("NotificationStorage indexes initialized")
 
+    async def _init_push_subscription_storage() -> None:
+        from src.infra.push.storage import PushSubscriptionStorage
+
+        await PushSubscriptionStorage().create_indexes()
+        logger.info("PushSubscription indexes initialized")
+
     async def _init_user_storage() -> None:
         from src.infra.user.storage import UserStorage
 
@@ -371,6 +381,7 @@ def _startup_index_initializers():
         ("session_storage", _init_session_storage),
         ("revealed_file_storage", _init_revealed_file_storage),
         ("notification_storage", _init_notification_storage),
+        ("push_subscription_storage", _init_push_subscription_storage),
         ("user_storage", _init_user_storage),
     ]
 
@@ -699,6 +710,7 @@ def create_app() -> FastAPI:
     app.include_router(human.router, prefix="/human", tags=["Human"])
     app.include_router(feedback.router, prefix="/api/feedback", tags=["Feedback"])
     app.include_router(notification.router, prefix="/api/notifications", tags=["Notifications"])
+    app.include_router(push.router, prefix="/api/push", tags=["Push"])
     # Generic channel configuration
     app.include_router(channels.router, prefix="/api/channels", tags=["Channels"])
     # Scheduled tasks

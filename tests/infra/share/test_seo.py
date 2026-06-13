@@ -182,6 +182,60 @@ def test_build_public_route_seo_marks_app_routes_noindex() -> None:
     assert seo.robots == "noindex, follow, max-image-preview:large"
 
 
+def test_build_public_route_seo_indexes_landing_section_routes() -> None:
+    seo = build_public_route_seo(base_url="https://lambchat.com", path="/features")
+
+    assert seo.title == "LambChat Core Features - AI Agent Platform"
+    assert seo.canonical_url == "https://lambchat.com/features"
+    assert seo.robots == "index, follow, max-image-preview:large"
+    assert "Skills, MCP tools, role-based access" in seo.description
+    assert "<h1>LambChat Core Features</h1>" in seo.preview_html
+    assert "Skills engine" in seo.preview_html
+
+
+def test_build_public_route_seo_indexes_github_entry() -> None:
+    seo = build_public_route_seo(base_url="https://lambchat.com", path="/github")
+
+    assert seo.title == "LambChat GitHub - Open Source AI Agent Platform"
+    assert seo.canonical_url == "https://lambchat.com/github"
+    assert seo.robots == "index, follow, max-image-preview:large"
+    assert "open source" in seo.description.lower()
+    assert "GitHub" in seo.preview_html
+
+
+def test_inject_public_route_seo_adds_navigation_structured_data() -> None:
+    html = """
+<!doctype html>
+<html lang="en">
+  <head>
+    <link rel="canonical" href="https://lambchat.com/" />
+    <title>LambChat - AI Agent Platform</title>
+    <meta name="description" content="Default description" />
+    <meta name="robots" content="index, follow, max-image-preview:large" />
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="Default og title" />
+    <meta property="og:description" content="Default og description" />
+    <meta property="og:url" content="https://lambchat.com/" />
+    <meta name="twitter:title" content="Default twitter title" />
+    <meta name="twitter:description" content="Default twitter description" />
+  </head>
+  <body>
+    <div id="root"></div>
+  </body>
+</html>
+""".strip()
+
+    seo = build_public_route_seo(base_url="https://lambchat.com", path="/features")
+    rendered = inject_public_route_seo_into_html(html, seo)
+
+    assert '"@type": "SiteNavigationElement"' in rendered
+    assert '"name": "Features"' in rendered
+    assert '"url": "https://lambchat.com/features"' in rendered
+    assert '"name": "GitHub"' in rendered
+    assert '"url": "https://lambchat.com/github"' in rendered
+    assert '"@type": "BreadcrumbList"' in rendered
+
+
 def test_inject_public_app_route_seo_noindexes_domestic_and_bing_crawlers() -> None:
     html = """
 <!doctype html>

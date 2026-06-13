@@ -292,6 +292,11 @@ class Settings(BaseSettings):
     # Scheduled Task Settings
     ENABLE_SCHEDULED_TASK: bool = False
 
+    # Web Push (VAPID) Settings
+    VAPID_PUBLIC_KEY: str = ""
+    VAPID_PRIVATE_KEY: str = ""
+    VAPID_SUBJECT: str = "mailto:admin@example.com"
+
     # Native Memory Settings (MongoDB-backed, zero external deps)
     NATIVE_MEMORY_EMBEDDING_API_BASE: str = ""
     NATIVE_MEMORY_EMBEDDING_API_KEY: str = ""
@@ -341,6 +346,7 @@ class Settings(BaseSettings):
 
     _jwt_secret_key_generated: bool = PrivateAttr(False)
     _mcp_encryption_salt_generated: bool = PrivateAttr(False)
+    _vapid_keys_generated: bool = PrivateAttr(False)
 
     model_config = {
         "env_file": str(PROJECT_ROOT / ".env"),
@@ -383,6 +389,39 @@ class Settings(BaseSettings):
                 f"Expanded to meet minimum {MCP_ENCRYPTION_SALT_MIN_LENGTH} bytes requirement. "
                 f"Expanded salt prefix: {self.MCP_ENCRYPTION_SALT[:8]}..."
             )
+
+        # Auto-generate VAPID keys for Web Push if not configured
+        if not self.VAPID_PUBLIC_KEY and not self.VAPID_PRIVATE_KEY:
+            try:
+                from cryptography.hazmat.primitives.asymmetric import ec
+                from cryptography.hazmat.primitives.serialization import (
+                    Encoding,
+                    NoEncryption,
+                    PrivateFormat,
+                    PublicFormat,
+                )
+
+                private_key = ec.generate_private_key(ec.SECP256R1())
+                # pywebpush expects base64url-encoded DER of PKCS8 private key
+                priv_der = private_key.private_bytes(
+                    Encoding.DER, PrivateFormat.PKCS8, NoEncryption()
+                )
+                # Browsers expect the VAPID public key as an uncompressed P-256
+                # point (0x04 + X + Y), base64url encoded.
+                pub_raw = private_key.public_key().public_bytes(
+                    Encoding.X962, PublicFormat.UncompressedPoint
+                )
+                import base64
+
+                self.VAPID_PRIVATE_KEY = base64.urlsafe_b64encode(priv_der).decode()
+                self.VAPID_PUBLIC_KEY = base64.urlsafe_b64encode(pub_raw).decode()
+                self._vapid_keys_generated = True
+                logger.info(
+                    "VAPID keys not configured, auto-generated ECDSA P-256 key pair. "
+                    "Keys will be persisted to database on startup."
+                )
+            except Exception as e:
+                logger.warning("Failed to auto-generate VAPID keys: %s", e)
 
         # Set version info from git (if not already set via env)
         if self.GIT_TAG is None:

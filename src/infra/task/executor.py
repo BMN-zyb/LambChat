@@ -463,6 +463,25 @@ class TaskExecutor:
                     status.value,
                     delivered_count,
                 )
+                # Web Push fallback when WebSocket has no active connection
+                try:
+                    from src.infra.push.manager import PushManager
+
+                    push_mgr = PushManager()
+                    push_payload = {
+                        "title": "LambChat",
+                        "body": message or f"Task {status.value}",
+                        "url": f"/chat/{session_id}",
+                    }
+                    push_delivered = await push_mgr.send_push_to_user(user_id, push_payload)
+                    if push_delivered > 0:
+                        logger.info(
+                            "Push notification delivered as fallback: user_id=%s, count=%s",
+                            user_id,
+                            push_delivered,
+                        )
+                except Exception as push_err:
+                    logger.warning("Failed to send push notification fallback: %s", push_err)
             else:
                 logger.info(
                     "Task notification delivered: user_id=%s, session=%s, status=%s, delivered=%s",

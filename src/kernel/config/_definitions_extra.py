@@ -30,6 +30,31 @@ EXTRA_SETTING_DEFINITIONS: dict[str, dict] = {
         "default": 7,
     },
     # ============================================
+    # Web Push (VAPID) Settings
+    # ============================================
+    "VAPID_PUBLIC_KEY": {
+        "type": SettingType.TEXT,
+        "category": SettingCategory.SECURITY,
+        "subcategory": "web_push",
+        "description": "settingDesc.VAPID_PUBLIC_KEY",
+        "default": "",
+    },
+    "VAPID_PRIVATE_KEY": {
+        "type": SettingType.TEXT,
+        "category": SettingCategory.SECURITY,
+        "subcategory": "web_push",
+        "description": "settingDesc.VAPID_PRIVATE_KEY",
+        "default": "",
+        "is_sensitive": True,
+    },
+    "VAPID_SUBJECT": {
+        "type": SettingType.STRING,
+        "category": SettingCategory.SECURITY,
+        "subcategory": "web_push",
+        "description": "settingDesc.VAPID_SUBJECT",
+        "default": "mailto:admin@example.com",
+    },
+    # ============================================
     # Email Settings (Resend)
     # ============================================
     "EMAIL_ENABLED": {
