@@ -417,7 +417,7 @@ export function UsagePanel() {
   }
 
   return (
-    <div className="glass-shell usage-panel flex h-full min-h-0 flex-col overflow-y-auto sm:overflow-hidden">
+    <div className="glass-shell usage-panel flex h-full min-h-0 flex-col overflow-y-auto">
       {/* Header */}
       <PanelHeader
         title={t("usage.title")}
@@ -472,9 +472,9 @@ export function UsagePanel() {
       )}
 
       {/* Content */}
-      <div className="relative min-h-0 flex-1 overflow-visible px-4 py-2 sm:overflow-y-auto sm:px-6 sm:py-4">
+      <div className="flex-1 px-4 py-2 sm:px-6 sm:py-4">
         {isLoading && logs.length > 0 && (
-          <div className="pointer-events-none absolute inset-x-4 top-0 z-10 flex justify-center sm:inset-x-6">
+          <div className="pointer-events-none mb-2 flex justify-center">
             <div className="mt-2 inline-flex items-center gap-2 rounded-full bg-[var(--glass-bg-card)] px-3 py-1.5 text-xs text-theme-text-tertiary shadow-sm">
               <RefreshCw size={11} className="animate-spin" />
               {t("usage.refreshing", "刷新中")}

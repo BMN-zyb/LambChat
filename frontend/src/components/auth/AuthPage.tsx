@@ -197,26 +197,29 @@ export function AuthPage({ onSuccess, initialMode }: AuthPageProps) {
     [loginWithOAuth, t],
   );
 
-  const beginSuccessRedirect = (redirectPath?: string | null) => {
-    const nextPath = resolvePostAuthRedirectPath(redirectPath);
-    clearRedirectTimers();
-    setIsRedirecting(true);
+  const beginSuccessRedirect = useCallback(
+    (redirectPath?: string | null) => {
+      const nextPath = resolvePostAuthRedirectPath(redirectPath);
+      clearRedirectTimers();
+      setIsRedirecting(true);
 
-    redirectFailsafeRef.current = window.setTimeout(() => {
-      setIsRedirecting(false);
-      setIsSubmitting(false);
-    }, AUTH_REDIRECT_FAILSAFE_MS);
-
-    redirectTimerRef.current = window.setTimeout(() => {
-      try {
-        onSuccess?.(nextPath);
-      } catch (err) {
-        console.error("[AuthPage] Failed to redirect after login:", err);
+      redirectFailsafeRef.current = window.setTimeout(() => {
         setIsRedirecting(false);
         setIsSubmitting(false);
-      }
-    }, AUTH_REDIRECT_ANIMATION_MS);
-  };
+      }, AUTH_REDIRECT_FAILSAFE_MS);
+
+      redirectTimerRef.current = window.setTimeout(() => {
+        try {
+          onSuccess?.(nextPath);
+        } catch (err) {
+          console.error("[AuthPage] Failed to redirect after login:", err);
+          setIsRedirecting(false);
+          setIsSubmitting(false);
+        }
+      }, AUTH_REDIRECT_ANIMATION_MS);
+    },
+    [onSuccess, clearRedirectTimers],
+  );
 
   const handleSubmit = useCallback(
     async (e: React.FormEvent<HTMLFormElement>) => {
@@ -343,6 +346,7 @@ export function AuthPage({ onSuccess, initialMode }: AuthPageProps) {
       register,
       showTurnstile,
       turnstileToken,
+      beginSuccessRedirect,
     ],
   );
 

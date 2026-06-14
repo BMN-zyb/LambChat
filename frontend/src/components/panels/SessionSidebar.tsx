@@ -389,7 +389,7 @@ export const SessionSidebar = forwardRef<
   const handleOpenSearch = useCallback(() => setIsSearchOpen(true), []);
   const handleToggleMoreMenu = useCallback(
     () => moreMenu.setIsMoreMenuOpen((prev) => !prev),
-    [moreMenu.setIsMoreMenuOpen],
+    [moreMenu],
   );
   const handleToggleProjectsCollapsed = useCallback(() => {
     setIsProjectsCollapsed((prev) => {

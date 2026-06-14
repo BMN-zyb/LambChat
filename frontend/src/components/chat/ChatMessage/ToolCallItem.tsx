@@ -104,12 +104,12 @@ function ToolCallPanelContent({ toolCallId }: { toolCallId: string }) {
   }, [toolCallId]);
 
   const data = toolCallPanelStore.get(toolCallId);
-  if (!data) return null;
-
   const elapsedSeconds = useElapsedSecondsForPanel(
-    data.isPending,
-    data.startedAt,
+    data?.isPending,
+    data?.startedAt,
   );
+
+  if (!data) return null;
   const hasArgs = Object.keys(data.args).length > 0;
   const argsJson = JSON.stringify(data.args, null, 2);
 
@@ -214,8 +214,11 @@ export function ToolCallItem({
   const { t } = useTranslation();
   const hasResult = result !== undefined;
   const elapsedSeconds = useElapsedSeconds(isPending, startedAt);
-  const durationFooter = (
-    <ToolDurationFooter startedAt={startedAt} completedAt={completedAt} />
+  const durationFooter = useMemo(
+    () => (
+      <ToolDurationFooter startedAt={startedAt} completedAt={completedAt} />
+    ),
+    [startedAt, completedAt],
   );
 
   // Parse MCP server name from tool name (format: "server_name:tool_name")
