@@ -3158,10 +3158,11 @@
 }
 
 .tool-console-subtitle-pill {
-  background: color-mix(in srgb, var(--theme-bg-card) 72%, transparent);
-  border-radius: 0.5rem;
-  box-shadow: inset 0 1px 0
-    color-mix(in srgb, var(--theme-bg-card) 84%, transparent);
+  border-radius: 0;
+}
+
+.tool-console-subtitle-chip {
+  border-radius: 0;
 }
 
 .tool-console-body {

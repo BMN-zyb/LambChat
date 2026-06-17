@@ -428,7 +428,7 @@ export function ToolResultPanel({
 
               {/* Title */}
               {title && (
-                <div className="tool-console-title-row flex items-center gap-2 min-w-0 flex-1 overflow-hidden">
+                <div className="tool-console-title-row flex items-end gap-2 min-w-0 flex-1 overflow-hidden">
                   <h3
                     className="tool-console-title min-w-0 max-w-[40%] truncate font-medium text-sm text-theme-text"
                     title={title}
@@ -444,7 +444,7 @@ export function ToolResultPanel({
                       if (!isTagList) {
                         return (
                           <span
-                            className="tool-console-subtitle-pill inline-flex h-5 min-w-0 max-w-[45vw] sm:max-w-[min(28rem,45%)] items-center overflow-hidden rounded-full bg-theme-bg-subtle ring-1 ring-inset ring-theme-border px-2.5 text-[10px] font-medium leading-none text-theme-text-secondary"
+                            className="tool-console-subtitle-pill inline-flex h-5 min-w-0 max-w-[45vw] sm:max-w-[min(32rem,52%)] items-end overflow-hidden px-0 pb-[1px] text-xs font-normal leading-none text-theme-text-tertiary"
                             title={subtitle}
                           >
                             <span className="block min-w-0 truncate">
@@ -457,11 +457,11 @@ export function ToolResultPanel({
                       const visible = segments.slice(0, maxVisible);
                       const overflow = segments.length - maxVisible;
                       return (
-                        <div className="inline-flex items-center gap-1 min-w-0 max-w-[45vw] sm:max-w-[min(28rem,45%)] overflow-hidden">
+                        <div className="tool-console-subtitle-list inline-flex items-center gap-1 min-w-0 max-w-[45vw] sm:max-w-[min(32rem,52%)] overflow-hidden">
                           {visible.map((tag, i) => (
                             <span
                               key={i}
-                              className="inline-flex items-center shrink-0 max-w-full rounded-full bg-[color-mix(in_srgb,var(--theme-primary)_6%,transparent)] ring-1 ring-inset ring-[color-mix(in_srgb,var(--theme-primary)_12%,transparent)] px-2 h-5 text-[10px] font-medium leading-none text-theme-text-secondary"
+                              className="tool-console-subtitle-chip inline-flex items-end shrink-0 max-w-full px-0 h-5 pb-[1px] text-xs font-normal leading-none text-theme-text-tertiary"
                               title={tag}
                             >
                               <span className="block min-w-0 truncate">

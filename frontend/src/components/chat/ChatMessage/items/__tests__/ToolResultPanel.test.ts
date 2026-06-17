@@ -141,8 +141,8 @@ test("tool result header truncates long titles and subtitles on narrow screens",
 
   assert.match(
     componentSource,
-    /className="tool-console-title-row flex items-center gap-2 min-w-0 flex-1 overflow-hidden"/,
-    "title row should clip overflowing text within the available header space",
+    /className="tool-console-title-row flex items-end gap-2 min-w-0 flex-1 overflow-hidden"/,
+    "title row should bottom-align titles and subtitles while clipping overflowing text",
   );
   assert.match(
     componentSource,
@@ -151,13 +151,36 @@ test("tool result header truncates long titles and subtitles on narrow screens",
   );
   assert.match(
     componentSource,
-    /className="tool-console-subtitle-pill inline-flex h-5 min-w-0 max-w-\[45vw\] sm:max-w-\[min\(28rem,45%\)\] items-center overflow-hidden rounded-full bg-theme-bg-subtle ring-1 ring-inset ring-theme-border px-2\.5 text-\[10px\] font-medium leading-none text-theme-text-secondary"/,
-    "subtitle pill should shrink, cap its responsive width, and truncate long prompt text",
+    /className="tool-console-subtitle-pill inline-flex h-5 min-w-0 max-w-\[45vw\] sm:max-w-\[min\(32rem,52%\)\] items-end overflow-hidden px-0 pb-\[1px\] text-xs font-normal leading-none text-theme-text-tertiary"/,
+    "single subtitles should use a readable plain bottom-aligned treatment that shrinks, caps responsive width, and truncates long prompt text",
   );
   assert.match(
     componentSource,
     /<span className="block min-w-0 truncate">\s*\{subtitle\}\s*<\/span>/s,
-    "subtitle text should truncate from the start edge instead of being centered inside the pill",
+    "subtitle text should use the same font family as the title and truncate cleanly",
+  );
+  assert.match(
+    componentSource,
+    /className="tool-console-subtitle-list inline-flex items-center gap-1 min-w-0 max-w-\[45vw\] sm:max-w-\[min\(32rem,52%\)\] overflow-hidden"/,
+    "tag subtitles should share the same responsive width behavior as command subtitles",
+  );
+  assert.match(
+    componentSource,
+    /className="tool-console-subtitle-chip inline-flex items-end shrink-0 max-w-full px-0 h-5 pb-\[1px\] text-xs font-normal leading-none text-theme-text-tertiary"/,
+    "individual subtitle tags should expose the readable bottom-aligned chip styling hook",
+  );
+  assert.doesNotMatch(
+    componentSource,
+    /tool-console-command-pill|tool-console-command-text/,
+    "subtitle should not use command-specific font or presentation hooks",
+  );
+  assert.doesNotMatch(
+    readFileSync(
+      new URL("../../../../../styles/components.css", import.meta.url),
+      "utf8",
+    ),
+    /tool-console-subtitle(?:-pill|-chip)\s*\{[\s\S]*?border-bottom:/,
+    "subtitle styling should not render underline rules",
   );
 });
 
