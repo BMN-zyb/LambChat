@@ -556,6 +556,47 @@ async def _call_edit_api(
     }
 
 
+async def _image_generate_impl(
+    *,
+    prompt: str,
+    input_images: list[str] | None,
+    background: ImageBackground,
+    input_fidelity: ImageInputFidelity,
+    size: ImageSize,
+    quality: ImageQuality,
+    n: int,
+    output_format: ImageOutputFormat,
+    runtime: ToolRuntime | None,
+) -> str:
+    try:
+        if input_images:
+            result = await _call_edit_api(
+                prompt=prompt,
+                input_images=list(input_images),
+                background=background,
+                input_fidelity=input_fidelity,
+                size=size,
+                quality=quality,
+                n=n,
+                output_format=output_format,
+                runtime=runtime,
+            )
+        else:
+            result = await _call_generation_api(
+                prompt=prompt,
+                background=background,
+                size=size,
+                quality=quality,
+                n=n,
+                output_format=output_format,
+                runtime=runtime,
+            )
+        return await _json_dumps_result(result)
+    except Exception as exc:
+        logger.warning("[image_generate] failed: %s", exc)
+        return await _json_dumps_result({"error": f"Image generation failed: {exc}"})
+
+
 @tool
 async def image_generate(
     prompt: Annotated[str, "Describe the image you want to create or edit."],
@@ -595,6 +636,16 @@ async def image_generate(
     - text-to-image generation when only `prompt` is provided
     - image-to-image editing when `input_images` is provided
 
+    IMPORTANT reference-image routing:
+    - If the user uploaded or mentioned an image and asks for 图生图, 参考图,
+      参考这张, 照着这张, 基于这张, 改这张, 保持风格, 同款, or image-to-image,
+      pass the uploaded image URLs in `input_images`. Do not leave `input_images`
+      empty for those requests.
+    - For multiple images, explain each image role in the prompt, for example:
+      first image is the edit target, second image is the style/reference image.
+    - If no image URL is available yet, ask for or locate the uploaded image URL before
+      calling this tool instead of silently doing pure text-to-image generation.
+
     The tool accepts a small, opinionated set of options for canvas size, edit fidelity,
     background handling, quality, and output format. Input images can be uploaded files,
     project file URLs, or other accessible image URLs.
@@ -602,34 +653,94 @@ async def image_generate(
     The response contains uploaded image URLs plus metadata such as the generated file key
     and any revised prompt returned by the image API.
     """
-    try:
-        if input_images:
-            result = await _call_edit_api(
-                prompt=prompt,
-                input_images=list(input_images),
-                background=background,
-                input_fidelity=input_fidelity,
-                size=size,
-                quality=quality,
-                n=n,
-                output_format=output_format,
-                runtime=runtime,
-            )
-        else:
-            result = await _call_generation_api(
-                prompt=prompt,
-                background=background,
-                size=size,
-                quality=quality,
-                n=n,
-                output_format=output_format,
-                runtime=runtime,
-            )
-        return await _json_dumps_result(result)
-    except Exception as exc:
-        logger.warning("[image_generate] failed: %s", exc)
-        return await _json_dumps_result({"error": f"Image generation failed: {exc}"})
+    return await _image_generate_impl(
+        prompt=prompt,
+        input_images=input_images,
+        background=background,
+        input_fidelity=input_fidelity,
+        size=size,
+        quality=quality,
+        n=n,
+        output_format=output_format,
+        runtime=runtime,
+    )
+
+
+@tool
+async def image_edit_with_references(
+    prompt: Annotated[
+        str,
+        "Describe how to edit or regenerate the image, including each input image role.",
+    ],
+    input_images: Annotated[
+        list[str],
+        "Required source/reference image URLs. Use uploaded image URLs here for 图生图, 参考图, 照着这张, 基于这张, 改这张, 保持风格, 同款, or image-to-image requests.",
+    ],
+    background: Annotated[
+        ImageBackground,
+        "Background handling for the generated image. Choose auto, opaque, or transparent.",
+    ] = ImageBackground.AUTO,
+    input_fidelity: Annotated[
+        ImageInputFidelity,
+        "How strongly edits should preserve the input image. Choose high when preserving a person, product, composition, or exact reference matters.",
+    ] = ImageInputFidelity.HIGH,
+    size: Annotated[
+        ImageSize,
+        "Canvas size for the result. Choose square, portrait, or landscape.",
+    ] = ImageSize.SQUARE,
+    quality: Annotated[
+        ImageQuality,
+        "Generation quality. Choose auto, low, medium, or high.",
+    ] = ImageQuality.AUTO,
+    n: Annotated[
+        int,
+        "Number of images to generate. Values outside 1-10 are clamped.",
+    ] = 1,
+    output_format: Annotated[
+        ImageOutputFormat,
+        "Output file format. Choose png, jpeg, or webp.",
+    ] = ImageOutputFormat.PNG,
+    runtime: Annotated[ToolRuntime, InjectedToolArg] = None,  # type: ignore[assignment]
+) -> str:
+    """Edit or regenerate images from required reference images.
+
+    Use this tool instead of pure text-to-image when the user provides image attachments
+    or says 图生图, 参考图, 参考这张图生成, 照着这张, 基于这张, 改这张, 把这张改成,
+    保持人物/产品/构图/风格, 同款, style reference, composition reference, or
+    image-to-image.
+
+    Always put the uploaded image URLs in `input_images`. If there are multiple images,
+    state their roles in `prompt`, such as: Image 1 is the edit target; Image 2 is the
+    style/reference image; preserve Image 1's subject while applying Image 2's style.
+    This wrapper requires `input_images` so reference-image requests are not accidentally
+    handled as text-only generation.
+    """
+    if not input_images:
+        return await _json_dumps_result(
+            {
+                "error": (
+                    "input_images is required for reference-image editing. "
+                    "Use the uploaded image URL(s) as input_images and retry."
+                )
+            }
+        )
+
+    return await _image_generate_impl(
+        prompt=prompt,
+        input_images=input_images,
+        background=background,
+        input_fidelity=input_fidelity,
+        size=size,
+        quality=quality,
+        n=n,
+        output_format=output_format,
+        runtime=runtime,
+    )
 
 
 def get_image_generation_tool() -> BaseTool:
     return image_generate
+
+
+def get_reference_image_generation_tool() -> BaseTool:
+    return image_edit_with_references

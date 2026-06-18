@@ -61,6 +61,16 @@ class _RecordingChatModel(BaseChatModel):
         return self._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
 
 
+def test_build_nested_graph_configurable_keeps_trace_id_for_tools() -> None:
+    config = build_nested_graph_configurable(
+        thread_id="session-1",
+        checkpointer=object(),
+        trace_id="trace-1",
+    )
+
+    assert config["trace_id"] == "trace-1"
+
+
 @pytest.mark.asyncio
 async def test_manually_nested_deep_agent_keeps_history_across_outer_graph_turns() -> None:
     _RecordingChatModel.calls = []

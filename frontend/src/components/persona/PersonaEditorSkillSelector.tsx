@@ -33,6 +33,11 @@ export function SkillSelector({
   const skillItemRefs = useRef<Map<number, HTMLButtonElement>>(new Map());
   const skillSearchInputRef = useRef<HTMLInputElement>(null);
 
+  const handleSkillSearchChange = useCallback((query: string) => {
+    setSkillPage(1);
+    setSkillSearch(query);
+  }, []);
+
   const skillListParams = useMemo(
     () => ({
       skip: (skillPage - 1) * PERSONA_SKILL_PAGE_SIZE,
@@ -254,10 +259,7 @@ export function SkillSelector({
                 ref={skillSearchInputRef}
                 type="text"
                 value={skillSearch}
-                onChange={(e) => {
-                  setSkillSearch(e.target.value);
-                  setSkillPage(1);
-                }}
+                onChange={(e) => handleSkillSearchChange(e.target.value)}
                 placeholder={t("skills.searchPlaceholder", "搜索技能...")}
                 className="ppe-skill-search"
                 autoFocus

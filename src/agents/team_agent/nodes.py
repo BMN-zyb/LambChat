@@ -752,6 +752,7 @@ async def team_router_node(state: Dict[str, Any], config: RunnableConfig) -> Dic
             disabled_skills=configurable.get("disabled_skills"),
             enabled_skills=runtime_enabled_skills,
             base_url=configurable.get("base_url", ""),
+            trace_id=presenter.trace_id,
             presenter=presenter,
         ),
         "recursion_limit": config.get("recursion_limit", settings.SESSION_MAX_RUNS_PER_SESSION),

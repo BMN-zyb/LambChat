@@ -150,9 +150,10 @@ export function usePersonaPlaza() {
     return [...presets].sort(comparePersonaPresetPreference);
   }, [presets]);
 
-  useEffect(() => {
+  const handleQueryChange = useCallback((nextQuery: string) => {
     setPage(1);
-  }, [query, activeTag, scopeFilter]);
+    setQuery(nextQuery);
+  }, []);
 
   const paged = filtered;
 
@@ -274,12 +275,16 @@ export function usePersonaPlaza() {
     setDeleteTarget(null);
   }, [deleteTarget, deletePreset, selectedPresetId, handleClear, t, error]);
 
-  const toggleTag = (tag: string) =>
+  const toggleTag = (tag: string) => {
+    setPage(1);
     setActiveTag((prev) => (prev === tag ? null : tag));
+  };
   const handleScopeSelect = useCallback((key: ScopeFilter) => {
+    setPage(1);
     setScopeFilter(key);
   }, []);
   const clearFilters = () => {
+    setPage(1);
     setActiveTag(null);
     setQuery("");
   };
@@ -440,7 +445,7 @@ export function usePersonaPlaza() {
     canWrite,
     canAdmin,
     query,
-    setQuery,
+    setQuery: handleQueryChange,
     activeTag,
     scopeFilter,
     selectedPresetId,

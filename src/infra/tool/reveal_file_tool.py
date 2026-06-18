@@ -42,6 +42,7 @@ from src.infra.revealed_file.storage import get_revealed_file_storage
 from src.infra.tool.backend_utils import (
     get_backend_from_runtime,
     get_base_url_from_runtime,
+    get_trace_id_from_runtime,
     get_user_id_from_runtime,
 )
 from src.kernel.config import settings
@@ -715,7 +716,12 @@ async def reveal_file(
             req_ctx = TraceContext.get_request_context()
             user_id = req_ctx.user_id or get_user_id_from_runtime(runtime)
             session_id = req_ctx.session_id
-            trace_id = req_ctx.trace_id or TraceContext.get().trace_id
+            trace_id = (
+                req_ctx.trace_id
+                or TraceContext.get().trace_id
+                or get_trace_id_from_runtime(runtime)
+                or ""
+            )
 
             # Look up session's project_id
             session_project_id = None
@@ -734,7 +740,7 @@ async def reveal_file(
                 except Exception:
                     pass
 
-            if user_id and trace_id:
+            if user_id:
                 storage_index = get_revealed_file_storage()
                 await storage_index.upsert_by_name(
                     user_id=user_id,

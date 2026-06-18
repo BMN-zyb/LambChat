@@ -63,6 +63,19 @@ export function MemoryPanel() {
   const searchTimer = useRef<ReturnType<typeof setTimeout>>(null);
   const importInputRef = useRef<HTMLInputElement>(null);
 
+  const handleSearchQueryChange = useCallback((query: string) => {
+    setPage(1);
+    setSearchQuery(query);
+  }, []);
+  const handleFilterTypeChange = useCallback((type: string) => {
+    setPage(1);
+    setFilterType(type);
+  }, []);
+  const handleFilterSourceChange = useCallback((source: string) => {
+    setPage(1);
+    setFilterSource(source);
+  }, []);
+
   useEffect(() => {
     if (searchTimer.current) clearTimeout(searchTimer.current);
     searchTimer.current = setTimeout(
@@ -100,10 +113,6 @@ export function MemoryPanel() {
   useEffect(() => {
     fetchMemories();
   }, [fetchMemories]);
-
-  useEffect(() => {
-    setPage(1);
-  }, [filterType, filterSource, debouncedSearch]);
 
   const handleDelete = async () => {
     if (!deleteId) return;
@@ -218,14 +227,14 @@ export function MemoryPanel() {
           <Brain size={20} className="text-[var(--theme-text-secondary)]" />
         }
         searchValue={searchQuery}
-        onSearchChange={setSearchQuery}
+        onSearchChange={handleSearchQueryChange}
         searchPlaceholder={t("memory.searchPlaceholder")}
         searchAccessory={
           <MemoryFilter
             typeValue={filterType}
-            typeOnChange={setFilterType}
+            typeOnChange={handleFilterTypeChange}
             sourceValue={filterSource}
-            sourceOnChange={setFilterSource}
+            sourceOnChange={handleFilterSourceChange}
           />
         }
         actions={

@@ -498,10 +498,10 @@ export function RolesPanel() {
   const [total, setTotal] = useState(0);
   const pageSize = 20;
 
-  // Reset to page 1 when search changes
-  useEffect(() => {
+  const handleSearchQueryChange = useCallback((query: string) => {
     setPage(1);
-  }, [searchQuery]);
+    setSearchQuery(query);
+  }, []);
 
   // 权限数据
   const [permissionGroups, setPermissionGroups] = useState<PermissionGroup[]>(
@@ -643,7 +643,7 @@ export function RolesPanel() {
         subtitle={t("roles.subtitle")}
         icon={<Shield size={24} className="text-theme-text-secondary" />}
         searchValue={searchQuery}
-        onSearchChange={setSearchQuery}
+        onSearchChange={handleSearchQueryChange}
         searchPlaceholder={t("roles.searchPlaceholder")}
         actions={
           canManage && (

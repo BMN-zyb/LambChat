@@ -1,4 +1,4 @@
-import { useMemo, useState, useEffect, useRef } from "react";
+import { useCallback, useMemo, useState, useEffect, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import toast from "react-hot-toast";
 import { useLocation, useNavigate } from "react-router-dom";
@@ -35,6 +35,17 @@ export function useSkillsActions() {
   // Pagination
   const [page, setPage] = useState(1);
   const pageSize = 20;
+  const handleSearchQueryChange = useCallback((query: string) => {
+    setPage(1);
+    setSearchQuery(query);
+  }, []);
+  const handleEnabledFilterChange = useCallback(
+    (filter: "all" | "enabled" | "disabled") => {
+      setPage(1);
+      setEnabledFilter(filter);
+    },
+    [],
+  );
   const listParams = useMemo(
     () => ({
       skip: (page - 1) * pageSize,
@@ -77,16 +88,13 @@ export function useSkillsActions() {
   }, [skills, enabledFilter]);
 
   useEffect(() => {
-    setPage(1);
-  }, [searchQuery, selectedTags, enabledFilter]);
-
-  useEffect(() => {
     const prefillSearch = (
       location.state as { prefillSkillSearch?: string } | null
     )?.prefillSkillSearch;
     if (!prefillSearch) {
       return;
     }
+    setPage(1);
     setSearchQuery(prefillSearch);
     navigate(location.pathname, { replace: true });
   }, [location.pathname, location.state, navigate]);
@@ -94,12 +102,14 @@ export function useSkillsActions() {
   const paginatedSkills = filteredSkills;
 
   const toggleTag = (tag: string) => {
+    setPage(1);
     setSelectedTags((prev) =>
       prev.includes(tag) ? prev.filter((item) => item !== tag) : [...prev, tag],
     );
   };
 
   const clearFilters = () => {
+    setPage(1);
     setSearchQuery("");
     setSelectedTags([]);
     setEnabledFilter("all");
@@ -534,10 +544,10 @@ export function useSkillsActions() {
 
     // Search & filter
     searchQuery,
-    setSearchQuery,
+    setSearchQuery: handleSearchQueryChange,
     selectedTags,
     enabledFilter,
-    setEnabledFilter,
+    setEnabledFilter: handleEnabledFilterChange,
     toggleTag,
     clearFilters,
     setPage,

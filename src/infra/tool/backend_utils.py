@@ -59,6 +59,34 @@ def get_base_url_from_runtime(runtime: Any) -> str:
     return ""
 
 
+def get_trace_id_from_runtime(runtime: Any) -> Optional[str]:
+    """从 ToolRuntime 获取 trace_id。
+
+    优先级：显式 configurable.trace_id > presenter.trace_id > context.trace_id。
+    这样工具不依赖 ContextVar 跨 worker / nested graph 边界传播。
+    """
+    if runtime is not None:
+        if hasattr(runtime, "config") and runtime.config:
+            config = runtime.config
+            if isinstance(config, dict):
+                configurable = config.get("configurable", {})
+                if isinstance(configurable, dict):
+                    trace_id = configurable.get("trace_id")
+                    if trace_id:
+                        return str(trace_id)
+
+                    presenter = configurable.get("presenter")
+                    presenter_trace_id = getattr(presenter, "trace_id", None)
+                    if presenter_trace_id:
+                        return str(presenter_trace_id)
+
+                    ctx = configurable.get("context")
+                    context_trace_id = getattr(ctx, "trace_id", None)
+                    if context_trace_id:
+                        return str(context_trace_id)
+    return None
+
+
 def get_backend_from_runtime(runtime: Any) -> Optional[SandboxBackendProtocol]:
     """从 ToolRuntime 获取 backend（分布式安全）
 

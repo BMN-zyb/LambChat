@@ -318,6 +318,7 @@ async def agent_node(state: Dict[str, Any], config: RunnableConfig) -> Dict[str,
             disabled_skills=configurable.get("disabled_skills"),
             enabled_skills=configurable.get("enabled_skills"),
             base_url=configurable.get("base_url", ""),  # 传递 base_url 给工具使用
+            trace_id=presenter.trace_id,
             presenter=presenter,  # 传递 presenter 给工具调用
         ),
         "recursion_limit": config.get("recursion_limit", settings.SESSION_MAX_RUNS_PER_SESSION),

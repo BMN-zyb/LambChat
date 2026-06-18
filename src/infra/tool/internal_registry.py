@@ -11,7 +11,10 @@ from src.infra.mcp.storage import MCPStorage
 from src.infra.role.storage import RoleStorage
 from src.infra.tool.audio_transcribe_tool import get_audio_transcribe_tool
 from src.infra.tool.env_var_tool import get_env_var_tools
-from src.infra.tool.image_generation_tool import get_image_generation_tool
+from src.infra.tool.image_generation_tool import (
+    get_image_generation_tool,
+    get_reference_image_generation_tool,
+)
 from src.infra.tool.mcp_client import MCPToolWithRetry
 from src.infra.tool.persona_preset_tool import get_persona_preset_tools
 from src.infra.tool.scheduled_task import get_scheduled_task_tools
@@ -44,6 +47,7 @@ def build_internal_tools() -> list[BaseTool]:
 
     if settings.ENABLE_IMAGE_GENERATION:
         tools.append(get_image_generation_tool())
+        tools.append(get_reference_image_generation_tool())
 
     if settings.ENABLE_AUDIO_TRANSCRIPTION:
         tools.append(get_audio_transcribe_tool())

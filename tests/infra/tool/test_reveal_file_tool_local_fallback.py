@@ -10,6 +10,26 @@ import pytest
 from src.infra.tool import reveal_file_tool
 
 
+class _Runtime:
+    def __init__(
+        self,
+        *,
+        backend=object(),
+        user_id: str | None = "user-1",
+        base_url: str = "https://app.example.com",
+        trace_id: str | None = None,
+    ) -> None:
+        context = SimpleNamespace(user_id=user_id) if user_id is not None else None
+        self.config = {
+            "configurable": {
+                "backend": backend,
+                "base_url": base_url,
+                "context": context,
+                "trace_id": trace_id,
+            }
+        }
+
+
 class _TrackableBytes(bytearray):
     pass
 
@@ -499,6 +519,77 @@ async def test_reveal_file_releases_backend_buffer_before_upload_await(
 
     assert result["url"] == "https://app.example.com/api/upload/file/revealed_files/report.pdf"
     assert released_before_upload_completed is True
+
+
+@pytest.mark.asyncio
+async def test_reveal_file_indexes_upload_when_runtime_has_user_without_trace_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    indexed_calls: list[dict[str, object]] = []
+
+    async def _download_file_from_backend(backend, file_path: str):
+        assert file_path == "/workspace/report.pdf"
+        return b"pdf-bytes"
+
+    class _FakeStorage:
+        async def upload_file(
+            self,
+            file,
+            folder: str,
+            filename: str,
+            content_type: str,
+            *,
+            skip_size_limit: bool = False,
+        ):
+            del file, skip_size_limit
+            return SimpleNamespace(
+                key=f"{folder}/{filename}",
+                url=f"https://storage.example.com/{folder}/{filename}",
+                content_type=content_type,
+                size=9,
+            )
+
+    class _FakeIndex:
+        async def upsert_by_name(self, **kwargs):
+            indexed_calls.append(kwargs)
+
+    async def _get_storage():
+        return _FakeStorage()
+
+    monkeypatch.setattr(
+        reveal_file_tool, "_download_file_from_backend", _download_file_from_backend
+    )
+    monkeypatch.setattr(reveal_file_tool, "_get_storage", _get_storage)
+    monkeypatch.setattr(reveal_file_tool, "get_revealed_file_storage", lambda: _FakeIndex())
+
+    result = json.loads(
+        await reveal_file_tool.reveal_file.coroutine(
+            "/workspace/report.pdf",
+            description="monthly report",
+            runtime=_Runtime(trace_id="trace-runtime"),
+        )
+    )
+
+    assert result["url"] == "https://app.example.com/api/upload/file/revealed_files/report.pdf"
+    assert indexed_calls == [
+        {
+            "user_id": "user-1",
+            "file_name": "report.pdf",
+            "source": "reveal_file",
+            "file_key": "revealed_files/report.pdf",
+            "trace_id": "trace-runtime",
+            "data": {
+                "file_type": "document",
+                "mime_type": "application/pdf",
+                "file_size": 9,
+                "url": result["url"],
+                "session_id": None,
+                "project_id": None,
+                "description": "monthly report",
+                "original_path": "/workspace/report.pdf",
+            },
+        }
+    ]
 
 
 @pytest.mark.asyncio

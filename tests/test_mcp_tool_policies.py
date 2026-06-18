@@ -248,7 +248,10 @@ async def test_internal_image_generate_tool_infos_include_supported_parameters(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from src.infra.tool import internal_registry
-    from src.infra.tool.image_generation_tool import get_image_generation_tool
+    from src.infra.tool.image_generation_tool import (
+        get_image_generation_tool,
+        get_reference_image_generation_tool,
+    )
 
     async def _empty_policies():
         return {}
@@ -257,7 +260,7 @@ async def test_internal_image_generate_tool_infos_include_supported_parameters(
     monkeypatch.setattr(
         internal_registry,
         "build_internal_tools",
-        lambda: [get_image_generation_tool()],
+        lambda: [get_image_generation_tool(), get_reference_image_generation_tool()],
     )
 
     infos = await internal_registry.get_internal_tool_infos(
@@ -266,7 +269,8 @@ async def test_internal_image_generate_tool_infos_include_supported_parameters(
         is_admin=True,
     )
 
-    params = {param["name"]: param for param in infos[0].parameters}
+    info_by_name = {info.name: info for info in infos}
+    params = {param["name"]: param for param in info_by_name["image_generate"].parameters}
 
     for name in (
         "prompt",
@@ -282,6 +286,12 @@ async def test_internal_image_generate_tool_infos_include_supported_parameters(
         assert params[name]["description"]
     assert "runtime" not in params
     assert "mask_url" not in params
+
+    reference_params = {
+        param["name"]: param for param in info_by_name["image_edit_with_references"].parameters
+    }
+    assert reference_params["input_images"]["required"] is True
+    assert "参考图" in info_by_name["image_edit_with_references"].description
 
 
 class _AsyncCursor:

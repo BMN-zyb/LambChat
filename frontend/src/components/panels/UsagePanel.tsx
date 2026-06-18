@@ -308,6 +308,14 @@ export function UsagePanel() {
   const [searchQuery, setSearchQuery] = useState("");
   const [period, setPeriod] = useState<string>("all");
   const debouncedSearch = useDebounce(searchQuery, 300);
+  const handleSearchQueryChange = useCallback((query: string) => {
+    setSkip(0);
+    setSearchQuery(query);
+  }, []);
+  const handlePeriodChange = useCallback((nextPeriod: string) => {
+    setSkip(0);
+    setPeriod(nextPeriod);
+  }, []);
 
   const computeDateRange = useCallback((p: string): { start_date?: string } => {
     const now = new Date();
@@ -356,10 +364,6 @@ export function UsagePanel() {
     fetchData();
   }, [fetchData]);
 
-  useEffect(() => {
-    setSkip(0);
-  }, [period, debouncedSearch]);
-
   const isInitialLoading =
     isLoading && logs.length === 0 && searchQuery.trim().length === 0;
 
@@ -388,7 +392,7 @@ export function UsagePanel() {
   const periodFilter = (
     <PanelFilterSelect
       value={period}
-      onChange={setPeriod}
+      onChange={handlePeriodChange}
       active={period !== "all"}
       options={[
         { value: "all", label: t("usage.allPeriods") },
@@ -424,7 +428,7 @@ export function UsagePanel() {
         subtitle={t("usage.subtitle")}
         icon={<Activity size={22} className="text-theme-text-secondary" />}
         searchValue={isAdmin ? searchQuery : undefined}
-        onSearchChange={isAdmin ? setSearchQuery : undefined}
+        onSearchChange={isAdmin ? handleSearchQueryChange : undefined}
         searchPlaceholder={t("usage.searchPlaceholder")}
         searchAccessory={isAdmin ? periodFilter : undefined}
         searchActions={isAdmin ? refreshButton : undefined}

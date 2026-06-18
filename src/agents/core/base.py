@@ -378,6 +378,7 @@ class BaseGraphAgent(ABC):
                 "configurable": {
                     "thread_id": session_id,
                     "presenter": presenter,
+                    "trace_id": presenter.trace_id,
                     **kwargs,
                 },
                 "metadata": langsmith_metadata,

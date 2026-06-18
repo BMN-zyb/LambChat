@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useCallback } from "react";
+import { useState, useMemo, useCallback } from "react";
 import {
   Plus,
   X,
@@ -39,6 +39,10 @@ export function MCPPanel() {
   // Pagination state
   const [page, setPage] = useState(1);
   const pageSize = 20;
+  const handleSearchQueryChange = useCallback((query: string) => {
+    setPage(1);
+    setSearchQuery(query);
+  }, []);
   const listParams = useMemo(
     () => ({
       skip: (page - 1) * pageSize,
@@ -80,11 +84,6 @@ export function MCPPanel() {
   } | null>(null);
   const [toolsSidebarServer, setToolsSidebarServer] =
     useState<MCPServerResponse | null>(null);
-
-  // Reset to page 1 when search changes
-  useEffect(() => {
-    setPage(1);
-  }, [searchQuery]);
 
   // Delete confirmation dialog state
   const [isDeleteConfirmOpen, setIsDeleteConfirmOpen] = useState(false);
@@ -402,7 +401,7 @@ export function MCPPanel() {
         subtitle={t("mcp.subtitle")}
         icon={<Server size={20} className="text-theme-text-secondary" />}
         searchValue={searchQuery}
-        onSearchChange={setSearchQuery}
+        onSearchChange={handleSearchQueryChange}
         searchPlaceholder={t("mcp.searchPlaceholder")}
         actions={
           canWrite && (

@@ -311,6 +311,11 @@ export function UsersPanel() {
   const [total, setTotal] = useState(0);
   const pageSize = 20;
 
+  const handleSearchQueryChange = useCallback((query: string) => {
+    setPage(1);
+    setSearchQuery(query);
+  }, []);
+
   // Debounced search
   const debouncedSearch = useDebounce(searchQuery, 300);
 
@@ -359,11 +364,6 @@ export function UsersPanel() {
   useEffect(() => {
     loadData();
   }, [loadData]);
-
-  // Reset to page 1 when search changes
-  useEffect(() => {
-    setPage(1);
-  }, [debouncedSearch]);
 
   // 保存用户
   const handleSaveUser = async (data: UserCreate | UserUpdate) => {
@@ -435,7 +435,7 @@ export function UsersPanel() {
         subtitle={t("users.subtitle")}
         icon={<Users size={24} className="text-theme-text-secondary" />}
         searchValue={searchQuery}
-        onSearchChange={setSearchQuery}
+        onSearchChange={handleSearchQueryChange}
         searchPlaceholder={t("users.searchPlaceholder")}
         actions={
           canCreate && (

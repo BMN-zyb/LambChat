@@ -227,6 +227,29 @@ def test_image_generate_schema_describes_supported_parameters() -> None:
         assert tool.args_schema.model_fields[field_name].description
 
 
+def test_image_generate_description_mentions_reference_image_workflows() -> None:
+    from src.infra.tool.image_generation_tool import get_image_generation_tool
+
+    tool = get_image_generation_tool()
+    description = tool.description
+
+    for keyword in ("图生图", "参考图", "照着这张", "基于这张", "input_images"):
+        assert keyword in description
+
+
+def test_reference_image_generation_tool_requires_input_images() -> None:
+    from src.infra.tool.image_generation_tool import get_reference_image_generation_tool
+
+    tool = get_reference_image_generation_tool()
+    fields = tool.args_schema.model_fields
+
+    assert tool.name == "image_edit_with_references"
+    assert fields["input_images"].is_required()
+    assert "图生图" in tool.description
+    assert "参考图" in tool.description
+    assert "照着这张" in tool.description
+
+
 def test_decode_base64_to_spooled_file_rejects_oversized_payload_before_decode(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
