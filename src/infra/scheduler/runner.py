@@ -40,7 +40,7 @@ from src.kernel.schemas.user import TokenPayload
 logger = get_logger(__name__)
 
 _POLL_INTERVAL = 2  # seconds between status checks when waiting for completion
-_DEFAULT_TIMEOUT = 600  # 10 minutes
+_DEFAULT_TIMEOUT = 1800  # 30 minutes
 _ASSISTANT_EVENT_TYPES = {
     "message",
     "assistant:message",

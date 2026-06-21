@@ -100,7 +100,7 @@ class ScheduledTaskCreate(BaseModel):
     enabled: bool = Field(True)
     run_on_start: bool = Field(False)
     max_retries: int = Field(0, ge=0, le=10)
-    timeout_seconds: int = Field(600, ge=10, le=3600)
+    timeout_seconds: int = Field(1800, ge=10, le=3600)
     source_session_id: Optional[str] = Field(
         None, description="Conversation session where the task was created"
     )
@@ -146,7 +146,7 @@ class ScheduledTask(BaseModel):
     enabled: bool = True
     run_on_start: bool = False
     max_retries: int = 0
-    timeout_seconds: int = 600
+    timeout_seconds: int = 1800
     owner_id: str = Field(..., description="Creator user_id")
     source_session_id: Optional[str] = None
     source_run_id: Optional[str] = None
