@@ -214,7 +214,7 @@ function GeneratedImageResults({ images }: { images: GeneratedImageResult[] }) {
                 alt={image.name}
                 skipUrlResolve
                 className="mx-auto max-h-[70dvh] w-full object-contain"
-                loading="lazy"
+                loading="eager"
                 wrapperClassName="!my-0 !shadow-none"
               />
             </button>

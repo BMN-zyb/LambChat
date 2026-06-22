@@ -235,3 +235,26 @@ test("tool result panel exposes console chrome styling hooks", () => {
     "header icon should not render an extra corner status dot",
   );
 });
+
+test("tool detail sections keep visible separation in light mode", () => {
+  const componentsSource = readFileSync(
+    new URL("../../../../../styles/components.css", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(
+    componentsSource,
+    /\.tool-detail-section\s*\{[\s\S]*?background:\s*var\(--theme-bg-card\);[\s\S]*?box-shadow:/,
+    "detail sections should use a card surface and shadow so light mode blocks do not blend into the page background",
+  );
+  assert.match(
+    componentsSource,
+    /\.tool-detail-section\.is-expanded\s*\{[\s\S]*?background:\s*var\(--theme-bg-card\);[\s\S]*?0 8px 24px -18px/,
+    "expanded detail sections should keep a stronger but restrained light-mode elevation",
+  );
+  assert.match(
+    componentsSource,
+    /\.dark \.tool-detail-section\s*\{[\s\S]*?background:\s*color-mix\(in srgb, var\(--theme-bg\) 35%, transparent\);/,
+    "dark mode should retain its existing lower-contrast dark surface treatment",
+  );
+});

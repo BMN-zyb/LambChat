@@ -817,13 +817,13 @@ export function SharedPage() {
 
       {/* Footer */}
       <footer className="safe-area-bottom relative mt-auto">
-        <div className="max-w-4xl lg:max-w-5xl xl:max-w-6xl mx-auto px-5 sm:px-6">
+        <div className="max-w-4xl lg:max-w-5xl xl:max-w-6xl mx-auto px-4 sm:px-6">
           {/* CTA card */}
-          <div className="relative mx-4 sm:mx-0 mb-10 sm:mb-14 rounded-2xl sm:rounded-3xl border border-stone-200/70 dark:border-stone-800/50 bg-gradient-to-br from-white/80 to-stone-50/60 dark:from-stone-900/60 dark:to-stone-950/40 overflow-hidden">
+          <div className="relative mb-10 sm:mb-14 rounded-2xl sm:rounded-3xl border border-stone-200/70 dark:border-stone-800/50 bg-gradient-to-br from-white/80 to-stone-50/60 dark:from-stone-900/60 dark:to-stone-950/40 overflow-hidden">
             {/* Inner accent */}
             <div className="absolute top-0 left-1/2 -translate-x-1/2 w-24 sm:w-32 h-px bg-gradient-to-r from-transparent via-amber-400/30 dark:via-amber-500/15 to-transparent" />
 
-            <div className="py-8 sm:py-10 px-6 sm:px-8 flex flex-col sm:flex-row items-center gap-5 sm:gap-6">
+            <div className="py-8 sm:py-10 flex flex-col sm:flex-row items-center gap-5 sm:gap-6">
               {/* Left text */}
               <div className="flex-1 text-center sm:text-left">
                 <p className="text-[14px] sm:text-[15px] font-semibold text-stone-800 dark:text-stone-200 tracking-tight font-serif">

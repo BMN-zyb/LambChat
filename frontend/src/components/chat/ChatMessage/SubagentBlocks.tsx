@@ -374,10 +374,10 @@ export function CollapsibleSection({
   return (
     <div
       className={clsx(
-        "p-3 sm:p-4 rounded-lg sm:rounded-xl",
+        "collapsible-section-card p-3 sm:p-4 rounded-lg sm:rounded-xl",
         isError
-          ? "bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-900/50"
-          : "bg-theme-bg-subtle",
+          ? "collapsible-section-card--error bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-900/50"
+          : "collapsible-section-card--default bg-theme-bg-card border border-theme-border shadow-sm",
       )}
     >
       <div className="flex items-center justify-between w-full gap-2">
