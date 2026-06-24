@@ -19,6 +19,7 @@ import { useSwipeToClose } from "../../hooks/useSwipeToClose";
 import { useBodyScrollLock } from "../../hooks/useBodyScrollLock";
 import { useClientPagination } from "../../hooks/useClientPagination";
 import { Pagination } from "../common/Pagination";
+import { PanelSearchInput } from "../common/PanelSearchInput";
 import {
   createPagedGroups,
   SelectorActionBar,
@@ -142,7 +143,7 @@ export function ToolSelector({
     });
   };
 
-  const ModalContent = () => (
+  const renderModalContent = () => (
     <SelectorModalShell ref={swipeRef as React.RefObject<HTMLDivElement>}>
       <SelectorModalHeader
         icon={
@@ -187,10 +188,10 @@ export function ToolSelector({
             size={16}
             className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-stone-400 dark:text-stone-500"
           />
-          <input
+          <PanelSearchInput
             type="text"
             value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
+            onValueChange={setSearchQuery}
             placeholder={t("tools.searchPlaceholder")}
             className="w-full rounded-2xl border border-stone-200 bg-white py-2.5 pl-9 pr-3 text-sm text-stone-700 shadow-sm outline-none transition-colors placeholder:text-stone-400 focus:border-[var(--theme-primary)] focus:bg-white dark:border-stone-700 dark:bg-stone-950/60 dark:text-stone-100 dark:placeholder:text-stone-500 dark:focus:bg-stone-950"
           />
@@ -420,7 +421,7 @@ export function ToolSelector({
   if (externalOnOpenChange) {
     return (
       <SelectorModalPortal open={isOpen} onClose={() => setIsOpen(false)}>
-        <ModalContent />
+        {renderModalContent()}
       </SelectorModalPortal>
     );
   }
@@ -457,7 +458,7 @@ export function ToolSelector({
       {/* Modal */}
       {isOpen && (
         <SelectorModalPortal open={isOpen} onClose={() => setIsOpen(false)}>
-          <ModalContent />
+          {renderModalContent()}
         </SelectorModalPortal>
       )}
     </div>

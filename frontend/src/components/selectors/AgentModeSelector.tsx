@@ -63,7 +63,7 @@ export function AgentModeSelector({
 
   if (agents.length <= 1 || !onSelectAgent) return null;
 
-  const ModalContent = () => (
+  const renderModalContent = () => (
     <SelectorModalShell ref={sheetRef as React.Ref<HTMLDivElement>}>
       <SelectorModalHeader
         className="relative"
@@ -158,7 +158,7 @@ export function AgentModeSelector({
   if (externalOnOpenChange) {
     return (
       <SelectorModalPortal open={open} onClose={handleClose}>
-        <ModalContent />
+        {renderModalContent()}
       </SelectorModalPortal>
     );
   }
@@ -176,7 +176,7 @@ export function AgentModeSelector({
 
       {open && (
         <SelectorModalPortal open={open} onClose={handleClose}>
-          <ModalContent />
+          {renderModalContent()}
         </SelectorModalPortal>
       )}
     </div>

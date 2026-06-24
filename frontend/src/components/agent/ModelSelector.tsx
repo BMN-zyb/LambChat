@@ -7,6 +7,7 @@ import { ModelIconImg } from "./modelIcon.tsx";
 import { shouldCloseModelSelector } from "./modelSelectorGuards";
 import type { ModelOption } from "../../services/api/model";
 import { authApi } from "../../services/api";
+import { PanelSearchInput } from "../common/PanelSearchInput";
 import { Tooltip } from "../common/Tooltip";
 import { PROVIDER_LABELS } from "../panels/AgentPanel/shared/providerLabels";
 
@@ -504,9 +505,9 @@ const ModelSelector = memo(function ModelSelector({
             <div className="border-t border-stone-100 dark:border-stone-700/70 px-3 py-2">
               <div className="flex items-center gap-2 text-stone-400 dark:text-stone-500">
                 <Search size={14} strokeWidth={2.2} className="shrink-0" />
-                <input
+                <PanelSearchInput
                   value={modelSearch}
-                  onChange={(e) => setModelSearch(e.target.value)}
+                  onValueChange={setModelSearch}
                   placeholder={t("profile.searchModels", "搜索模型")}
                   autoComplete="off"
                   className="min-w-0 flex-1 bg-transparent text-[13px] leading-5 text-stone-700 outline-none placeholder:text-stone-400 dark:text-stone-100 dark:placeholder:text-stone-500"

@@ -8,6 +8,7 @@ import type { Team } from "../../types/team";
 import { TeamAvatar } from "./TeamAvatar";
 import { getTeamFallbackAvatar, getTeamFallbackTag } from "./teamAvatarUtils";
 import { useBodyScrollLock } from "../../hooks/useBodyScrollLock";
+import { PanelSearchInput } from "../common/PanelSearchInput";
 
 interface TeamPickerModalProps {
   isOpen: boolean;
@@ -186,9 +187,9 @@ export function TeamPickerModal({
               size={15}
               className="absolute left-3 top-1/2 -translate-y-1/2 text-stone-400"
             />
-            <input
+            <PanelSearchInput
               value={query}
-              onChange={(event) => setQuery(event.target.value)}
+              onValueChange={setQuery}
               placeholder={t("team.search", "搜索团队")}
               className="w-full rounded-lg border bg-transparent py-2 pl-9 pr-3 text-sm outline-none"
               style={{
