@@ -338,6 +338,12 @@ class Settings(BaseSettings):
     AUDIO_TRANSCRIPTION_MODEL: str = "gpt-4o-mini-transcribe"
     AUDIO_TRANSCRIPTION_MAX_DOWNLOAD_BYTES: int = 50 * 1024 * 1024
 
+    # Image analysis tool settings
+    ENABLE_IMAGE_ANALYSIS: bool = False
+    IMAGE_ANALYSIS_MODEL_ID: str = ""
+    IMAGE_ANALYSIS_MAX_ATTEMPTS: int = 3
+    IMAGE_ANALYSIS_RETRY_DELAY: float = 1.0
+
     # Image generation tool settings
     ENABLE_IMAGE_GENERATION: bool = False
     IMAGE_GENERATION_API_KEY: str = ""

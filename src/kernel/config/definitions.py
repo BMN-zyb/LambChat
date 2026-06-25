@@ -719,6 +719,42 @@ SETTING_DEFINITIONS: dict[str, dict] = {
         "depends_on": "ENABLE_AUDIO_TRANSCRIPTION",
     },
     # ============================================
+    # Image Analysis Settings
+    # ============================================
+    "ENABLE_IMAGE_ANALYSIS": {
+        "type": SettingType.BOOLEAN,
+        "category": SettingCategory.TOOLS,
+        "subcategory": "image_analysis",
+        "description": "settingDesc.ENABLE_IMAGE_ANALYSIS",
+        "default": False,
+        "frontend_visible": True,
+    },
+    "IMAGE_ANALYSIS_MODEL_ID": {
+        "type": SettingType.STRING,
+        "category": SettingCategory.TOOLS,
+        "subcategory": "image_analysis",
+        "description": "settingDesc.IMAGE_ANALYSIS_MODEL_ID",
+        "default": "",
+        "depends_on": "ENABLE_IMAGE_ANALYSIS",
+        "frontend_visible": True,
+    },
+    "IMAGE_ANALYSIS_MAX_ATTEMPTS": {
+        "type": SettingType.NUMBER,
+        "category": SettingCategory.TOOLS,
+        "subcategory": "image_analysis",
+        "description": "settingDesc.IMAGE_ANALYSIS_MAX_ATTEMPTS",
+        "default": 3,
+        "depends_on": "ENABLE_IMAGE_ANALYSIS",
+    },
+    "IMAGE_ANALYSIS_RETRY_DELAY": {
+        "type": SettingType.NUMBER,
+        "category": SettingCategory.TOOLS,
+        "subcategory": "image_analysis",
+        "description": "settingDesc.IMAGE_ANALYSIS_RETRY_DELAY",
+        "default": 1.0,
+        "depends_on": "ENABLE_IMAGE_ANALYSIS",
+    },
+    # ============================================
     # Image Generation Settings
     # ============================================
     "ENABLE_IMAGE_GENERATION": {
