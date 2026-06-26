@@ -379,6 +379,8 @@ test("normal skill form uses shared primitives for generic form controls", () =>
   assert.match(source, /<Input[\s\S]*adminMarketplace\.tagsPlaceholder/);
   assert.match(source, /<Input[\s\S]*skills\.form\.filePathPlaceholder/);
   assert.match(source, /<IconButton[\s\S]*addFile/);
+  assert.match(source, /<IconButton[\s\S]*editFullscreen/);
+  assert.match(source, /icon=\{<Pencil size=\{15\} \/>/);
   assert.match(source, /<IconButton[\s\S]*toggleFullscreen\(true\)/);
   assert.match(source, /<Button[\s\S]*type="submit"/);
   assert.doesNotMatch(

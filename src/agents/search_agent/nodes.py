@@ -428,7 +428,11 @@ async def _create_backend_and_prompt(
     if not settings.ENABLE_SANDBOX:
         # 非沙箱模式：使用持久化 backend（PostgreSQL 或 MongoDB，由 store 决定）
         logger.info(f"Sandbox disabled, using PersistentBackend for assistant: {assistant_id}")
-        backend_factory = create_persistent_backend_factory(assistant_id, user_id=user_id)
+        backend_factory = create_persistent_backend_factory(
+            assistant_id,
+            user_id=user_id,
+            session_id=state.get("session_id", str(uuid.uuid4())),
+        )
         prompt = DEFAULT_SYSTEM_PROMPT
         return backend_factory, prompt, store, None, None
 

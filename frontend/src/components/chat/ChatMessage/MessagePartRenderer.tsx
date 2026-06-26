@@ -16,7 +16,10 @@ import {
   ExecuteItem,
   EvalItem,
   ImageGenerateItem,
+  ImageAnalyzeItem,
   AudioTranscribeItem,
+  UploadUrlToSandboxItem,
+  TransferItem,
   ScheduledTaskItem,
   EnvVarItem,
   PersonaItem,
@@ -243,9 +246,52 @@ export function MessagePartRenderer({
       );
     }
     // Detect internal MCP tools, use dedicated themed components
-    if (part.name === "image_generate") {
+    if (
+      part.name === "image_generate" ||
+      part.name === "image_edit_with_references"
+    ) {
       return (
         <ImageGenerateItem
+          args={part.args}
+          result={part.result}
+          success={part.success}
+          isPending={part.isPending}
+          cancelled={part.cancelled}
+          startedAt={part.startedAt}
+          completedAt={part.completedAt}
+        />
+      );
+    }
+    if (part.name === "image_analyze") {
+      return (
+        <ImageAnalyzeItem
+          args={part.args}
+          result={part.result}
+          success={part.success}
+          isPending={part.isPending}
+          cancelled={part.cancelled}
+          startedAt={part.startedAt}
+          completedAt={part.completedAt}
+        />
+      );
+    }
+    if (part.name === "upload_url_to_sandbox") {
+      return (
+        <UploadUrlToSandboxItem
+          args={part.args}
+          result={part.result}
+          success={part.success}
+          isPending={part.isPending}
+          cancelled={part.cancelled}
+          startedAt={part.startedAt}
+          completedAt={part.completedAt}
+        />
+      );
+    }
+    if (part.name === "transfer_file" || part.name === "transfer_path") {
+      return (
+        <TransferItem
+          toolName={part.name}
           args={part.args}
           result={part.result}
           success={part.success}
@@ -272,8 +318,12 @@ export function MessagePartRenderer({
     if (
       part.name === "scheduled_task_create" ||
       part.name === "scheduled_task_list" ||
+      part.name === "scheduled_task_get" ||
       part.name === "scheduled_task_update" ||
-      part.name === "scheduled_task_delete"
+      part.name === "scheduled_task_pause" ||
+      part.name === "scheduled_task_resume" ||
+      part.name === "scheduled_task_delete" ||
+      part.name === "scheduled_task_run"
     ) {
       return (
         <ScheduledTaskItem
@@ -291,7 +341,8 @@ export function MessagePartRenderer({
     if (
       part.name === "env_var_list" ||
       part.name === "env_var_set" ||
-      part.name === "env_var_delete"
+      part.name === "env_var_delete" ||
+      part.name === "env_var_delete_all"
     ) {
       return (
         <EnvVarItem
@@ -306,7 +357,11 @@ export function MessagePartRenderer({
         />
       );
     }
-    if (part.name === "save_persona_preset") {
+    if (
+      part.name === "save_persona_preset" ||
+      part.name === "create_persona_preset" ||
+      part.name === "update_persona_preset"
+    ) {
       return (
         <PersonaItem
           args={part.args}

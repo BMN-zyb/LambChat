@@ -57,16 +57,28 @@ async def test_e2b_cache_hit_runs_sync_sdk_calls_in_blocking_executor(
     async def fake_ensure_sandbox_mcp(*_args, **_kwargs) -> None:
         return None
 
+    async def fake_ensure_work_dir(*_args, **_kwargs) -> None:
+        return None
+
     monkeypatch.setattr(sandbox_module, "run_blocking_io", fake_run_blocking_io)
     monkeypatch.setattr(manager, "_save_binding", fake_save_binding)
+    monkeypatch.setattr(manager, "_ensure_work_dir", fake_ensure_work_dir)
     monkeypatch.setattr(sandbox_module, "ensure_sandbox_mcp", fake_ensure_sandbox_mcp)
     monkeypatch.setattr(sandbox_module.settings, "E2B_TIMEOUT", 123)
 
     _backend, work_dir = await manager._get_or_create_e2b("session-1", "user-1")
 
-    assert work_dir == "/home/user"
+    assert work_dir == "/home/user/sessions/session-1"
     assert blocking_calls == ["sandbox_is_running", "extend_timeout", "get_work_dir"]
     assert adapter.method_calls == ["sandbox_is_running", "extend_timeout", "get_work_dir"]
+
+
+def test_session_work_dir_uses_safe_session_specific_subdirectory() -> None:
+    manager = sandbox_module.SessionSandboxManager()
+
+    work_dir = manager._session_work_dir("/home/user", "../session with spaces/中文")
+
+    assert work_dir == "/home/user/sessions/session-with-spaces"
 
 
 @pytest.mark.asyncio

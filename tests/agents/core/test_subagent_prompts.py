@@ -26,11 +26,13 @@ _fast_prompt = _load_prompt_module("fast_agent_prompt_for_tests", "src/agents/fa
 _search_prompt = _load_prompt_module(
     "search_agent_prompt_for_tests", "src/agents/search_agent/prompt.py"
 )
+_team_prompt = _load_prompt_module("team_agent_prompt_for_tests", "src/agents/team_agent/prompt.py")
 
 FAST_SYSTEM_PROMPT = _fast_prompt.FAST_SYSTEM_PROMPT
 DEFAULT_SYSTEM_PROMPT = _search_prompt.DEFAULT_SYSTEM_PROMPT
 SANDBOX_SYSTEM_PROMPT = _search_prompt.SANDBOX_SYSTEM_PROMPT
 SANDBOX_RUNTIME_SECTION = _search_prompt.SANDBOX_RUNTIME_SECTION
+TEAM_SANDBOX_SYSTEM_PROMPT = _team_prompt.SANDBOX_SYSTEM_PROMPT
 
 
 def _effective_main_prompt(base_prompt: str) -> str:
@@ -94,12 +96,19 @@ def test_workflow_section_describes_skills_workspace_routing() -> None:
         assert phrase in workflow
 
 
+def test_workflow_section_does_not_hardcode_e2b_home_as_workspace() -> None:
+    workflow = WORKFLOW_SECTION.lower()
+
+    assert "/home/user" not in workflow
+    assert "current session workspace" in workflow
+
+
 def test_workflow_section_requires_path_checks_and_separate_workspaces() -> None:
     required_guidance = [
         "before creating files/directories",
         "check whether the target path exists",
         "do not develop inside it",
-        "active writable workspace/work_dir",
+        "current session workspace/work_dir",
         "unrelated to the current project",
         "only touch an existing project",
     ]
@@ -114,7 +123,7 @@ def test_subagent_prompt_requires_path_checks_and_separate_workspaces() -> None:
         "before creating files/directories",
         "check whether the target path exists",
         "do not develop inside it",
-        "active writable workspace/work_dir",
+        "current session workspace/work_dir",
         "unrelated to the current project",
         "only touch an existing project",
     ]
@@ -358,10 +367,20 @@ def test_search_prompts_keep_virtual_skills_and_transfer_guidance() -> None:
     assert "upload_url_to_sandbox" in SANDBOX_SYSTEM_PROMPT
 
 
+def test_sandbox_prompts_use_current_work_dir_for_local_workspace() -> None:
+    for prompt in (SANDBOX_SYSTEM_PROMPT, TEAM_SANDBOX_SYSTEM_PROMPT):
+        lower_prompt = prompt.lower()
+        assert "/home/user" not in lower_prompt
+        assert "current session workspace (`work_dir`)" in lower_prompt
+        assert "session-id-specific workspace" in lower_prompt
+        assert "shell commands and file tools" in lower_prompt
+
+
 def test_sandbox_base_prompt_keeps_work_dir_out_of_global_cache_prefix() -> None:
     assert "{work_dir}" not in SANDBOX_SYSTEM_PROMPT
     assert "{work_dir}" in SANDBOX_RUNTIME_SECTION
-    assert "current sandbox work_dir" in SANDBOX_RUNTIME_SECTION.lower()
+    assert "current session workspace" in SANDBOX_RUNTIME_SECTION.lower()
+    assert "derived from the session id" in SANDBOX_RUNTIME_SECTION.lower()
 
 
 def test_search_agent_uses_single_section_prompt_middleware_instance() -> None:

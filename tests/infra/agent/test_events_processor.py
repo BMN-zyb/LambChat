@@ -216,6 +216,24 @@ async def test_finalize_flushes_pending_summary_chunk() -> None:
 
 
 @pytest.mark.asyncio
+async def test_image_analysis_internal_llm_stream_is_not_emitted_to_main_agent() -> None:
+    presenter = FakePresenter()
+    processor = AgentEventProcessor(presenter)
+
+    await processor.process_event(
+        chat_stream(
+            "internal vision answer",
+            "vision-chunk",
+            {"lc_source": "image_analysis_tool"},
+        )
+    )
+    await processor.process_event({"event": "on_chat_model_end", "data": {"output": None}})
+
+    assert presenter.emitted == []
+    assert processor.output_text == ""
+
+
+@pytest.mark.asyncio
 async def test_text_chunk_key_change_flushes_previous_chunk_without_dropping_current() -> None:
     presenter = FakePresenter()
     processor = AgentEventProcessor(presenter)

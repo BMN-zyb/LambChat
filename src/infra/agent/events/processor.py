@@ -36,6 +36,7 @@ _CONTEXT_EVENT_TYPES = frozenset(
 )
 
 RUBRIC_GRADER = "rubric_grader"
+INTERNAL_STREAM_SOURCES = frozenset(("image_analysis_tool",))
 OUTPUT_TEXT_COPY_MAX_CHARS = 8_000
 
 
@@ -240,6 +241,9 @@ class AgentEventProcessor(SubagentEventMixin, StreamEventMixin, ToolEventMixin):
             return
 
         metadata = event.get("metadata", {})
+        if self._is_internal_stream_event(metadata):
+            return
+
         checkpoint_ns = None
         checkpoint_ns = self._get_checkpoint_ns(metadata)
         current_agent_id, current_depth = self._get_agent_context(checkpoint_ns)
@@ -290,6 +294,11 @@ class AgentEventProcessor(SubagentEventMixin, StreamEventMixin, ToolEventMixin):
             "agent_name": getattr(config, "agent_name", None),
         }
 
+    @staticmethod
+    def _is_internal_stream_event(metadata: dict[str, Any]) -> bool:
+        source = metadata.get("lc_source") or metadata.get("source")
+        return bool(metadata.get("internal_tool_call") or source in INTERNAL_STREAM_SOURCES)
+
     async def _upload_binary_blocks(self, result: dict) -> None:
         await upload_binary_blocks(result, self._base_url)
 
@@ -308,4 +317,4 @@ class AgentEventProcessor(SubagentEventMixin, StreamEventMixin, ToolEventMixin):
         return {k: getattr(sr, k, "") for k in ("result", "explanation", "criteria")}
 
 
-__all__ = ["AgentEventProcessor", "StreamEvent"]
+__all__ = ["AgentEventProcessor", "INTERNAL_STREAM_SOURCES", "StreamEvent"]

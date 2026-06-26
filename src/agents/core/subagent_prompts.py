@@ -14,7 +14,7 @@ from src.kernel.config.base import settings
 
 FILE_WORKSPACE_GUIDE = """
 ### File and Workspace Creation
-Before creating files/directories, check whether the target path exists. If work is unrelated to the current project, do not develop inside it; create a clearly named directory under the active writable workspace/work_dir. Only touch an existing project when requested or clearly related.
+Before creating files/directories, check whether the target path exists. If work is unrelated to the current project, do not develop inside it; create a clearly named directory under the current session workspace/work_dir. Only touch an existing project when requested or clearly related.
 """
 
 FILE_REVEAL_GUIDE = """
@@ -24,7 +24,7 @@ After creating/modifying files, MUST call `reveal_file` immediately. If the user
 `reveal_file` accepts either a local workspace path or an already-accessible `http(s)` URL. For local files, pass the local path so it can be exposed to the user. For files that already have a direct URL, pass that URL as `file_path`; the tool will return the URL directly instead of trying to read it from the filesystem.
 
 ### Resource References in Documents (IMPORTANT)
-For Markdown/HTML/documents that reference local images, video, audio, or other files, call `reveal_file` for each resource first and use the returned `url`. Never put local sandbox paths such as `/home/user/chart.png` or `./images/photo.jpg` in user-facing documents.
+For Markdown/HTML/documents that reference local images, video, audio, or other files, call `reveal_file` for each resource first and use the returned `url`. Never put local sandbox paths from the current session workspace/work_dir, or relative paths such as `./images/photo.jpg`, in user-facing documents.
 
 ### Project / Folder Reveal
 For multi-file frontend projects or ordinary folders with many files, call `reveal_project(project_path, name, template?)` so the user can preview/browse them directly. It returns `mode: "project"` for runnable frontend entries, otherwise `mode: "folder"`.
@@ -66,11 +66,11 @@ TOOL_DISCOVERY_GUIDE = """
 ### File Transfer
 Backends are routed by path prefix:
 - `/skills/*` → skill store (MongoDB)
-- Other paths → active workspace/work_dir
+- Other paths → current session workspace/work_dir
 
 Tools:
 - `transfer_file(src, dst)` — transfer one text file between backends.
-- `transfer_path(src_dir, prefix)` — batch transfer a directory; the directory name becomes the target sub-path (e.g., `/skills/Foo/` → `/home/user/Foo/`).
+- `transfer_path(src_dir, prefix)` — batch transfer a directory; the directory name becomes the target sub-path (e.g., `/skills/Foo/` → current session workspace + `/Foo/`).
 
 Text only. Limits: single file 10MB, batch 100MB/200 files. `/skills/` is virtual storage, not a sandbox directory; never execute `/skills/...` directly from shell. Transfer files into the workspace before running them.
 

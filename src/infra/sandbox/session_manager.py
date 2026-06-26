@@ -9,6 +9,8 @@ User-Sandbox 绑定管理器
 """
 
 import asyncio
+import re
+import shlex
 import threading
 from collections import OrderedDict
 from typing import TYPE_CHECKING, Any, Optional, cast
@@ -18,6 +20,7 @@ if TYPE_CHECKING:
     from e2b import Sandbox as E2BSandbox
 
 from deepagents.backends import CompositeBackend
+from deepagents.backends.protocol import SandboxBackendProtocol
 
 from src.infra.async_utils import run_blocking_io
 from src.infra.backend.daytona import DaytonaBackend
@@ -317,6 +320,54 @@ class SessionSandboxManager:
                 f"user={evicted_user_id}, sandbox={sandbox_id}"
             )
 
+    def _session_work_dir(self, base_work_dir: str, session_id: str) -> str:
+        """Return a stable, shell-safe workspace directory for a session."""
+        safe_session_id = re.sub(r"[^A-Za-z0-9_.-]+", "-", session_id).strip(".-")
+        if not safe_session_id:
+            safe_session_id = "session"
+        return f"{base_work_dir.rstrip('/')}/sessions/{safe_session_id[:80]}"
+
+    async def _ensure_work_dir(self, backend: CompositeBackend, work_dir: str) -> None:
+        sandbox_backend = cast(SandboxBackendProtocol, backend.default)
+        result = await sandbox_backend.aexecute(f"mkdir -p {shlex.quote(work_dir)}")
+        if getattr(result, "exit_code", 0) != 0:
+            raise RuntimeError(f"Failed to create session work_dir {work_dir}: {result.output}")
+
+    def _scope_daytona_backend(
+        self,
+        backend: CompositeBackend,
+        user_id: str,
+        work_dir: str,
+    ) -> CompositeBackend:
+        from src.infra.backend.daytona import DaytonaBackend
+
+        default = backend.default
+        if not isinstance(default, DaytonaBackend):
+            return backend
+        daytona_backend = DaytonaBackend(
+            sandbox=default._sandbox,
+            timeout=default._timeout,
+            env_vars=default.env_vars,
+            work_dir=work_dir,
+        )
+        return CompositeBackend(
+            default=daytona_backend,
+            routes={"/skills/": create_skills_backend(user_id=user_id)},
+        )
+
+    def _scope_e2b_backend(
+        self,
+        provider_obj: object,
+        user_id: str,
+        work_dir: str,
+    ) -> CompositeBackend:
+        from src.infra.backend.e2b import E2BBackend
+
+        return CompositeBackend(
+            default=E2BBackend(sandbox=cast("E2BSandbox", provider_obj), work_dir=work_dir),
+            routes={"/skills/": create_skills_backend(user_id=user_id)},
+        )
+
     async def _save_binding(
         self,
         user_id: str,
@@ -392,10 +443,13 @@ class SessionSandboxManager:
                     f"[SessionSandboxManager] Cache hit: user={user_id}, sandbox={sandbox_id}"
                 )
                 try:
-                    work_dir = await self._get_work_dir(sandbox_id)
+                    base_work_dir = await self._get_work_dir(sandbox_id)
+                    work_dir = self._session_work_dir(base_work_dir, session_id)
+                    scoped_backend = self._scope_daytona_backend(backend, user_id, work_dir)
+                    await self._ensure_work_dir(scoped_backend, work_dir)
                     await self._save_binding(user_id, sandbox_id, "running")
-                    await ensure_sandbox_mcp(backend, user_id)
-                    return backend, work_dir
+                    await ensure_sandbox_mcp(scoped_backend, user_id)
+                    return scoped_backend, work_dir
                 except Exception as e:
                     logger.warning(
                         f"[SessionSandboxManager] Failed to get work_dir from cached sandbox {sandbox_id}: {e}. "
@@ -430,9 +484,12 @@ class SessionSandboxManager:
                         self._cache[user_id] = (sandbox_id, backend, None)
                         self._evict_if_needed()
                         await self._save_binding(user_id, sandbox_id, "running")
-                        work_dir = await self._get_work_dir(sandbox_id)
-                        await ensure_sandbox_mcp(backend, user_id)
-                        return backend, work_dir
+                        base_work_dir = await self._get_work_dir(sandbox_id)
+                        work_dir = self._session_work_dir(base_work_dir, session_id)
+                        scoped_backend = self._scope_daytona_backend(backend, user_id, work_dir)
+                        await self._ensure_work_dir(scoped_backend, work_dir)
+                        await ensure_sandbox_mcp(scoped_backend, user_id)
+                        return scoped_backend, work_dir
                     except Exception as e:
                         logger.warning(
                             f"[SessionSandboxManager] Failed to resume sandbox {sandbox_id}: {e}. "
@@ -447,9 +504,12 @@ class SessionSandboxManager:
                         self._cache[user_id] = (sandbox_id, backend, None)
                         self._evict_if_needed()
                         await self._save_binding(user_id, sandbox_id, "running")
-                        work_dir = await self._get_work_dir(sandbox_id)
-                        await ensure_sandbox_mcp(backend, user_id)
-                        return backend, work_dir
+                        base_work_dir = await self._get_work_dir(sandbox_id)
+                        work_dir = self._session_work_dir(base_work_dir, session_id)
+                        scoped_backend = self._scope_daytona_backend(backend, user_id, work_dir)
+                        await self._ensure_work_dir(scoped_backend, work_dir)
+                        await ensure_sandbox_mcp(scoped_backend, user_id)
+                        return scoped_backend, work_dir
                     except Exception as e:
                         logger.warning(
                             f"[SessionSandboxManager] Failed to get work_dir from sandbox {sandbox_id}: {e}. "
@@ -694,8 +754,11 @@ class SessionSandboxManager:
             f"[SessionSandboxManager] Created sandbox {sandbox_id} for user {user_id} (session={session_id})"
         )
 
-        await ensure_sandbox_mcp(backend, user_id)
-        return backend, work_dir
+        scoped_work_dir = self._session_work_dir(work_dir, session_id)
+        scoped_backend = self._scope_daytona_backend(backend, user_id, scoped_work_dir)
+        await self._ensure_work_dir(scoped_backend, scoped_work_dir)
+        await ensure_sandbox_mcp(scoped_backend, user_id)
+        return scoped_backend, scoped_work_dir
 
     async def _get_user_env_vars(self, user_id: str) -> dict[str, str]:
         """加载用户的环境变量（解密后）"""
@@ -727,7 +790,7 @@ class SessionSandboxManager:
         async with lock:
             if user_id in self._cache:
                 self._cache.move_to_end(user_id)  # LRU: mark as recently used
-                sandbox_id, backend, provider_obj = self._cache[user_id]
+                sandbox_id, _backend, provider_obj = self._cache[user_id]
                 try:
                     is_running = await run_blocking_io(
                         self._e2b_adapter.sandbox_is_running,
@@ -740,12 +803,15 @@ class SessionSandboxManager:
                             settings.E2B_TIMEOUT,
                         )
                         await self._save_binding(user_id, sandbox_id, "running")
-                        await ensure_sandbox_mcp(backend, user_id)
-                        work_dir = await run_blocking_io(
+                        base_work_dir = await run_blocking_io(
                             self._e2b_adapter.get_work_dir,
                             provider_obj,
                         )
-                        return backend, work_dir
+                        work_dir = self._session_work_dir(base_work_dir, session_id)
+                        scoped_backend = self._scope_e2b_backend(provider_obj, user_id, work_dir)
+                        await self._ensure_work_dir(scoped_backend, work_dir)
+                        await ensure_sandbox_mcp(scoped_backend, user_id)
+                        return scoped_backend, work_dir
                 except Exception as e:
                     logger.warning(f"[E2B] Cache hit but sandbox {sandbox_id} unhealthy: {e}")
                 del self._cache[user_id]
@@ -775,11 +841,15 @@ class SessionSandboxManager:
                             user_id, metadata_sandbox_id, info.get("state", "running")
                         )
                         await ensure_sandbox_mcp(backend, user_id)
-                        work_dir = await run_blocking_io(
+                        base_work_dir = await run_blocking_io(
                             self._e2b_adapter.get_work_dir,
                             provider_obj,
                         )
-                        return backend, work_dir
+                        work_dir = self._session_work_dir(base_work_dir, session_id)
+                        scoped_backend = self._scope_e2b_backend(provider_obj, user_id, work_dir)
+                        await self._ensure_work_dir(scoped_backend, work_dir)
+                        await ensure_sandbox_mcp(scoped_backend, user_id)
+                        return scoped_backend, work_dir
                     except Exception as e:
                         logger.warning(f"[E2B] Failed to reconnect {metadata_sandbox_id}: {e}")
 
@@ -818,8 +888,11 @@ class SessionSandboxManager:
         self._evict_if_needed()
         logger.info(f"[E2B] Created sandbox {sandbox_id} for user {user_id} (session={session_id})")
 
-        await ensure_sandbox_mcp(backend, user_id)
-        return backend, work_dir
+        scoped_work_dir = self._session_work_dir(work_dir, session_id)
+        scoped_backend = self._scope_e2b_backend(provider_obj, user_id, scoped_work_dir)
+        await self._ensure_work_dir(scoped_backend, scoped_work_dir)
+        await ensure_sandbox_mcp(scoped_backend, user_id)
+        return scoped_backend, scoped_work_dir
 
     def _build_composite_backend(self, provider_obj: object, user_id: str) -> CompositeBackend:
         from src.infra.backend.e2b import E2BBackend

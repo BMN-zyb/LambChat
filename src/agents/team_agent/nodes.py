@@ -409,8 +409,11 @@ async def team_router_node(state: Dict[str, Any], config: RunnableConfig) -> Dic
     sandbox_work_dir = None
 
     if not settings.ENABLE_SANDBOX:
+        session_id = state.get("session_id", str(uuid.uuid4()))
         backend_factory = create_persistent_backend_factory(
-            assistant_id=assistant_id, user_id=context.user_id
+            assistant_id=assistant_id,
+            user_id=context.user_id,
+            session_id=session_id,
         )
         logger.info(
             f"[TeamAgent] Sandbox disabled, using PersistentBackend for assistant: {assistant_id}"

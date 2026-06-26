@@ -33,6 +33,10 @@ from langchain.tools import tool  # noqa: E402
 logger = get_logger(__name__)
 
 DEFAULT_IMAGE_ANALYSIS_PROMPT = "Describe the image clearly and objectively."
+IMAGE_ANALYSIS_INTERNAL_RUN_CONFIG = {
+    "metadata": {"lc_source": "image_analysis_tool", "internal_tool_call": True},
+    "tags": ["internal_tool_call", "image_analysis_tool"],
+}
 
 
 async def _json_dumps_result(data: dict[str, Any]) -> str:
@@ -94,7 +98,7 @@ async def _call_with_retries(llm: Any, messages: list[Any]) -> Any:
     last_exc: Exception | None = None
     for attempt in range(1, max_attempts + 1):
         try:
-            return await llm.ainvoke(messages)
+            return await llm.ainvoke(messages, config=IMAGE_ANALYSIS_INTERNAL_RUN_CONFIG)
         except Exception as exc:
             last_exc = exc
             if attempt >= max_attempts:

@@ -144,8 +144,11 @@ async def fast_agent_node(state: Dict[str, Any], config: RunnableConfig) -> Dict
 
     # 创建 backend（无沙箱，PostgreSQL 或 MongoDB 由 store 决定）
     backend_start = time.time()
+    session_id = state.get("session_id", str(uuid.uuid4()))
     backend_factory = create_persistent_backend_factory(
-        assistant_id=assistant_id, user_id=context.user_id
+        assistant_id=assistant_id,
+        user_id=context.user_id,
+        session_id=session_id,
     )
     backend = backend_factory(None) if callable(backend_factory) else backend_factory
     logger.info(f"[FastAgent] Using PersistentBackend for assistant: {assistant_id}")

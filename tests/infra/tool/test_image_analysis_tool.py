@@ -44,8 +44,9 @@ async def test_image_analyze_uses_configured_vlm_model_and_prompt(monkeypatch):
     captured: dict[str, object] = {}
 
     class _FakeLLM:
-        async def ainvoke(self, messages):
+        async def ainvoke(self, messages, config=None):
             captured["messages"] = messages
+            captured["config"] = config
             return SimpleNamespace(content="The image shows a lamb.")
 
     async def fake_get_model(**kwargs):
@@ -72,6 +73,11 @@ async def test_image_analyze_uses_configured_vlm_model_and_prompt(monkeypatch):
         "model_id": "vision-id",
     }
     assert captured["model_kwargs"]["model_config"] == model
+    assert captured["config"] == {
+        "metadata": {"lc_source": "image_analysis_tool", "internal_tool_call": True},
+        "tags": ["internal_tool_call", "image_analysis_tool"],
+    }
+    assert len(captured["messages"]) == 1
     assert isinstance(captured["messages"][0], HumanMessage)
     assert captured["messages"][0].content == [
         {"type": "text", "text": "Describe the animal."},
@@ -92,8 +98,9 @@ async def test_image_analyze_retries_failed_model_calls(monkeypatch):
     attempts = 0
 
     class _FakeLLM:
-        async def ainvoke(self, _messages):
+        async def ainvoke(self, _messages, config=None):
             nonlocal attempts
+            assert config == image_analysis_tool.IMAGE_ANALYSIS_INTERNAL_RUN_CONFIG
             attempts += 1
             if attempts < 3:
                 raise RuntimeError("temporary")
