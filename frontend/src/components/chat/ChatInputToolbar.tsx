@@ -17,6 +17,7 @@ import {
 } from "../team/teamAvatarUtils";
 import { ToolbarChip } from "./ToolbarChip";
 import { AgentIcon } from "../agent/AgentIcon";
+import { subscribeTeamsChanged } from "../../hooks/teamEvents";
 
 export interface ChatInputToolbarProps {
   activePanel: FeaturePanel;
@@ -110,20 +111,33 @@ export function ChatInputToolbar({
 
   useEffect(() => {
     let cancelled = false;
-    teamApi
-      .list(0, 50)
-      .then((res) => {
-        if (cancelled) return;
-        setTotalTeamCount(res.total);
-        if (selectedTeamId) {
-          const team = res.teams.find((t) => t.id === selectedTeamId);
-          setSelectedTeam(team ?? null);
-        }
-      })
-      .catch(() => {});
+    const loadTeams = () => {
+      teamApi
+        .list(0, 50)
+        .then((res) => {
+          if (cancelled) return;
+          setTotalTeamCount(res.total);
+          if (selectedTeamId) {
+            const team = res.teams.find((t) => t.id === selectedTeamId);
+            setSelectedTeam(team ?? null);
+          }
+        })
+        .catch(() => {});
+    };
+    loadTeams();
+    const unsubscribe = subscribeTeamsChanged(() => {
+      loadTeams();
+    });
     return () => {
       cancelled = true;
+      unsubscribe();
     };
+  }, [selectedTeamId]);
+
+  useEffect(() => {
+    if (!selectedTeamId) {
+      setSelectedTeam(null);
+    }
   }, [selectedTeamId]);
 
   const booleanAgentOptions = agentOptions

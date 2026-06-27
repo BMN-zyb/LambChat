@@ -200,6 +200,17 @@ class Settings(BaseSettings):
     E2B_AUTO_PAUSE: bool = True
     E2B_AUTO_RESUME: bool = True
 
+    # CubeSandbox Settings
+    CUBE_API_URL: str = "http://127.0.0.1:3000"
+    CUBE_TEMPLATE: str = ""
+    CUBE_PROXY_NODE_IP: str = ""
+    CUBE_PROXY_PORT_HTTP: int = 80
+    CUBE_SANDBOX_DOMAIN: str = "cube.app"
+    CUBE_TIMEOUT: int = 3600
+    CUBE_REQUEST_TIMEOUT: float = 120.0
+    CUBE_AUTO_PAUSE: bool = True
+    CUBE_AUTO_RESUME: bool = True
+
     # Skills Settings
     ENABLE_SKILLS: bool = True
 

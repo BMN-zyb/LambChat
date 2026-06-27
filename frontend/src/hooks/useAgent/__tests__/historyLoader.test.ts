@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { reconstructMessagesFromEvents } from "../historyLoader.ts";
+import {
+  prepareMessagesForRunningRun,
+  reconstructMessagesFromEvents,
+} from "../historyLoader.ts";
+import type { Message } from "../../../types";
 import type { HistoryEvent } from "../types.ts";
 
 test("reconstructMessagesFromEvents preserves backend user message ids", () => {
@@ -25,6 +29,101 @@ test("reconstructMessagesFromEvents preserves backend user message ids", () => {
   assert.equal(messages.length, 1);
   assert.equal(messages[0]?.id, "user-message-1");
   assert.equal(messages[0]?.runId, "run-1");
+});
+
+test("prepareMessagesForRunningRun preserves the optimistic user message when running history has not persisted it yet", () => {
+  const optimisticUser: Message = {
+    id: "optimistic-user-latest",
+    role: "user",
+    content: "latest question",
+    timestamp: new Date("2026-04-19T01:01:00.000Z"),
+  };
+
+  const historyMessages: Message[] = [
+    {
+      id: "user-previous",
+      role: "user",
+      content: "previous question",
+      timestamp: new Date("2026-04-19T01:00:00.000Z"),
+      runId: "run-previous",
+    },
+    {
+      id: "assistant-previous",
+      role: "assistant",
+      content: "previous answer",
+      timestamp: new Date("2026-04-19T01:00:01.000Z"),
+      runId: "run-previous",
+    },
+  ];
+
+  const result = prepareMessagesForRunningRun(
+    historyMessages,
+    "run-latest",
+    () => "assistant-latest",
+    [
+      optimisticUser,
+      {
+        id: "run-latest",
+        role: "assistant",
+        content: "",
+        timestamp: new Date("2026-04-19T01:01:00.000Z"),
+        isStreaming: true,
+        runId: "run-latest",
+      },
+    ],
+  );
+
+  assert.deepEqual(
+    result.messages.map((message) => [message.id, message.role, message.runId]),
+    [
+      ["user-previous", "user", "run-previous"],
+      ["assistant-previous", "assistant", "run-previous"],
+      ["optimistic-user-latest", "user", "run-latest"],
+      ["assistant-latest", "assistant", "run-latest"],
+    ],
+  );
+});
+
+test("prepareMessagesForRunningRun does not duplicate the optimistic user message after history persists it", () => {
+  const historyMessages: Message[] = [
+    {
+      id: "persisted-user-latest",
+      role: "user",
+      content: "latest question",
+      timestamp: new Date("2026-04-19T01:01:00.000Z"),
+      runId: "run-latest",
+    },
+  ];
+
+  const result = prepareMessagesForRunningRun(
+    historyMessages,
+    "run-latest",
+    () => "assistant-latest",
+    [
+      {
+        id: "optimistic-user-latest",
+        role: "user",
+        content: "latest question",
+        timestamp: new Date("2026-04-19T01:01:00.000Z"),
+      },
+      {
+        id: "run-latest",
+        role: "assistant",
+        content: "",
+        timestamp: new Date("2026-04-19T01:01:00.000Z"),
+        isStreaming: true,
+        runId: "run-latest",
+      },
+    ],
+  );
+
+  assert.deepEqual(
+    result.messages.map((message) => [message.id, message.role, message.runId]),
+    [
+      ["persisted-user-latest", "user", "run-latest"],
+      ["assistant-latest", "assistant", "run-latest"],
+    ],
+  );
 });
 
 test("reconstructMessagesFromEvents ignores goal update events as message content", () => {

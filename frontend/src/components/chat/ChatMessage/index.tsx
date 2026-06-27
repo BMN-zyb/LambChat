@@ -575,6 +575,7 @@ export const ChatMessage = memo(function ChatMessage({
               )}
               <RevealArtifactsSummary
                 parts={message.parts}
+                isStreaming={message.isStreaming}
                 onOpenPreview={onOpenPreview}
               />
             </div>

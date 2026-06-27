@@ -452,6 +452,8 @@ export function useAgent(options?: UseAgentOptions): UseAgentReturn {
               const prepared = prepareMessagesForRunningRun(
                 reconstructedMessages,
                 currentRunId,
+                undefined,
+                messagesRef.current,
               );
               reconstructedMessages = prepared.messages;
               const streamingMessageId = prepared.streamingMessageId;
@@ -489,6 +491,7 @@ export function useAgent(options?: UseAgentOptions): UseAgentReturn {
                 [],
                 currentRunId,
                 () => streamingMessageId,
+                messagesRef.current,
               );
               setMessages(prepared.messages);
               // Fire-and-forget SSE reconnect (same reason as above).

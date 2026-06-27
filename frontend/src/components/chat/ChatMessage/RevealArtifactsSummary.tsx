@@ -359,9 +359,11 @@ function getRevealArtifactImagePreviewItems(
 
 export function RevealArtifactsSummary({
   parts,
+  isStreaming,
   onOpenPreview,
 }: {
   parts?: MessagePart[];
+  isStreaming?: boolean;
   onOpenPreview?: (
     preview: RevealPreviewRequest,
     source?: RevealPreviewOpenSource,
@@ -428,7 +430,7 @@ export function RevealArtifactsSummary({
     }
   }, [nextImageItem]);
 
-  if (artifacts.length === 0) {
+  if (isStreaming || artifacts.length === 0) {
     return null;
   }
 

@@ -63,15 +63,15 @@ test("all files image rows open an ImageViewer gallery with navigation", () => {
   );
 });
 
-test("all files summary remains visible while artifact events are still streaming", () => {
+test("all files summary waits until the message stops streaming", () => {
   const summarySource = readFileSync(
     new URL("../RevealArtifactsSummary.tsx", import.meta.url),
     "utf8",
   );
 
-  assert.doesNotMatch(
+  assert.match(
     summarySource,
     /if\s*\(\s*isStreaming\s*\|\|\s*artifacts\.length\s*===\s*0\s*\)/,
-    "artifact delivery events should surface the all files entry as soon as they arrive",
+    "artifact delivery events should keep the all files entry hidden until the message is idle",
   );
 });

@@ -24,6 +24,38 @@ class _FakeE2BAdapter:
         self.method_calls.append("get_work_dir")
         return "/home/user"
 
+    def get_sandbox_info(self, _provider_obj) -> dict:
+        self.method_calls.append("get_sandbox_info")
+        return {"sandbox_id": "sandbox-1", "state": "running"}
+
+
+class _FakeCubeAdapter(_FakeE2BAdapter):
+    def __init__(self) -> None:
+        super().__init__()
+        self.connected: list[str] = []
+        self.killed: list[str] = []
+        self.created = object()
+
+    def get_sandbox(self, sandbox_id: str):
+        self.method_calls.append("get_sandbox")
+        self.connected.append(sandbox_id)
+        return object()
+
+    def get_sandbox_id(self, _sandbox) -> str:
+        return "created-sandbox"
+
+    def create_sandbox(self, user_id=None, envs=None):
+        self.method_calls.append("create_sandbox")
+        return self.created, "/home/user"
+
+    def list_user_sandboxes(self, user_id: str) -> list[dict]:
+        self.method_calls.append("list_user_sandboxes")
+        return []
+
+    def kill_sandbox(self, sandbox) -> None:
+        self.method_calls.append("kill_sandbox")
+        self.killed.append(sandbox)
+
 
 class _FakeMongoClient:
     def __init__(self, collection: Any) -> None:
@@ -71,6 +103,228 @@ async def test_e2b_cache_hit_runs_sync_sdk_calls_in_blocking_executor(
     assert work_dir == "/home/user/sessions/session-1"
     assert blocking_calls == ["sandbox_is_running", "extend_timeout", "get_work_dir"]
     assert adapter.method_calls == ["sandbox_is_running", "extend_timeout", "get_work_dir"]
+
+
+@pytest.mark.asyncio
+async def test_cubesandbox_cache_hit_uses_cube_adapter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = _FakeCubeAdapter()
+    manager = sandbox_module.SessionSandboxManager()
+    manager._cube_adapter = adapter
+    manager._e2b_adapter = None
+    manager._cache = OrderedDict({"user-1": ("sandbox-1", object(), object())})
+
+    blocking_calls: list[str] = []
+
+    async def fake_run_blocking_io(func, *args, **kwargs):
+        del kwargs
+        blocking_calls.append(func.__name__)
+        return func(*args)
+
+    async def fake_save_binding(*_args, **_kwargs) -> None:
+        return None
+
+    async def fake_ensure_sandbox_mcp(*_args, **_kwargs) -> None:
+        return None
+
+    async def fake_ensure_work_dir(*_args, **_kwargs) -> None:
+        return None
+
+    monkeypatch.setattr(sandbox_module, "run_blocking_io", fake_run_blocking_io)
+    monkeypatch.setattr(manager, "_save_binding", fake_save_binding)
+    monkeypatch.setattr(manager, "_ensure_work_dir", fake_ensure_work_dir)
+    monkeypatch.setattr(sandbox_module, "ensure_sandbox_mcp", fake_ensure_sandbox_mcp)
+    monkeypatch.setattr(sandbox_module.settings, "CUBE_TIMEOUT", 456, raising=False)
+
+    _backend, work_dir = await manager._get_or_create_cubesandbox("session-1", "user-1")
+    await asyncio.sleep(0)
+
+    assert work_dir == "/home/user/sessions/session-1"
+    assert blocking_calls == [
+        "sandbox_is_running",
+        "extend_timeout",
+        "get_work_dir",
+        "list_user_sandboxes",
+    ]
+    assert adapter.method_calls == [
+        "sandbox_is_running",
+        "extend_timeout",
+        "get_work_dir",
+        "list_user_sandboxes",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_cubesandbox_reuses_running_sandbox_found_by_user_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = _FakeCubeAdapter()
+    manager = sandbox_module.SessionSandboxManager()
+    manager._cube_adapter = adapter
+    manager._e2b_adapter = None
+
+    async def fake_run_blocking_io(func, *args, **kwargs):
+        del kwargs
+        return func(*args)
+
+    async def fake_get_binding(_user_id: str):
+        return {"sandbox_id": "missing-binding-sandbox"}
+
+    async def fake_save_binding(*_args, **_kwargs) -> None:
+        return None
+
+    async def fake_ensure_sandbox_mcp(*_args, **_kwargs) -> None:
+        return None
+
+    async def fake_ensure_work_dir(*_args, **_kwargs) -> None:
+        return None
+
+    monkeypatch.setattr(sandbox_module, "run_blocking_io", fake_run_blocking_io)
+    monkeypatch.setattr(manager, "_get_binding", fake_get_binding)
+    monkeypatch.setattr(manager, "_save_binding", fake_save_binding)
+    monkeypatch.setattr(manager, "_ensure_work_dir", fake_ensure_work_dir)
+    monkeypatch.setattr(sandbox_module, "ensure_sandbox_mcp", fake_ensure_sandbox_mcp)
+    monkeypatch.setattr(
+        adapter,
+        "get_sandbox",
+        lambda sandbox_id: object() if sandbox_id == "usable-existing-sandbox" else None,
+    )
+    monkeypatch.setattr(
+        adapter,
+        "list_user_sandboxes",
+        lambda user_id: [
+            {"sandboxID": "usable-existing-sandbox", "state": "running"},
+        ],
+    )
+
+    backend, work_dir = await manager._get_or_create_cubesandbox("session-1", "user-1")
+
+    assert work_dir == "/home/user/sessions/session-1"
+    assert "user-1" in manager._cache
+    assert manager._cache["user-1"][0] == "usable-existing-sandbox"
+    assert getattr(backend.default, "work_dir", None) == "/home/user/sessions/session-1"
+    assert "create_sandbox" not in adapter.method_calls
+
+
+@pytest.mark.asyncio
+async def test_cubesandbox_create_cleans_other_user_sandboxes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = _FakeCubeAdapter()
+    manager = sandbox_module.SessionSandboxManager()
+    manager._cube_adapter = adapter
+    manager._e2b_adapter = None
+
+    async def fake_run_blocking_io(func, *args, **kwargs):
+        del kwargs
+        return func(*args)
+
+    async def fake_save_binding(*_args, **_kwargs) -> None:
+        return None
+
+    async def fake_get_user_env_vars(_user_id: str) -> dict[str, str]:
+        return {}
+
+    async def fake_ensure_sandbox_mcp(*_args, **_kwargs) -> None:
+        return None
+
+    async def fake_ensure_work_dir(*_args, **_kwargs) -> None:
+        return None
+
+    monkeypatch.setattr(sandbox_module, "run_blocking_io", fake_run_blocking_io)
+    monkeypatch.setattr(manager, "_save_binding", fake_save_binding)
+    monkeypatch.setattr(manager, "_get_user_env_vars", fake_get_user_env_vars)
+    monkeypatch.setattr(manager, "_ensure_work_dir", fake_ensure_work_dir)
+    monkeypatch.setattr(sandbox_module, "ensure_sandbox_mcp", fake_ensure_sandbox_mcp)
+    monkeypatch.setattr(
+        adapter,
+        "list_user_sandboxes",
+        lambda user_id: [
+            {"sandboxID": "old-1", "state": "running"},
+            {"sandboxID": "created-sandbox", "state": "running"},
+        ],
+    )
+    monkeypatch.setattr(
+        adapter,
+        "get_sandbox",
+        lambda sandbox_id: sandbox_id,
+    )
+
+    await manager._create_and_bind_cubesandbox("session-1", "user-1")
+
+    assert adapter.killed == ["old-1"]
+
+
+@pytest.mark.asyncio
+async def test_cubesandbox_reconnect_cleans_other_user_sandboxes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = _FakeCubeAdapter()
+    manager = sandbox_module.SessionSandboxManager()
+    manager._cube_adapter = adapter
+    manager._e2b_adapter = None
+
+    async def fake_run_blocking_io(func, *args, **kwargs):
+        del kwargs
+        return func(*args)
+
+    async def fake_get_binding(_user_id: str):
+        return {"sandbox_id": "bound-sandbox"}
+
+    async def fake_save_binding(*_args, **_kwargs) -> None:
+        return None
+
+    async def fake_ensure_sandbox_mcp(*_args, **_kwargs) -> None:
+        return None
+
+    async def fake_ensure_work_dir(*_args, **_kwargs) -> None:
+        return None
+
+    monkeypatch.setattr(sandbox_module, "run_blocking_io", fake_run_blocking_io)
+    monkeypatch.setattr(manager, "_get_binding", fake_get_binding)
+    monkeypatch.setattr(manager, "_save_binding", fake_save_binding)
+    monkeypatch.setattr(manager, "_ensure_work_dir", fake_ensure_work_dir)
+    monkeypatch.setattr(sandbox_module, "ensure_sandbox_mcp", fake_ensure_sandbox_mcp)
+    monkeypatch.setattr(
+        adapter,
+        "get_sandbox",
+        lambda sandbox_id: sandbox_id,
+    )
+    monkeypatch.setattr(
+        adapter,
+        "list_user_sandboxes",
+        lambda user_id: [
+            {"sandboxID": "old-1", "state": "running"},
+            {"sandboxID": "bound-sandbox", "state": "running"},
+        ],
+    )
+
+    await manager._get_or_create_cubesandbox("session-1", "user-1")
+    await asyncio.sleep(0)
+
+    assert adapter.killed == ["old-1"]
+
+
+@pytest.mark.asyncio
+async def test_ensure_work_dir_skips_already_ready_directory() -> None:
+    manager = sandbox_module.SessionSandboxManager()
+    calls = 0
+
+    class _Backend:
+        id = "sandbox-1"
+
+        async def aexecute(self, command: str):
+            nonlocal calls
+            calls += 1
+            return type("Result", (), {"exit_code": 0, "output": command})()
+
+    backend = type("Composite", (), {"default": _Backend()})()
+
+    await manager._ensure_work_dir(backend, "/home/user/sessions/session-1")
+    await manager._ensure_work_dir(backend, "/home/user/sessions/session-1")
+
+    assert calls == 1
 
 
 def test_session_work_dir_uses_safe_session_specific_subdirectory() -> None:

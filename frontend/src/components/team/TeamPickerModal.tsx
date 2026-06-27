@@ -9,6 +9,7 @@ import { TeamAvatar } from "./TeamAvatar";
 import { getTeamFallbackAvatar, getTeamFallbackTag } from "./teamAvatarUtils";
 import { useBodyScrollLock } from "../../hooks/useBodyScrollLock";
 import { PanelSearchInput } from "../common/PanelSearchInput";
+import { subscribeTeamsChanged } from "../../hooks/teamEvents";
 
 interface TeamPickerModalProps {
   isOpen: boolean;
@@ -35,12 +36,30 @@ export function TeamPickerModal({
 
   useEffect(() => {
     if (!isOpen) return;
+    let cancelled = false;
     setLoading(true);
     teamApi
       .list(0, 50)
-      .then((res) => setTeams(res.teams))
+      .then((res) => {
+        if (!cancelled) setTeams(res.teams);
+      })
       .catch((err) => console.error("Failed to load teams:", err))
-      .finally(() => setLoading(false));
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    return subscribeTeamsChanged(() => {
+      teamApi
+        .list(0, 50)
+        .then((res) => setTeams(res.teams))
+        .catch((err) => console.error("Failed to refresh teams:", err));
+    });
   }, [isOpen]);
 
   useEffect(() => {

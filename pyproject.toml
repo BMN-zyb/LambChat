@@ -52,6 +52,7 @@ dependencies = [
     "jieba>=0.42.1",
     "lark-oapi>=1.5.3,<1.7",
     "e2b>=2.15.3",
+    "cubesandbox @ file:///home/yangyang/CubeSandbox/sdk/python",
     "psutil>=7.2.2",
     "apscheduler>=3.11.0",
     "langchain-quickjs>=0.1.0",
@@ -76,6 +77,9 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/agents", "src/api", "src/infra", "src/kernel", "src/skills"]
+
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.ruff]
 line-length = 100

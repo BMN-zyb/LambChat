@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { teamApi } from "../../../services/api/team";
+import { subscribeTeamsChanged } from "../../../hooks/teamEvents";
 import { getTeamFallbackAvatar } from "../../team/teamAvatarUtils";
 import type { Team } from "../../../types/team";
 import type {
@@ -34,17 +35,26 @@ function useCurrentTeam(currentAgent: string, selectedTeamId: string | null) {
     }
 
     let cancelled = false;
-    teamApi
-      .get(selectedTeamId)
-      .then((team) => {
-        if (!cancelled) setCurrentTeam(team);
-      })
-      .catch(() => {
-        if (!cancelled) setCurrentTeam(null);
-      });
+    const loadTeam = () => {
+      teamApi
+        .get(selectedTeamId)
+        .then((team) => {
+          if (!cancelled) setCurrentTeam(team);
+        })
+        .catch(() => {
+          if (!cancelled) setCurrentTeam(null);
+        });
+    };
+    loadTeam();
+    const unsubscribe = subscribeTeamsChanged((detail) => {
+      if (!detail.teamId || detail.teamId === selectedTeamId) {
+        loadTeam();
+      }
+    });
 
     return () => {
       cancelled = true;
+      unsubscribe();
     };
   }, [currentAgent, selectedTeamId]);
 

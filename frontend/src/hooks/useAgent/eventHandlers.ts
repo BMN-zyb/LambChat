@@ -11,7 +11,7 @@ import type { Message, MessagePart, FormField } from "../../types";
 import { uuid } from "../../utils/uuid";
 import { authFetch } from "../../services/api/fetch";
 import { buildApiUrl } from "../../services/api/config";
-import { sessionApi } from "../../services/api";
+import { sessionApi } from "../../services/api/session";
 import i18n from "../../i18n";
 import { translateBackendError } from "../../utils/backendErrors";
 import { parseDate } from "../../utils/datetime";
@@ -23,6 +23,7 @@ import type {
 } from "./types";
 import { clearAllLoadingStates } from "./messageParts";
 import { convertAttachments, processMessageEvent } from "./eventProcessor";
+import { dispatchToolMutationRefresh } from "../../components/chat/ChatMessage/items/toolMutationEvents";
 
 /**
  * Context passed to event handler
@@ -357,6 +358,10 @@ export function handleStreamEvent(
     if (stackIndex !== -1) {
       subagentStack.splice(stackIndex, 1);
     }
+  }
+
+  if (eventType === "tool:result" && data.success !== false) {
+    dispatchToolMutationRefresh(data.result);
   }
 
   // Sandbox side effects
