@@ -44,7 +44,7 @@ MongoBufferItem = tuple[str, str, dict, str, Optional[str], datetime]
 
 def _get_max_events_per_trace() -> int:
     """获取单个 trace 最多保留的事件数（可配置）"""
-    return getattr(settings, "SESSION_MAX_EVENTS_PER_TRACE", 10000)
+    return getattr(settings, "SESSION_MAX_EVENTS_PER_TRACE", 50000)
 
 
 def _get_mongo_buffer_max() -> int:
@@ -131,6 +131,21 @@ def _build_mongo_bulk_operations(
             )
         )
     return operations
+
+
+def _group_mongo_buffer_events(
+    batch: list[MongoBufferItem],
+) -> dict[str, list[dict[str, Any]]]:
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for trace_id, event_type, data, _session_id, _run_id, timestamp in batch:
+        grouped[trace_id].append(
+            {
+                "event_type": event_type,
+                "data": data,
+                "timestamp": timestamp,
+            }
+        )
+    return grouped
 
 
 class DualEventWriter:
@@ -225,29 +240,22 @@ class DualEventWriter:
 
         # ---- MongoDB 写入（缓冲，使用 Event 触发） ----
         if trace_id:
+            mongo_buffer_max = _get_mongo_buffer_max()
+            async with self._mongo_lock:
+                buffer_size = len(self._mongo_buffer)
+            if buffer_size >= mongo_buffer_max:
+                logger.warning(
+                    "MongoDB event buffer reached %s entries; flushing before accepting more",
+                    mongo_buffer_max,
+                )
+                await self.flush_mongo_buffer()
+
             should_flush_now = False
             buffer_size = 0
             async with self._mongo_lock:
-                mongo_buffer_max = _get_mongo_buffer_max()
                 buffer_size = len(self._mongo_buffer)
-                # 防止 buffer 无限增长（MongoDB 慢/宕机时丢弃最旧的事件）
-                if buffer_size >= mongo_buffer_max:
-                    keep_count = mongo_buffer_max // 2
-                    dropped_count = buffer_size - keep_count
-                    self._mongo_buffer = self._mongo_buffer[-keep_count:] if keep_count else []
-                    self._mongo_buffer_dropped_total += dropped_count
-                    self._mongo_buffer_last_drop = {
-                        "dropped_count": dropped_count,
-                        "buffer_size": buffer_size,
-                        "buffer_max": mongo_buffer_max,
-                        "timestamp": timestamp.isoformat(),
-                    }
-                    logger.error(
-                        f"MongoDB buffer exceeded {mongo_buffer_max}, dropped {dropped_count} oldest entries. "
-                        f"This indicates MongoDB is slow or down. Check MongoDB health!"
-                    )
                 # 当缓冲区达到 80% 时发出警告
-                elif buffer_size >= int(mongo_buffer_max * 0.8):
+                if buffer_size >= int(mongo_buffer_max * 0.8):
                     logger.warning(
                         f"MongoDB buffer at {buffer_size}/{mongo_buffer_max} ({buffer_size * 100 // mongo_buffer_max}%). "
                         f"Consider checking MongoDB performance."
@@ -265,6 +273,8 @@ class DualEventWriter:
                     self._flush_task.add_done_callback(self._on_flush_task_done)
 
             if should_flush_now:
+                await self.flush_mongo_buffer()
+            elif event_type in ("complete", "error", "done"):
                 await self.flush_mongo_buffer()
 
         return redis_success
@@ -345,6 +355,45 @@ class DualEventWriter:
 
         now = utc_now()
         max_events = _get_max_events_per_trace()
+        chunk_storage_enabled = bool(
+            getattr(settings, "SESSION_EVENT_CHUNK_STORAGE_ENABLED", False)
+        )
+        dual_write_legacy = bool(getattr(settings, "SESSION_EVENT_CHUNK_DUAL_WRITE_LEGACY", False))
+
+        if chunk_storage_enabled:
+            grouped = _group_mongo_buffer_events(batch)
+            failed_chunk_trace_ids: set[str] = set()
+            for trace_id, events in grouped.items():
+                try:
+                    trace_doc = await self.trace.reserve_event_sequence_range(
+                        trace_id,
+                        len(events),
+                    )
+                    if not trace_doc:
+                        logger.warning(
+                            "Chunk write skipped because trace %s was not found", trace_id
+                        )
+                        failed_chunk_trace_ids.add(trace_id)
+                        continue
+                    start_seq = int(trace_doc.get("event_count", 0)) - len(events) + 1
+                    await self.trace.append_events_to_chunks(trace_doc, events, start_seq)
+                except Exception as e:
+                    failed_chunk_trace_ids.add(trace_id)
+                    logger.warning(
+                        "Chunk write failed for trace %s with %s events: %s",
+                        trace_id,
+                        len(events),
+                        e,
+                    )
+
+            if not dual_write_legacy:
+                if failed_chunk_trace_ids:
+                    failed_items = [item for item in batch if item[0] in failed_chunk_trace_ids]
+                    async with self._mongo_lock:
+                        self._mongo_buffer = failed_items + self._mongo_buffer
+                self._flush_event.set()
+                return
+
         operations = await run_blocking_io(
             _build_mongo_bulk_operations,
             batch,
@@ -576,7 +625,7 @@ class DualEventWriter:
         self,
         trace_id: str,
         event_types: Optional[List[str]] = None,
-        max_events: int = 1000,
+        max_events: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
         """获取 trace 的事件列表"""
         return await self.trace.get_trace_events(trace_id, event_types, max_events=max_events)

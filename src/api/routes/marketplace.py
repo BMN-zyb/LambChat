@@ -289,13 +289,11 @@ async def install_marketplace_skill(
 
     # 2. 检查用户是否已安装（检查 __meta__ 或文件是否存在）
     existing_meta = await storage.get_skill_meta(name, user.sub)
+    replace_manual_skill = False
     if existing_meta:
         if existing_meta.installed_from == InstalledFrom.MARKETPLACE:
             raise HTTPException(status_code=409, detail=f"Skill '{name}' already installed")
-        raise HTTPException(
-            status_code=409,
-            detail=f"Local manual skill '{name}' already exists. Rename or remove it before installing from marketplace.",
-        )
+        replace_manual_skill = True
 
     # 3. 获取商城文件数量并分批复制到用户目录，避免一次性物化所有文件内容
     file_paths = await marketplace.list_marketplace_file_paths(name)
@@ -304,6 +302,8 @@ async def install_marketplace_skill(
 
     # 4. 创建用户本地副本（利用 MongoDB unique index 防止竞态）
     try:
+        if replace_manual_skill:
+            await storage.delete_skill_files(name, user.sub)
         copied = await _copy_marketplace_files_to_user_skill(
             name=name,
             user_id=user.sub,

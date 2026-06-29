@@ -13,6 +13,7 @@ import {
   Ban,
   ChevronRight,
   ChevronDown,
+  ArrowDown,
   Brain,
   Bot,
   Box,
@@ -25,6 +26,7 @@ import {
   Database,
   ShieldCheck,
   Star,
+  Maximize2,
   type LucideIcon,
 } from "lucide-react";
 import { getFluentEmojiCDN } from "@lobehub/fluent-emoji";
@@ -68,6 +70,9 @@ import {
   shouldExpandSubagentProcessByDefault,
 } from "./subagentPanelControl";
 import { formatDateTime, formatDuration } from "../../../utils/datetime";
+
+const SIDEBAR_MARKDOWN_PREVIEW_LIMIT = 12_000;
+const SUBAGENT_PARTS_PREVIEW_LIMIT = 20_000;
 
 function useSubagentPanelData(agentId: string): SubagentPanelData | undefined {
   const [, forceRender] = useState(0);
@@ -355,6 +360,50 @@ function extractPartsText(parts: MessagePart[]): string {
     .join("\n\n");
 }
 
+function SidebarMarkdownContent({
+  content,
+  isStreaming,
+  expandable = true,
+}: {
+  content: string;
+  isStreaming?: boolean;
+  expandable?: boolean;
+}) {
+  const { t } = useTranslation();
+  const [showFull, setShowFull] = useState(false);
+  const shouldUsePreview =
+    (isStreaming || content.length > SIDEBAR_MARKDOWN_PREVIEW_LIMIT) &&
+    !showFull;
+  const previewContent = shouldUsePreview
+    ? content.slice(-SIDEBAR_MARKDOWN_PREVIEW_LIMIT)
+    : content;
+
+  if (!shouldUsePreview) {
+    return <MarkdownContent content={content} isStreaming={isStreaming} />;
+  }
+
+  return (
+    <div className="space-y-2">
+      <div className="relative overflow-hidden rounded-md bg-theme-bg-card">
+        <div className="max-h-[min(58vh,680px)] max-w-prose overflow-auto whitespace-pre-wrap break-words px-0.5 pb-6 text-sm leading-7 text-theme-text-secondary">
+          {previewContent}
+        </div>
+        <div className="pointer-events-none absolute inset-x-0 bottom-0 h-10 bg-gradient-to-t from-theme-bg-card to-transparent" />
+      </div>
+      {expandable && (
+        <button
+          type="button"
+          onClick={() => setShowFull(true)}
+          className="inline-flex min-h-8 items-center gap-1.5 rounded-md border border-theme-border bg-theme-bg-card px-2.5 text-xs font-medium text-theme-text-secondary transition-colors hover:bg-theme-bg-subtle hover:text-theme-text"
+        >
+          <Maximize2 size={12} />
+          {t("common.expand", "Expand")}
+        </button>
+      )}
+    </div>
+  );
+}
+
 export function CollapsibleSection({
   title,
   defaultExpanded = true,
@@ -431,6 +480,7 @@ function SubagentPanelContent({ agentId }: { agentId: string }) {
   const userScrolledUpRef = useRef(false);
   const programmaticScrollRef = useRef(false);
   const stopAutoScrollRef = useRef<(() => void) | null>(null);
+  const [showScrollToBottom, setShowScrollToBottom] = useState(false);
 
   const markProgrammaticScroll = useCallback(() => {
     programmaticScrollRef.current = true;
@@ -462,10 +512,17 @@ function SubagentPanelContent({ agentId }: { agentId: string }) {
     startAutoScroll();
   }, [startAutoScroll]);
 
+  const handleJumpToBottom = useCallback(() => {
+    userScrolledUpRef.current = false;
+    setShowScrollToBottom(false);
+    startAutoScroll();
+  }, [startAutoScroll]);
+
   const handleScroll = useCallback(() => {
     const scroller = scrollRef.current;
     if (!scroller || programmaticScrollRef.current) return;
     userScrolledUpRef.current = !isNearSubagentPanelBottom(scroller);
+    setShowScrollToBottom(userScrolledUpRef.current);
     if (userScrolledUpRef.current) {
       stopAutoScroll();
     }
@@ -509,17 +566,26 @@ function SubagentPanelContent({ agentId }: { agentId: string }) {
     return () => observer.disconnect();
   }, [startAutoScroll]);
 
+  const partsText = useMemo(
+    () => (data?.parts?.length ? extractPartsText(data.parts) : ""),
+    [data?.parts],
+  );
+  const [showFullProcess, setShowFullProcess] = useState(false);
   if (!data) return null;
 
   const effectiveStatus =
     data.status ||
     (data.isPending ? "running" : data.success ? "complete" : "error");
+  const shouldUsePartsPreview =
+    !!data.parts?.length &&
+    !showFullProcess &&
+    (data.isPending || partsText.length > SUBAGENT_PARTS_PREVIEW_LIMIT);
 
   return (
     <div
       ref={scrollRef}
       onScroll={handleScroll}
-      className="h-full min-h-0 overflow-y-auto p-2 sm:p-4"
+      className="relative h-full min-h-0 overflow-y-auto p-2 sm:p-4"
     >
       <div ref={contentRef} className="space-y-3">
         {data.input && (
@@ -528,7 +594,7 @@ function SubagentPanelContent({ agentId }: { agentId: string }) {
             action={<CopyButton text={data.input} />}
           >
             <div className="text-sm text-stone-600 dark:text-stone-300 leading-relaxed">
-              <MarkdownContent content={data.input} />
+              <SidebarMarkdownContent content={data.input} />
             </div>
           </CollapsibleSection>
         )}
@@ -538,20 +604,38 @@ function SubagentPanelContent({ agentId }: { agentId: string }) {
             defaultExpanded={shouldExpandSubagentProcessByDefault(
               effectiveStatus,
             )}
-            action={<CopyButton text={extractPartsText(data.parts)} />}
+            action={<CopyButton text={partsText} />}
           >
-            <div className="space-y-2">
-              {data.parts.map((part, index) => (
-                <MessagePartRenderer
-                  key={index}
-                  part={part}
-                  messageId={createSubagentAnchorOwnerId(agentId)}
-                  partIndex={index}
+            {shouldUsePartsPreview ? (
+              <div className="space-y-2">
+                <SidebarMarkdownContent
+                  content={partsText}
                   isStreaming={data.isPending}
-                  isLast={index === data.parts!.length - 1}
+                  expandable={false}
                 />
-              ))}
-            </div>
+                <button
+                  type="button"
+                  onClick={() => setShowFullProcess(true)}
+                  className="inline-flex min-h-8 items-center gap-1.5 rounded-md border border-theme-border bg-theme-bg-card px-2.5 text-xs font-medium text-theme-text-secondary transition-colors hover:bg-theme-bg-subtle hover:text-theme-text"
+                >
+                  <Maximize2 size={12} />
+                  {t("common.expand", "Expand")}
+                </button>
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {data.parts.map((part, index) => (
+                  <MessagePartRenderer
+                    key={index}
+                    part={part}
+                    messageId={createSubagentAnchorOwnerId(agentId)}
+                    partIndex={index}
+                    isStreaming={data.isPending}
+                    isLast={index === data.parts!.length - 1}
+                  />
+                ))}
+              </div>
+            )}
           </CollapsibleSection>
         )}
         {data.error && effectiveStatus === "error" && (
@@ -571,7 +655,7 @@ function SubagentPanelContent({ agentId }: { agentId: string }) {
             action={<CopyButton text={data.result} />}
           >
             <div className="text-sm text-stone-700 dark:text-stone-300 leading-relaxed">
-              <MarkdownContent content={data.result} />
+              <SidebarMarkdownContent content={data.result} />
             </div>
           </CollapsibleSection>
         )}
@@ -583,6 +667,16 @@ function SubagentPanelContent({ agentId }: { agentId: string }) {
         )}
         <div ref={bottomRef} className="h-px" />
       </div>
+      {showScrollToBottom && (
+        <button
+          type="button"
+          onClick={handleJumpToBottom}
+          className="sticky bottom-3 left-1/2 z-10 mt-3 inline-flex min-h-9 -translate-x-1/2 items-center gap-1.5 rounded-full border border-theme-border bg-theme-bg-card/95 px-3 text-xs font-medium text-theme-text-secondary shadow-lg backdrop-blur transition-colors hover:bg-theme-bg-subtle hover:text-theme-text"
+        >
+          <ArrowDown size={13} />
+          {t("common.scrollToBottom")}
+        </button>
+      )}
     </div>
   );
 }
@@ -613,7 +707,10 @@ export function ThinkingBlock({
         status,
         children: (
           <div className="p-3 sm:p-4 [&_.markdown-preview]:thinking-content">
-            <MarkdownContent content={content} isStreaming={isStreaming} />
+            <SidebarMarkdownContent
+              content={content}
+              isStreaming={isStreaming}
+            />
           </div>
         ),
       }),
@@ -649,7 +746,10 @@ export function ThinkingBlock({
           panelKey,
           children: (
             <div className="p-3 sm:p-4 [&_.markdown-preview]:thinking-content">
-              <MarkdownContent content={content} isStreaming={isStreaming} />
+              <SidebarMarkdownContent
+                content={content}
+                isStreaming={isStreaming}
+              />
             </div>
           ),
         });

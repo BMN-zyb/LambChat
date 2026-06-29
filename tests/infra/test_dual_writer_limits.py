@@ -27,6 +27,10 @@ def test_dual_writer_limits_follow_runtime_settings(monkeypatch) -> None:
     assert dual_writer._get_ttl_set_keys_max() == 456
 
 
+def test_dual_writer_keeps_fifty_thousand_events_per_trace_by_default() -> None:
+    assert dual_writer._get_max_events_per_trace() == 50_000
+
+
 def test_dual_writer_live_stream_read_timeout_is_24_hours() -> None:
     assert dual_writer._LIVE_STREAM_READ_TIMEOUT_SECONDS == 24 * 60 * 60
 
@@ -397,7 +401,299 @@ async def test_flush_mongo_buffer_offloads_bulk_operation_building(
 
 
 @pytest.mark.asyncio
-async def test_mongo_buffer_overflow_updates_diagnostics(
+async def test_flush_mongo_buffer_writes_chunks_when_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        dual_writer.settings,
+        "SESSION_EVENT_CHUNK_STORAGE_ENABLED",
+        True,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        dual_writer.settings,
+        "SESSION_EVENT_CHUNK_DUAL_WRITE_LEGACY",
+        False,
+        raising=False,
+    )
+
+    class _FakeTrace:
+        def __init__(self) -> None:
+            self.collection = object()
+            self.reservations: list[tuple[str, int]] = []
+            self.chunk_appends: list[tuple[dict, list[dict], int]] = []
+
+        async def reserve_event_sequence_range(self, trace_id: str, event_count: int):
+            self.reservations.append((trace_id, event_count))
+            return {
+                "trace_id": trace_id,
+                "session_id": "session-1",
+                "run_id": "run-1",
+                "event_count": event_count,
+            }
+
+        async def append_events_to_chunks(
+            self,
+            trace_doc: dict,
+            events: list[dict],
+            start_seq: int,
+        ) -> None:
+            self.chunk_appends.append((trace_doc, events, start_seq))
+
+    writer = dual_writer.DualEventWriter()
+    writer._trace = _FakeTrace()
+    writer._mongo_buffer = [
+        (
+            "trace-1",
+            "message:chunk",
+            {"content": "a"},
+            "session-1",
+            "run-1",
+            datetime(2026, 1, 1),
+        ),
+        (
+            "trace-1",
+            "done",
+            {},
+            "session-1",
+            "run-1",
+            datetime(2026, 1, 1),
+        ),
+    ]
+
+    await writer._do_flush()
+
+    assert writer.trace.reservations == [("trace-1", 2)]
+    trace_doc, events, start_seq = writer.trace.chunk_appends[0]
+    assert trace_doc["trace_id"] == "trace-1"
+    assert [event["event_type"] for event in events] == ["message:chunk", "done"]
+    assert start_seq == 1
+    assert writer._mongo_buffer == []
+
+
+@pytest.mark.asyncio
+async def test_flush_mongo_buffer_uses_legacy_path_when_chunk_storage_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        dual_writer.settings,
+        "SESSION_EVENT_CHUNK_STORAGE_ENABLED",
+        False,
+        raising=False,
+    )
+
+    class _FakeCollection:
+        def __init__(self) -> None:
+            self.operations = []
+
+        async def bulk_write(self, operations, ordered: bool = False):
+            del ordered
+            self.operations.extend(operations)
+            return type("_Result", (), {"modified_count": len(operations), "upserted_count": 0})()
+
+    class _FakeTrace:
+        def __init__(self) -> None:
+            self.collection = _FakeCollection()
+
+        async def reserve_event_sequence_range(self, trace_id: str, event_count: int):
+            raise AssertionError("legacy path must not reserve chunk sequence ranges")
+
+        async def append_events_to_chunks(
+            self,
+            trace_doc: dict,
+            events: list[dict],
+            start_seq: int,
+        ) -> None:
+            raise AssertionError("legacy path must not append chunk events")
+
+    writer = dual_writer.DualEventWriter()
+    writer._trace = _FakeTrace()
+    writer._mongo_buffer = [
+        (
+            "trace-1",
+            "message:chunk",
+            {"content": "a"},
+            "session-1",
+            "run-1",
+            datetime(2026, 1, 1),
+        )
+    ]
+
+    await writer._do_flush()
+
+    assert len(writer.trace.collection.operations) == 1
+    assert writer._mongo_buffer == []
+
+
+@pytest.mark.asyncio
+async def test_flush_mongo_buffer_requeues_failed_chunk_writes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        dual_writer.settings,
+        "SESSION_EVENT_CHUNK_STORAGE_ENABLED",
+        True,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        dual_writer.settings,
+        "SESSION_EVENT_CHUNK_DUAL_WRITE_LEGACY",
+        False,
+        raising=False,
+    )
+
+    class _FakeTrace:
+        collection = object()
+
+        async def reserve_event_sequence_range(self, trace_id: str, event_count: int):
+            del trace_id, event_count
+            return None
+
+    writer = dual_writer.DualEventWriter()
+    writer._trace = _FakeTrace()
+    event = (
+        "trace-1",
+        "message:chunk",
+        {"content": "a"},
+        "session-1",
+        "run-1",
+        datetime(2026, 1, 1),
+    )
+    writer._mongo_buffer = [event]
+
+    await writer._do_flush()
+
+    assert writer._mongo_buffer == [event]
+
+
+@pytest.mark.asyncio
+async def test_flush_mongo_buffer_dual_writes_legacy_when_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        dual_writer.settings,
+        "SESSION_EVENT_CHUNK_STORAGE_ENABLED",
+        True,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        dual_writer.settings,
+        "SESSION_EVENT_CHUNK_DUAL_WRITE_LEGACY",
+        True,
+        raising=False,
+    )
+
+    class _FakeCollection:
+        def __init__(self) -> None:
+            self.operations = []
+
+        async def bulk_write(self, operations, ordered: bool = False):
+            del ordered
+            self.operations.extend(operations)
+            return type("_Result", (), {"modified_count": len(operations), "upserted_count": 0})()
+
+    class _FakeTrace:
+        def __init__(self) -> None:
+            self.collection = _FakeCollection()
+
+        async def reserve_event_sequence_range(self, trace_id: str, event_count: int):
+            return {
+                "trace_id": trace_id,
+                "session_id": "session-1",
+                "run_id": "run-1",
+                "event_count": event_count,
+            }
+
+        async def append_events_to_chunks(
+            self,
+            trace_doc: dict,
+            events: list[dict],
+            start_seq: int,
+        ) -> None:
+            del trace_doc, events, start_seq
+
+    writer = dual_writer.DualEventWriter()
+    writer._trace = _FakeTrace()
+    writer._mongo_buffer = [
+        (
+            "trace-1",
+            "message:chunk",
+            {"content": "a"},
+            "session-1",
+            "run-1",
+            datetime(2026, 1, 1),
+        )
+    ]
+
+    await writer._do_flush()
+
+    assert len(writer.trace.collection.operations) == 1
+
+
+@pytest.mark.asyncio
+async def test_flush_mongo_buffer_dual_write_preserves_legacy_when_chunk_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        dual_writer.settings,
+        "SESSION_EVENT_CHUNK_STORAGE_ENABLED",
+        True,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        dual_writer.settings,
+        "SESSION_EVENT_CHUNK_DUAL_WRITE_LEGACY",
+        True,
+        raising=False,
+    )
+
+    class _FakeCollection:
+        def __init__(self) -> None:
+            self.operations = []
+
+        async def bulk_write(self, operations, ordered: bool = False):
+            del ordered
+            self.operations.extend(operations)
+            return type("_Result", (), {"modified_count": len(operations), "upserted_count": 0})()
+
+    class _FakeTrace:
+        def __init__(self) -> None:
+            self.collection = _FakeCollection()
+
+        async def reserve_event_sequence_range(self, trace_id: str, event_count: int):
+            del event_count
+            return {"trace_id": trace_id, "event_count": 1}
+
+        async def append_events_to_chunks(
+            self,
+            trace_doc: dict,
+            events: list[dict],
+            start_seq: int,
+        ) -> None:
+            del trace_doc, events, start_seq
+            raise RuntimeError("chunk write unavailable")
+
+    writer = dual_writer.DualEventWriter()
+    writer._trace = _FakeTrace()
+    writer._mongo_buffer = [
+        (
+            "trace-1",
+            "message:chunk",
+            {"content": "a"},
+            "session-1",
+            "run-1",
+            datetime(2026, 1, 1),
+        )
+    ]
+
+    await writer._do_flush()
+
+    assert len(writer.trace.collection.operations) == 1
+    assert writer._mongo_buffer == []
+
+
+@pytest.mark.asyncio
+async def test_mongo_buffer_overflow_flushes_instead_of_dropping(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(dual_writer, "_get_mongo_buffer_max", lambda: 4)
@@ -416,6 +712,14 @@ async def test_mongo_buffer_overflow_updates_diagnostics(
         )
         for index in range(4)
     ]
+    flush_calls = 0
+
+    async def _fake_flush_mongo_buffer() -> None:
+        nonlocal flush_calls
+        flush_calls += 1
+        writer._mongo_buffer = []
+
+    writer.flush_mongo_buffer = _fake_flush_mongo_buffer  # type: ignore[method-assign]
 
     await writer.write_event(
         session_id="session-1",
@@ -427,9 +731,34 @@ async def test_mongo_buffer_overflow_updates_diagnostics(
 
     diagnostics = writer.get_diagnostics()
 
-    assert diagnostics["mongo_buffer_dropped_total"] == 2
-    assert diagnostics["mongo_buffer_last_drop"]["dropped_count"] == 2
-    assert diagnostics["mongo_buffer_size"] == 3
+    assert flush_calls == 1
+    assert diagnostics["mongo_buffer_dropped_total"] == 0
+    assert diagnostics["mongo_buffer_last_drop"] is None
+    assert diagnostics["mongo_buffer_size"] == 1
+
+
+@pytest.mark.asyncio
+async def test_terminal_events_flush_mongo_buffer_immediately() -> None:
+    writer = dual_writer.DualEventWriter()
+    writer._redis = _FakeRedis()
+    flush_calls = 0
+
+    async def _fake_flush_mongo_buffer() -> None:
+        nonlocal flush_calls
+        flush_calls += 1
+        writer._mongo_buffer = []
+
+    writer.flush_mongo_buffer = _fake_flush_mongo_buffer  # type: ignore[method-assign]
+
+    await writer.write_event(
+        session_id="session-1",
+        event_type="done",
+        data={},
+        trace_id="trace-1",
+        run_id="run-1",
+    )
+
+    assert flush_calls == 1
 
 
 @pytest.mark.asyncio

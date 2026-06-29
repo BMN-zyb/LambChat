@@ -17,6 +17,14 @@ class _FakeTraceCollection:
         return SimpleNamespace(modified_count=1)
 
 
+class _FakeMerger:
+    def __init__(self) -> None:
+        self.schedule_calls = 0
+
+    def schedule_merge_once(self) -> None:
+        self.schedule_calls += 1
+
+
 class _FakeTraceCursor:
     def __init__(self, docs):
         self._docs = list(docs)
@@ -66,12 +74,10 @@ class _FakeRunSummaryCollection:
                     "completed_at": "2026-04-25T00:01:00Z",
                     "status": "completed",
                     "event_count": 3,
-                    "events": [
-                        {
-                            "event_type": "user:message",
-                            "data": {"content": "a message longer than twenty chars"},
-                        }
-                    ],
+                    "first_user_message_preview": {
+                        "event_type": "user:message",
+                        "data": {"content": "a message longer than twenty chars"},
+                    },
                 },
             ]
         )
@@ -127,6 +133,16 @@ class _FakeSessionEventsAggregationCollection:
     def __init__(self):
         self.aggregate_calls = []
         self.find_calls = []
+        self.find_one_calls = []
+        self.cursor = _FakeTraceCursor(
+            [
+                {
+                    "trace_id": "trace-1",
+                    "run_id": "run-1",
+                    "started_at": "2026-04-25T00:00:00Z",
+                }
+            ]
+        )
 
     def aggregate(self, pipeline):
         self.aggregate_calls.append(pipeline)
@@ -149,9 +165,29 @@ class _FakeSessionEventsAggregationCollection:
             ]
         )
 
-    def find(self, *args, **kwargs):
-        self.find_calls.append((args, kwargs))
-        raise AssertionError("bounded session event reads should not load trace documents")
+    def find(self, query, projection):
+        self.find_calls.append((query, projection))
+        return self.cursor
+
+    async def find_one(self, query, projection):
+        self.find_one_calls.append((query, projection))
+        if query.get("trace_id") == "trace-1":
+            return {
+                "trace_id": "trace-1",
+                "events": [
+                    {
+                        "event_type": "user:message",
+                        "data": {"content": "hello"},
+                        "timestamp": "2026-04-25T00:00:00Z",
+                    },
+                    {
+                        "event_type": "done",
+                        "data": {},
+                        "timestamp": "2026-04-25T00:00:01Z",
+                    },
+                ],
+            }
+        return None
 
 
 class _FakeTraceEventAggregationCollection:
@@ -172,7 +208,12 @@ class _FakeTraceEventAggregationCollection:
 
     async def find_one(self, *args, **kwargs):
         self.find_one_calls.append((args, kwargs))
-        raise AssertionError("bounded trace event read should not load full trace document")
+        return {"trace_id": "trace-1", "events": self._docs}
+
+
+class _FakeEmptyChunkCollection:
+    async def find_one(self, *args, **kwargs):
+        return None
 
 
 def _usage_event_from_pipeline(update):
@@ -228,7 +269,18 @@ async def test_complete_trace_can_skip_zero_token_usage_placeholder() -> None:
 
 
 @pytest.mark.asyncio
-async def test_list_run_summaries_projects_first_user_message_only() -> None:
+async def test_complete_trace_schedules_immediate_event_merge() -> None:
+    storage = TraceStorage()
+    storage._collection = _FakeTraceCollection(has_usage=False)
+    storage._merger = _FakeMerger()
+
+    assert await storage.complete_trace("trace-1", status="completed") is True
+
+    assert storage._merger.schedule_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_list_run_summaries_uses_first_user_message_preview() -> None:
     storage = TraceStorage()
     storage._collection = _FakeRunSummaryCollection()
 
@@ -258,7 +310,7 @@ async def test_list_run_summaries_projects_first_user_message_only() -> None:
                 "completed_at": 1,
                 "status": 1,
                 "event_count": 1,
-                "events": {"$elemMatch": {"event_type": "user:message"}},
+                "first_user_message_preview": 1,
             },
         )
     ]
@@ -317,6 +369,7 @@ async def test_get_session_events_uses_server_side_limit_when_max_events_is_set(
     storage = TraceStorage()
     collection = _FakeSessionEventsAggregationCollection()
     storage._collection = collection
+    storage._chunks_collection = _FakeEmptyChunkCollection()
 
     events = await storage.get_session_events(
         "session-1",
@@ -341,40 +394,16 @@ async def test_get_session_events_uses_server_side_limit_when_max_events_is_set(
             "timestamp": "2026-04-25T00:00:01Z",
         },
     ]
-    assert collection.find_calls == []
-    assert collection.aggregate_calls == [
-        [
+    assert collection.aggregate_calls == []
+    assert collection.find_calls == [
+        (
             {
-                "$match": {
-                    "session_id": "session-1",
-                    "run_id": {"$in": ["run-1"]},
-                    "status": {"$ne": "running"},
-                }
+                "session_id": "session-1",
+                "run_id": {"$in": ["run-1"]},
+                "status": {"$ne": "running"},
             },
-            {"$sort": {"started_at": 1}},
-            {
-                "$project": {
-                    "trace_id": 1,
-                    "run_id": 1,
-                    "events.event_type": 1,
-                    "events.data": 1,
-                    "events.timestamp": 1,
-                }
-            },
-            {"$unwind": "$events"},
-            {"$match": {"events.event_type": {"$in": ["user:message", "done"]}}},
-            {"$limit": 2},
-            {
-                "$project": {
-                    "_id": 0,
-                    "trace_id": 1,
-                    "run_id": 1,
-                    "event_type": "$events.event_type",
-                    "data": "$events.data",
-                    "timestamp": "$events.timestamp",
-                }
-            },
-        ]
+            {"_id": 0, "trace_id": 1, "run_id": 1, "started_at": 1},
+        )
     ]
 
 
@@ -383,11 +412,11 @@ async def test_get_session_events_clamps_requested_max_events() -> None:
     storage = TraceStorage()
     collection = _FakeSessionEventsAggregationCollection()
     storage._collection = collection
+    storage._chunks_collection = _FakeEmptyChunkCollection()
 
-    await storage.get_session_events("session-1", max_events=100_000)
+    events = await storage.get_session_events("session-1", max_events=1)
 
-    pipeline = collection.aggregate_calls[0]
-    assert {"$limit": 5000} in pipeline
+    assert len(events) == 1
 
 
 @pytest.mark.asyncio
@@ -395,13 +424,12 @@ async def test_get_session_events_does_not_limit_when_max_events_is_unset() -> N
     storage = TraceStorage()
     collection = _FakeSessionEventsAggregationCollection()
     storage._collection = collection
+    storage._chunks_collection = _FakeEmptyChunkCollection()
 
     events = await storage.get_session_events("session-1")
 
     assert len(events) == 2
-    assert collection.find_calls == []
-    pipeline = collection.aggregate_calls[0]
-    assert not any("$limit" in stage for stage in pipeline)
+    assert collection.aggregate_calls == []
 
 
 @pytest.mark.asyncio
@@ -414,6 +442,7 @@ async def test_get_session_events_bounds_run_ids_and_event_types(
     storage = TraceStorage()
     collection = _FakeSessionEventsAggregationCollection()
     storage._collection = collection
+    storage._chunks_collection = _FakeEmptyChunkCollection()
 
     await storage.get_session_events(
         "session-1",
@@ -422,15 +451,11 @@ async def test_get_session_events_bounds_run_ids_and_event_types(
         max_events=2,
     )
 
-    pipeline = collection.aggregate_calls[0]
-    assert pipeline[0] == {
-        "$match": {
-            "session_id": "session-1",
-            "run_id": {"$in": ["run-1", "run-2"]},
-            "status": {"$ne": "running"},
-        }
+    assert collection.find_calls[0][0] == {
+        "session_id": "session-1",
+        "run_id": {"$in": ["run-1", "run-2"]},
+        "status": {"$ne": "running"},
     }
-    assert pipeline[4] == {"$match": {"events.event_type": {"$in": ["user:message", "done"]}}}
 
 
 @pytest.mark.asyncio
@@ -522,10 +547,11 @@ async def test_get_last_trace_event_uses_server_side_sort_and_limit() -> None:
 
 
 @pytest.mark.asyncio
-async def test_get_trace_events_uses_aggregation_without_loading_full_trace() -> None:
+async def test_get_trace_events_falls_back_to_legacy_events() -> None:
     storage = TraceStorage()
     collection = _FakeTraceEventAggregationCollection()
     storage._collection = collection
+    storage._chunks_collection = _FakeEmptyChunkCollection()
 
     events = await storage.get_trace_events("trace-1", event_types=["user:message"])
 
@@ -536,51 +562,40 @@ async def test_get_trace_events_uses_aggregation_without_loading_full_trace() ->
             "timestamp": "2026-04-25T00:00:00Z",
         }
     ]
-    assert collection.find_one_calls == []
-    assert collection.aggregate_calls == [
-        [
-            {"$match": {"trace_id": "trace-1"}},
-            {
-                "$project": {
-                    "events.event_type": 1,
-                    "events.data": 1,
-                    "events.timestamp": 1,
-                }
-            },
-            {"$unwind": "$events"},
-            {"$match": {"events.event_type": {"$in": ["user:message"]}}},
-            {"$limit": 1000},
-            {
-                "$project": {
-                    "_id": 0,
-                    "event_type": "$events.event_type",
-                    "data": "$events.data",
-                    "timestamp": "$events.timestamp",
-                }
-            },
-        ]
-    ]
+    assert collection.aggregate_calls == []
+    assert collection.find_one_calls == [(({"trace_id": "trace-1"}, {"_id": 0, "events": 1}), {})]
 
 
 @pytest.mark.asyncio
-async def test_get_trace_events_applies_default_server_side_limit() -> None:
+async def test_get_trace_events_does_not_limit_by_default() -> None:
     storage = TraceStorage()
-    collection = _FakeTraceEventAggregationCollection()
+    collection = _FakeTraceEventAggregationCollection(
+        docs=[
+            {"event_type": "message", "data": {"content": "a"}, "timestamp": "t1"},
+            {"event_type": "message", "data": {"content": "b"}, "timestamp": "t2"},
+        ]
+    )
     storage._collection = collection
+    storage._chunks_collection = _FakeEmptyChunkCollection()
 
-    await storage.get_trace_events("trace-1")
+    events = await storage.get_trace_events("trace-1")
 
-    pipeline = collection.aggregate_calls[0]
-    assert {"$limit": 1000} in pipeline
+    assert [event["data"]["content"] for event in events] == ["a", "b"]
+    assert collection.aggregate_calls == []
 
 
 @pytest.mark.asyncio
 async def test_get_trace_events_clamps_requested_max_events() -> None:
     storage = TraceStorage()
-    collection = _FakeTraceEventAggregationCollection()
+    collection = _FakeTraceEventAggregationCollection(
+        docs=[
+            {"event_type": "message", "data": {"content": "a"}, "timestamp": "t1"},
+            {"event_type": "message", "data": {"content": "b"}, "timestamp": "t2"},
+        ]
+    )
     storage._collection = collection
+    storage._chunks_collection = _FakeEmptyChunkCollection()
 
-    await storage.get_trace_events("trace-1", max_events=100_000)
+    events = await storage.get_trace_events("trace-1", max_events=1)
 
-    pipeline = collection.aggregate_calls[0]
-    assert {"$limit": 5000} in pipeline
+    assert [event["data"]["content"] for event in events] == ["a"]

@@ -189,6 +189,25 @@ def chat_stream(content: str, chunk_id: str = "chunk-1", metadata: dict[str, Any
     }
 
 
+def reasoning_stream(
+    content: str,
+    chunk_id: str = "chunk-r",
+    metadata: dict[str, Any] | None = None,
+):
+    return {
+        "event": "on_chat_model_stream",
+        "name": "chat_model",
+        "data": {
+            "chunk": SimpleNamespace(
+                content="",
+                id=chunk_id,
+                additional_kwargs={"reasoning_content": content},
+            )
+        },
+        "metadata": metadata or {},
+    }
+
+
 @pytest.mark.asyncio
 async def test_finalize_flushes_pending_summary_chunk() -> None:
     presenter = FakePresenter()
@@ -261,24 +280,15 @@ async def test_output_text_keeps_bounded_copy_while_streaming_all_chunks() -> No
 
 
 @pytest.mark.asyncio
-async def test_reasoning_content_chunk_emits_thinking_event() -> None:
+async def test_reasoning_content_chunk_flushes_as_thinking_event() -> None:
     presenter = FakePresenter()
     processor = AgentEventProcessor(presenter)
 
-    await processor.process_event(
-        {
-            "event": "on_chat_model_stream",
-            "name": "chat_model",
-            "data": {
-                "chunk": SimpleNamespace(
-                    content="",
-                    id="chunk-r",
-                    additional_kwargs={"reasoning_content": "step by step"},
-                )
-            },
-            "metadata": {},
-        }
-    )
+    await processor.process_event(reasoning_stream("step by step"))
+
+    assert presenter.emitted == []
+
+    await processor.flush()
 
     assert presenter.emitted == [
         {
@@ -290,6 +300,46 @@ async def test_reasoning_content_chunk_emits_thinking_event() -> None:
                 "agent_id": None,
             },
         }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_reasoning_content_chunks_are_grouped_until_threshold() -> None:
+    presenter = FakePresenter()
+    processor = AgentEventProcessor(presenter)
+
+    await processor.process_event(reasoning_stream("a" * 100))
+    await processor.process_event(reasoning_stream("b" * 99))
+    assert presenter.emitted == []
+
+    await processor.process_event(reasoning_stream("c"))
+
+    assert presenter.emitted == [
+        {
+            "event": "thinking",
+            "data": {
+                "content": ("a" * 100) + ("b" * 99) + "c",
+                "thinking_id": "chunk-r",
+                "depth": 0,
+                "agent_id": None,
+            },
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_text_chunk_flushes_pending_thinking_first() -> None:
+    presenter = FakePresenter()
+    processor = AgentEventProcessor(presenter)
+
+    await processor.process_event(reasoning_stream("thinking first"))
+    await processor.process_event(chat_stream("final answer", "chunk-text"))
+    await processor.flush()
+
+    assert [event["event"] for event in presenter.emitted] == ["thinking", "message:chunk"]
+    assert [event["data"]["content"] for event in presenter.emitted] == [
+        "thinking first",
+        "final answer",
     ]
 
 

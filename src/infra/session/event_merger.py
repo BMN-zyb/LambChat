@@ -63,6 +63,13 @@ def _get_merge_timeout() -> float:
     return max(float(getattr(settings, "EVENT_MERGE_TIMEOUT_SECONDS", MERGE_TIMEOUT) or 0), 1.0)
 
 
+def _get_immediate_merge_debounce_seconds() -> float:
+    return max(
+        float(getattr(settings, "EVENT_MERGE_IMMEDIATE_DEBOUNCE_SECONDS", 2.0) or 0),
+        0.0,
+    )
+
+
 def _get_merge_batch_size() -> int:
     return max(int(getattr(settings, "EVENT_MERGE_BATCH_SIZE", BATCH_SIZE) or 0), 1)
 
@@ -72,7 +79,7 @@ def _get_merge_concurrency() -> int:
 
 
 def _get_merge_max_events_per_trace() -> int:
-    return max(int(getattr(settings, "EVENT_MERGE_MAX_EVENTS_PER_TRACE", 5000) or 0), 1)
+    return max(int(getattr(settings, "EVENT_MERGE_MAX_EVENTS_PER_TRACE", 50000) or 0), 1)
 
 
 class EventMerger:
@@ -93,6 +100,7 @@ class EventMerger:
         self.trace_storage = trace_storage
         self._running = False
         self._task: Optional[asyncio.Task] = None
+        self._merge_once_task: Optional[asyncio.Task] = None
         self._redis = None
         self._lock_value: Optional[str] = None  # 锁的唯一标识
 
@@ -118,35 +126,65 @@ class EventMerger:
                 await self._task
             except asyncio.CancelledError:
                 pass
+        if self._merge_once_task and not self._merge_once_task.done():
+            self._merge_once_task.cancel()
+            try:
+                await self._merge_once_task
+            except asyncio.CancelledError:
+                pass
+        self._merge_once_task = None
         if self._redis is not None:
             await self._redis.aclose()
             self._redis = None
         logger.info("EventMerger stopped")
 
+    def schedule_merge_once(self) -> None:
+        """Request an immediate one-shot merge without blocking the caller."""
+        if self._merge_once_task is not None and not self._merge_once_task.done():
+            return
+        self._merge_once_task = asyncio.create_task(self._debounced_merge_once())
+        self._merge_once_task.add_done_callback(self._on_merge_once_task_done)
+
+    def _on_merge_once_task_done(self, task: asyncio.Task) -> None:
+        if self._merge_once_task is task:
+            self._merge_once_task = None
+        if task.cancelled():
+            return
+        try:
+            exc = task.exception()
+        except asyncio.CancelledError:
+            return
+        if exc is not None:
+            logger.warning("Immediate event merge failed: %s", exc)
+
+    async def _debounced_merge_once(self) -> None:
+        delay = _get_immediate_merge_debounce_seconds()
+        if delay > 0:
+            await asyncio.sleep(delay)
+        await self.merge_once()
+
+    async def merge_once(self) -> None:
+        """Run one merge pass if this instance can acquire the distributed lock."""
+        if not settings.ENABLE_EVENT_MERGER:
+            return
+        if not await self._acquire_lock():
+            return
+        try:
+            merge_timeout = _get_merge_timeout()
+            async with asyncio.timeout(merge_timeout):
+                await self._merge_completed_traces()
+        except TimeoutError:
+            logger.warning(
+                f"Immediate merge operation timed out after {merge_timeout}s, will retry later"
+            )
+        finally:
+            await self._release_lock()
+
     async def _merge_loop(self):
         """后台合并循环 - 非阻塞设计，首次立即执行"""
         while self._running:
             try:
-                # 尝试获取分布式锁
-                if await self._acquire_lock():
-                    try:
-                        # 使用 asyncio.timeout 防止合并操作超时
-                        merge_timeout = _get_merge_timeout()
-                        async with asyncio.timeout(merge_timeout):
-                            await self._merge_completed_traces()
-                    except TimeoutError:
-                        logger.warning(
-                            f"Merge operation timed out after {merge_timeout}s, will retry next round"
-                        )
-                    except Exception as e:
-                        logger.error(f"Merge operation failed: {e}", exc_info=True)
-                    finally:
-                        # 确保释放锁
-                        await self._release_lock()
-                else:
-                    logger.debug(
-                        "Failed to acquire merge lock (another instance is merging), skipping this round"
-                    )
+                await self.merge_once()
 
                 # 等待到下一个合并时间点（放到循环末尾，首次立即执行）
                 await asyncio.sleep(_get_merge_interval())
@@ -253,7 +291,14 @@ class EventMerger:
                         {"event_count": {"$exists": False}},
                     ],
                 },
-                {"trace_id": 1, "events": 1, "event_count": 1},
+                {
+                    "trace_id": 1,
+                    "session_id": 1,
+                    "run_id": 1,
+                    "started_at": 1,
+                    "event_count": 1,
+                    "metadata": 1,
+                },
             ).limit(batch_size)
 
             trace_batch: list[dict[str, Any]] = []
@@ -345,15 +390,23 @@ class EventMerger:
                     skipped_count += 1
                     continue
 
-                trace_id, original_events, merged_events = r
+                trace_id, original_events, merged_events, trace_doc = (
+                    r if len(r) == 4 else (r[0], r[1], r[2], {"trace_id": r[0]})
+                )
                 update_fields: Dict[str, Any] = {
                     "metadata.merged": True,
                     "metadata.merged_at": now,
                     "updated_at": now,
                 }
                 if len(merged_events) < len(original_events):
-                    update_fields["events"] = merged_events
-                    update_fields["event_count"] = len(merged_events)
+                    if getattr(settings, "SESSION_EVENT_CHUNK_STORAGE_ENABLED", False):
+                        await self.trace_storage.replace_trace_events_with_chunks(
+                            trace_doc,
+                            merged_events,
+                        )
+                    else:
+                        update_fields["events"] = merged_events
+                        update_fields["event_count"] = len(merged_events)
                     merged_count += 1
                 else:
                     skipped_count += 1
@@ -390,11 +443,20 @@ class EventMerger:
                 try:
                     trace_id = trace.get("trace_id")
                     events = trace.get("events", [])
+                    if (
+                        not events
+                        and trace_id
+                        and hasattr(
+                            self.trace_storage,
+                            "read_trace_events_compat",
+                        )
+                    ):
+                        events = await self.trace_storage.read_trace_events_compat(trace_id)
                     if not events:
-                        results.append((trace_id, [], []))
+                        results.append((trace_id, [], [], trace))
                         continue
                     merged_events = await run_blocking_io(self._merge_events, events)
-                    results.append((trace_id, events, merged_events))
+                    results.append((trace_id, events, merged_events, trace))
                 except Exception as exc:
                     results.append(exc)
 
