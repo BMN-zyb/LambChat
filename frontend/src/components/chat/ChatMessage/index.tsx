@@ -3,6 +3,7 @@ import { useEffect, useRef, useState, memo } from "react";
 import { createPortal } from "react-dom";
 import toast from "react-hot-toast";
 import { Copy, GitBranch, Info, Sparkles, Target } from "lucide-react";
+import { useStickyDropdownPosition } from "../../../hooks/useStickyDropdownPosition";
 import type {
   Message,
   MessagePart,
@@ -36,6 +37,7 @@ import { createMessageAnchorId } from "../../layout/AppContent/messageOutline";
 import { formatDateTime, formatDateTimeShort } from "../../../utils/datetime";
 import { copyToClipboard } from "../../../utils/clipboard";
 import { shouldShowGoalDetailsForMessage } from "../goalVisibility";
+import { areChatMessagePropsEqual } from "./messageMemo";
 
 // Skeleton-style loading animation component - refined thin lines
 function ThinkingIndicator() {
@@ -268,41 +270,27 @@ function GoalDetailsButton({
 }) {
   const { t } = useTranslation();
   const [showDetails, setShowDetails] = useState(false);
-  const [popupPos, setPopupPos] = useState<{
-    top: number;
-    right: number;
-    flipBelow: boolean;
-  } | null>(null);
   const buttonRef = useRef<HTMLButtonElement>(null);
   const popupRef = useRef<HTMLDivElement>(null);
 
-  useEffect(() => {
-    if (!showDetails) return;
-    const updatePosition = () => {
-      const rect = buttonRef.current?.getBoundingClientRect();
-      if (rect) {
-        const popupHeight = popupRef.current?.offsetHeight ?? 200;
-        const popupWidth = 256;
-        const spaceAbove = rect.top;
-        const spaceBelow = window.innerHeight - rect.bottom;
-        const flipBelow =
-          spaceAbove < popupHeight + 8 && spaceBelow > spaceAbove;
-        const rightAlign = window.innerWidth - rect.right;
-        setPopupPos({
-          top: flipBelow ? rect.bottom + 8 : rect.top - 16,
-          right: Math.min(rightAlign, window.innerWidth - popupWidth - 8),
-          flipBelow,
-        });
-      }
-    };
-    updatePosition();
-    window.addEventListener("scroll", updatePosition, true);
-    window.addEventListener("resize", updatePosition);
-    return () => {
-      window.removeEventListener("scroll", updatePosition, true);
-      window.removeEventListener("resize", updatePosition);
-    };
-  }, [showDetails]);
+  const popupStyle = useStickyDropdownPosition(
+    buttonRef,
+    showDetails,
+    (rect) => {
+      const popupHeight = popupRef.current?.offsetHeight ?? 200;
+      const popupWidth = 256;
+      const spaceAbove = rect.top;
+      const spaceBelow = window.innerHeight - rect.bottom;
+      const flipBelow = spaceAbove < popupHeight + 8 && spaceBelow > spaceAbove;
+      const rightAlign = window.innerWidth - rect.right;
+      return {
+        position: "fixed",
+        top: flipBelow ? rect.bottom + 8 : rect.top - 16,
+        right: Math.min(rightAlign, window.innerWidth - popupWidth - 8),
+        transform: flipBelow ? "translateY(0)" : "translateY(-100%)",
+      };
+    },
+  );
 
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
@@ -373,18 +361,11 @@ function GoalDetailsButton({
         <Target size={16} />
       </button>
       {showDetails &&
-        popupPos &&
+        Object.keys(popupStyle).length > 0 &&
         createPortal(
           <div
             ref={popupRef}
-            style={{
-              position: "fixed",
-              top: popupPos.top,
-              right: popupPos.right,
-              transform: popupPos.flipBelow
-                ? "translateY(0)"
-                : "translateY(-100%)",
-            }}
+            style={popupStyle}
             className={clsx(
               "z-[100] w-64 p-3 rounded-lg shadow-lg",
               "bg-theme-bg-card",
@@ -527,7 +508,7 @@ export const ChatMessage = memo(function ChatMessage({
             />
             <span
               className="min-w-0 truncate text-base sm:text-lg font-semibold leading-none tracking-tight font-serif"
-              style={{ color: "var(--theme-text)" }}
+              style={{ color: "var(--color-text-secondary)" }}
             >
               {personaName || t("chat.message.assistant")}
             </span>
@@ -631,7 +612,7 @@ export const ChatMessage = memo(function ChatMessage({
         </div>
         {/* Copy button and Token button - same line at bottom, show on message hover (only after message completes) */}
         {!message.isStreaming && (
-          <div className="flex items-center gap-1 pb-2">
+          <div className="chat-message-actions flex items-center gap-1 pb-2">
             <button
               onClick={() => {
                 const textContent = getAssistantTextContent();
@@ -728,4 +709,4 @@ export const ChatMessage = memo(function ChatMessage({
       </div>
     </div>
   );
-});
+}, areChatMessagePropsEqual);

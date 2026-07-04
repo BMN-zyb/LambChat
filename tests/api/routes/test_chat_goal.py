@@ -32,7 +32,7 @@ def test_build_conversation_config_does_not_persist_run_scoped_goal() -> None:
 
 
 def test_build_conversation_config_persists_trace_id_for_cancellation_recovery() -> None:
-    request = AgentRequest(message="continue")
+    request = AgentRequest(message="continue", auto_mode=True)
 
     config = build_conversation_config(
         run_id="run-1",
@@ -44,6 +44,7 @@ def test_build_conversation_config_persists_trace_id_for_cancellation_recovery()
     )
 
     assert config["trace_id"] == "trace-1"
+    assert config["auto_mode"] is True
 
 
 def test_resolve_goal_for_request_uses_request_goal_without_rewriting_message() -> None:
@@ -220,3 +221,37 @@ async def test_execute_agent_stream_runs_agent_when_active_goal_is_supplied(
     assert events[2]["data"]["goal"] == {"objective": "hi", "rubric": "- say hi"}
     assert events[2]["data"]["ended_at"]
     assert agent.stream_kwargs["active_goal"] == {"objective": "hi", "rubric": "- say hi"}
+
+
+@pytest.mark.asyncio
+async def test_execute_agent_stream_passes_auto_mode_to_agent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Agent:
+        def __init__(self) -> None:
+            self.stream_kwargs = None
+
+        async def stream(self, *args, **kwargs):
+            self.stream_kwargs = kwargs
+            yield {"event": "message:chunk", "data": {"content": "ok"}}
+
+    agent = _Agent()
+
+    async def _get(_agent_id: str):
+        return agent
+
+    monkeypatch.setattr("src.api.routes.chat.AgentFactory.get", _get)
+
+    events = [
+        event
+        async for event in _execute_agent_stream(
+            session_id="session-1",
+            agent_id="search",
+            message="hi",
+            user_id="user-1",
+            auto_mode=True,
+        )
+    ]
+
+    assert events == [{"event": "message:chunk", "data": {"content": "ok"}}]
+    assert agent.stream_kwargs["auto_mode"] is True

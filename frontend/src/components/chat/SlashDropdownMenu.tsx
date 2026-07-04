@@ -2,6 +2,7 @@ import { useEffect } from "react";
 import { Check, Sparkles } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { getMentionPopupFixedPlacement } from "./chatInputViewport";
+import { useStickyDropdownPosition } from "../../hooks/useStickyDropdownPosition";
 import { getCategoryIcon, nameToGradient } from "../common/cardUtils";
 import type {
   SlashDropdownItem,
@@ -155,13 +156,22 @@ export function SlashDropdownMenu({
       );
     });
 
-  const placement = getMentionPopupFixedPlacement({
-    inputRect: containerRef.current?.getBoundingClientRect() ?? null,
-    viewportHeight: window.visualViewport?.height ?? window.innerHeight,
+  const placement = useStickyDropdownPosition(containerRef, open, (rect) => {
+    const pos = getMentionPopupFixedPlacement({
+      inputRect: rect ?? null,
+      viewportHeight: window.visualViewport?.height ?? window.innerHeight,
+    });
+    if (!pos) return { display: "none" };
+    return {
+      left: pos.left,
+      width: Math.min(pos.width, 320),
+      bottom: pos.bottom,
+      maxHeight: pos.maxHeight,
+    };
   });
 
   // Fallback to absolute positioning when placement unavailable
-  if (!placement) {
+  if ("display" in placement && placement.display === "none") {
     return (
       <div
         role="listbox"
@@ -183,10 +193,7 @@ export function SlashDropdownMenu({
       role="listbox"
       className="fixed z-[100] overflow-hidden rounded-xl border shadow-lg"
       style={{
-        left: placement.left,
-        width: Math.min(placement.width, 320),
-        bottom: placement.bottom,
-        maxHeight: placement.maxHeight,
+        ...placement,
         backgroundColor: "var(--theme-bg-card)",
         borderColor: "var(--theme-border)",
         color: "var(--theme-text)",

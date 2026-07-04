@@ -1053,7 +1053,12 @@
     "submitSuccess": "Feedback submitted successfully",
     "subtitle": "Manage user feedback and ratings",
     "title": "Feedback",
-    "totalCount": "Total Count"
+    "totalCount": "Total Count",
+    "addImage": "Add images (max 9)",
+    "imageLimit": "Maximum 9 images allowed",
+    "uploadFailed": "Failed to upload image",
+    "uploading": "Uploading...",
+    "attachments": "Attachments"
   },
   "feishu": {
     "appId": "App ID",
@@ -1450,9 +1455,9 @@
       "commandPlaceholder": "npx -y @anthropic/mcp-server-fetch",
       "createServer": "Create Server",
       "dailyLimit": "Daily limit",
-      "enabled": "Enabled",
       "disableInlineExposure": "Use on-demand search",
       "enableInlineExposure": "Expose directly as function",
+      "enabled": "Enabled",
       "envKeys": "Environment Variables",
       "envKeysDescription": "Select environment variables to inject into this MCP server process. These must be pre-defined in your environment variable settings.",
       "envKeysPlaceholder": "Select environment variables...",
@@ -1582,6 +1587,14 @@
   "mermaidViewer": {
     "hideCode": "Hide code",
     "showCode": "Show code"
+  },
+  "mode": {
+    "auto": "Auto",
+    "autoDesc": "Auto-execute, skip confirmations",
+    "goal": "Goal",
+    "goalDesc": "Messages as goals for guided execution",
+    "hint": "Both modes can be active simultaneously",
+    "title": "Run Mode"
   },
   "nav": {
     "adminMarketplace": "Admin Marketplace",
@@ -2186,9 +2199,9 @@
     "ENABLE_SKILLS": "Enable skills feature",
     "EVENT_MERGE_BATCH_SIZE": "Event merge batch size",
     "EVENT_MERGE_CONCURRENCY": "Event merge concurrency",
+    "EVENT_MERGE_IMMEDIATE_DEBOUNCE_SECONDS": "Immediate event merge debounce in seconds",
     "EVENT_MERGE_INTERVAL": "Event merge interval in seconds",
     "EVENT_MERGE_MAX_EVENTS_PER_TRACE": "Maximum events per trace during event merging",
-    "EVENT_MERGE_IMMEDIATE_DEBOUNCE_SECONDS": "Immediate event merge debounce in seconds",
     "EVENT_MERGE_TIMEOUT_SECONDS": "Event merge timeout in seconds",
     "FEISHU_UPLOAD_BYTES_MAX_SIZE": "Maximum file upload size for Feishu in bytes",
     "FILE_UPLOAD_MAX_FILES": "Maximum number of files per upload",
@@ -2605,6 +2618,7 @@
     "filterDisabled": "Disabled",
     "filterEnabled": "Enabled",
     "form": {
+      "addBinaryFile": "Upload binary file",
       "addFile": "Add file",
       "content": "Content (Markdown with optional YAML frontmatter)",
       "contentPlaceholder": "# Skill instructions...",

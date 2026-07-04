@@ -182,6 +182,10 @@ export function ChatAppContent({
     switchAgent,
     selectTeam,
     selectedTeamId,
+    goalModeEnabled,
+    setGoalModeEnabled,
+    autoModeEnabled,
+    setAutoModeEnabled,
     loadHistory,
     setPendingProjectId,
     autoExpandProjectId,
@@ -926,6 +930,10 @@ export function ChatAppContent({
           activeGoal={activeGoal}
           goalsByRunId={goalsByRunId}
           onClearActiveGoal={clearActiveGoal}
+          autoModeEnabled={autoModeEnabled}
+          goalModeEnabled={goalModeEnabled}
+          onToggleAutoMode={setAutoModeEnabled}
+          onToggleGoalMode={setGoalModeEnabled}
           attachments={pageDragAttachments}
           onAttachmentsChange={setPageDragAttachments}
           externalNavigationToken={externalNavigationToken}

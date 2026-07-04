@@ -1053,7 +1053,12 @@
     "submitSuccess": "フィードバックが正常に送信されました",
     "subtitle": "システムへのフィードバック",
     "title": "フィードバック",
-    "totalCount": "合計"
+    "totalCount": "合計",
+    "addImage": "画像を追加（最大9枚）",
+    "imageLimit": "画像は最大9枚までです",
+    "uploadFailed": "画像のアップロードに失敗しました",
+    "uploading": "アップロード中...",
+    "attachments": "添付ファイル"
   },
   "feishu": {
     "appId": "App ID",
@@ -1450,9 +1455,9 @@
       "commandPlaceholder": "npx -y @anthropic/mcp-server-fetch",
       "createServer": "サーバーを作成",
       "dailyLimit": "1日の制限",
-      "enabled": "有効",
       "disableInlineExposure": "必要時検索に戻す",
       "enableInlineExposure": "関数として直接公開",
+      "enabled": "有効",
       "envKeys": "環境変数",
       "envKeysDescription": "このMCPサーバープロセスに注入する環境変数を選択してください。事前に環境変数設定で定義されている必要があります。",
       "envKeysPlaceholder": "環境変数を選択...",
@@ -1582,6 +1587,14 @@
   "mermaidViewer": {
     "hideCode": "コードを隠す",
     "showCode": "コードを表示"
+  },
+  "mode": {
+    "auto": "自動",
+    "autoDesc": "自動実行、確認をスキップ",
+    "goal": "ゴール",
+    "goalDesc": "メッセージをゴールとしてガイド実行",
+    "hint": "両モードを同時に有効にできます",
+    "title": "実行モード"
   },
   "nav": {
     "adminMarketplace": "管理マーケット",
@@ -2186,9 +2199,9 @@
     "ENABLE_SKILLS": "スキル機能を有効化",
     "EVENT_MERGE_BATCH_SIZE": "イベントマージバッチサイズ",
     "EVENT_MERGE_CONCURRENCY": "イベントマージ並行数",
+    "EVENT_MERGE_IMMEDIATE_DEBOUNCE_SECONDS": "即時イベントマージのデバウンス秒数",
     "EVENT_MERGE_INTERVAL": "イベントマージ間隔（秒）",
     "EVENT_MERGE_MAX_EVENTS_PER_TRACE": "イベントマージ時のトレースごとの最大イベント数",
-    "EVENT_MERGE_IMMEDIATE_DEBOUNCE_SECONDS": "即時イベントマージのデバウンス秒数",
     "EVENT_MERGE_TIMEOUT_SECONDS": "イベントマージタイムアウト（秒）",
     "FEISHU_UPLOAD_BYTES_MAX_SIZE": "Feishu（Lark）の最大ファイルアップロードサイズ（バイト）",
     "FILE_UPLOAD_MAX_FILES": "アップロードごとの最大ファイル数",
@@ -2605,6 +2618,7 @@
     "filterDisabled": "無効",
     "filterEnabled": "有効",
     "form": {
+      "addBinaryFile": "バイナリファイルをアップロード",
       "addFile": "ファイルを追加",
       "content": "コンテンツ（MarkdownとオプションのYAML frontmatterに対応）",
       "contentPlaceholder": "# スキル指示...",

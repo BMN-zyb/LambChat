@@ -197,6 +197,11 @@ export interface ChatViewProps {
   externalNavigationTargetRunPending?: boolean;
   externalScrollToBottom?: boolean;
   outlineToggleRef?: React.RefObject<(() => void) | null>;
+  // Run mode
+  autoModeEnabled?: boolean;
+  goalModeEnabled?: boolean;
+  onToggleAutoMode?: (enabled: boolean) => void;
+  onToggleGoalMode?: (enabled: boolean) => void;
 }
 
 export { useCurrentTeam, resolveChatAssistantIdentity };

@@ -1053,7 +1053,12 @@
     "submitSuccess": "反馈提交成功",
     "subtitle": "管理用户反馈和评价",
     "title": "反馈管理",
-    "totalCount": "反馈总数"
+    "totalCount": "反馈总数",
+    "addImage": "添加图片（最多 9 张）",
+    "imageLimit": "最多上传 9 张图片",
+    "uploadFailed": "图片上传失败",
+    "uploading": "上传中...",
+    "attachments": "附件"
   },
   "feishu": {
     "appId": "App ID",
@@ -1450,9 +1455,9 @@
       "commandPlaceholder": "npx -y @anthropic/mcp-server-fetch",
       "createServer": "创建服务器",
       "dailyLimit": "每日限制",
-      "enabled": "启用",
       "disableInlineExposure": "改为按需搜索",
       "enableInlineExposure": "直接暴露为函数",
+      "enabled": "启用",
       "envKeys": "环境变量",
       "envKeysDescription": "选择要注入到此 MCP 服务器进程的环境变量。需先在个人设置中定义。",
       "envKeysPlaceholder": "选择环境变量...",
@@ -1582,6 +1587,14 @@
   "mermaidViewer": {
     "hideCode": "隐藏代码",
     "showCode": "查看代码"
+  },
+  "mode": {
+    "auto": "自动",
+    "autoDesc": "自动执行，跳过确认",
+    "goal": "目标",
+    "goalDesc": "将消息作为目标进行引导执行",
+    "hint": "两种模式可以同时激活",
+    "title": "运行模式"
   },
   "nav": {
     "adminMarketplace": "管理员技能商店",
@@ -2186,9 +2199,9 @@
     "ENABLE_SKILLS": "启用技能功能",
     "EVENT_MERGE_BATCH_SIZE": "事件合并批量大小",
     "EVENT_MERGE_CONCURRENCY": "事件合并并发数",
+    "EVENT_MERGE_IMMEDIATE_DEBOUNCE_SECONDS": "即时事件合并防抖时间（秒）",
     "EVENT_MERGE_INTERVAL": "事件合并间隔（秒）",
     "EVENT_MERGE_MAX_EVENTS_PER_TRACE": "事件合并时每个追踪的最大事件数",
-    "EVENT_MERGE_IMMEDIATE_DEBOUNCE_SECONDS": "即时事件合并防抖时间（秒）",
     "EVENT_MERGE_TIMEOUT_SECONDS": "事件合并超时时间（秒）",
     "FEISHU_UPLOAD_BYTES_MAX_SIZE": "飞书文件上传最大大小（字节）",
     "FILE_UPLOAD_MAX_FILES": "每次上传的最大文件数",
@@ -2605,6 +2618,7 @@
     "filterDisabled": "已禁用",
     "filterEnabled": "已启用",
     "form": {
+      "addBinaryFile": "上传二进制文件",
       "addFile": "添加文件",
       "content": "内容（支持 Markdown 和可选的 YAML frontmatter）",
       "contentPlaceholder": "# 技能指令...",

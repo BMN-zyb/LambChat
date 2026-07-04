@@ -1,6 +1,7 @@
 import { createPortal } from "react-dom";
 import { useEffect, type CSSProperties } from "react";
 import { useTranslation } from "react-i18next";
+import { useStickyDropdownPosition } from "../../hooks/useStickyDropdownPosition";
 
 interface PersonaTagFilterDropdownProps {
   isOpen: boolean;
@@ -16,11 +17,7 @@ interface PersonaTagFilterDropdownProps {
 const DROPDOWN_GUTTER = 12;
 const TAG_DROPDOWN_WIDTH = 288;
 
-function getDropdownPosition(
-  trigger: HTMLButtonElement,
-  width: number,
-): CSSProperties {
-  const rect = trigger.getBoundingClientRect();
+function getDropdownPosition(rect: DOMRect, width: number): CSSProperties {
   const availableWidth = window.innerWidth - DROPDOWN_GUTTER * 2;
   const renderedWidth = Math.min(width, availableWidth);
   const left = Math.min(
@@ -60,11 +57,10 @@ export function PersonaTagFilterDropdown({
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [isOpen, onClose]);
 
-  if (!isOpen || !tagBtnRef.current) return null;
+  if (!isOpen) return null;
 
-  const dropdownStyle = getDropdownPosition(
-    tagBtnRef.current,
-    TAG_DROPDOWN_WIDTH,
+  const dropdownStyle = useStickyDropdownPosition(tagBtnRef, isOpen, (rect) =>
+    getDropdownPosition(rect, TAG_DROPDOWN_WIDTH),
   );
 
   return createPortal(

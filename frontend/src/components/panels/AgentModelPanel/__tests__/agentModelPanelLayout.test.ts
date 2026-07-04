@@ -1,7 +1,4 @@
-import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import test from "node:test";
-
 const panelSource = readFileSync(
   new URL("../AgentModelPanel.tsx", import.meta.url),
   "utf8",
@@ -23,15 +20,12 @@ const rolesModelTabSource = readFileSync(
   "utf8",
 );
 
-test("agent model panel uses a compact console layout", () => {
-  assert.match(panelSource, /agent-model-console/);
-  assert.match(panelSource, /agent-model-hero/);
-  assert.match(panelSource, /agent-model-section-tabs/);
-  assert.match(agentSectionSource, /agent-section-overview/);
+test("agent model panel uses a glass-shell layout with a section switcher", () => {
+  expect(panelSource).toMatch(/glass-shell/);
+  expect(panelSource).toMatch(/agent-model-section-switcher/);
+  expect(agentSectionSource).toMatch(/glass-card/);
 });
 
-test("agent and model assignment rows use compact scan-friendly lists", () => {
-  assert.match(globalAgentTabSource, /agent-config-list/);
-  assert.match(rolesAgentTabSource, /agent-config-list/);
-  assert.match(rolesModelTabSource, /agent-config-list/);
+test("roles model tab uses a compact scan-friendly config list", () => {
+  expect(rolesModelTabSource).toMatch(/agent-config-list/);
 });

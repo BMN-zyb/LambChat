@@ -20,6 +20,7 @@ import type { BackendSession } from "../../services/api/session";
 import type { Project } from "../../types";
 import { DynamicIcon } from "../common/DynamicIcon";
 import { useSwipeToClose } from "../../hooks/useSwipeToClose";
+import { useStickyDropdownPosition } from "../../hooks/useStickyDropdownPosition";
 import { isSidebarProject } from "../panels/SidebarParts/projectFilters";
 
 interface SessionMenuProps {
@@ -54,6 +55,24 @@ export function SessionMenu({
   const { t } = useTranslation();
   const menuRef = useRef<HTMLDivElement>(null);
   const [subPanel, setSubPanel] = useState<string | null>(null);
+  const anchorRef = useRef(anchorEl);
+  anchorRef.current = anchorEl;
+
+  const menuStyle = useStickyDropdownPosition(anchorRef, isOpen, (rect) => {
+    const spaceBelow = window.innerHeight - rect.bottom;
+    const spaceAbove = rect.top;
+    const openBelow = spaceBelow >= spaceAbove;
+    return {
+      position: "fixed",
+      ...(openBelow
+        ? { top: rect.bottom + 4 }
+        : { bottom: window.innerHeight - rect.top + 4 }),
+      right: window.innerWidth - rect.right,
+      maxHeight: (openBelow ? spaceBelow : spaceAbove) - 16,
+      overflowY: "auto",
+      zIndex: 50,
+    };
+  });
 
   const [isMobile, setIsMobile] = useState(() => {
     if (typeof window === "undefined") return false;
@@ -328,22 +347,6 @@ export function SessionMenu({
   }
 
   // ── Desktop: dropdown ─────────────────────────────────────────────
-  const rect = anchorEl.getBoundingClientRect();
-  const spaceBelow = window.innerHeight - rect.bottom;
-  const spaceAbove = rect.top;
-  const openBelow = spaceBelow >= spaceAbove;
-
-  const menuStyle: React.CSSProperties = {
-    position: "fixed",
-    ...(openBelow
-      ? { top: rect.bottom + 4 }
-      : { bottom: window.innerHeight - rect.top + 4 }),
-    right: window.innerWidth - rect.right,
-    maxHeight: (openBelow ? spaceBelow : spaceAbove) - 16,
-    overflowY: "auto",
-    zIndex: 50,
-  };
-
   return createPortal(
     <div
       ref={menuRef}

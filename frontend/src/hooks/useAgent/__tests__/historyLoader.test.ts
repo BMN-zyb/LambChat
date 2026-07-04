@@ -1,6 +1,3 @@
-import assert from "node:assert/strict";
-import test from "node:test";
-
 import {
   prepareMessagesForRunningRun,
   reconstructMessagesFromEvents,
@@ -26,9 +23,9 @@ test("reconstructMessagesFromEvents preserves backend user message ids", () => {
     { activeSubagentStack: [] },
   );
 
-  assert.equal(messages.length, 1);
-  assert.equal(messages[0]?.id, "user-message-1");
-  assert.equal(messages[0]?.runId, "run-1");
+  expect(messages.length).toBe(1);
+  expect(messages[0]?.id).toBe("user-message-1");
+  expect(messages[0]?.runId).toBe("run-1");
 });
 
 test("prepareMessagesForRunningRun preserves the optimistic user message when running history has not persisted it yet", () => {
@@ -73,15 +70,14 @@ test("prepareMessagesForRunningRun preserves the optimistic user message when ru
     ],
   );
 
-  assert.deepEqual(
+  expect(
     result.messages.map((message) => [message.id, message.role, message.runId]),
-    [
-      ["user-previous", "user", "run-previous"],
-      ["assistant-previous", "assistant", "run-previous"],
-      ["optimistic-user-latest", "user", "run-latest"],
-      ["assistant-latest", "assistant", "run-latest"],
-    ],
-  );
+  ).toEqual([
+    ["user-previous", "user", "run-previous"],
+    ["assistant-previous", "assistant", "run-previous"],
+    ["optimistic-user-latest", "user", "run-latest"],
+    ["assistant-latest", "assistant", "run-latest"],
+  ]);
 });
 
 test("prepareMessagesForRunningRun does not duplicate the optimistic user message after history persists it", () => {
@@ -117,13 +113,12 @@ test("prepareMessagesForRunningRun does not duplicate the optimistic user messag
     ],
   );
 
-  assert.deepEqual(
+  expect(
     result.messages.map((message) => [message.id, message.role, message.runId]),
-    [
-      ["persisted-user-latest", "user", "run-latest"],
-      ["assistant-latest", "assistant", "run-latest"],
-    ],
-  );
+  ).toEqual([
+    ["persisted-user-latest", "user", "run-latest"],
+    ["assistant-latest", "assistant", "run-latest"],
+  ]);
 });
 
 test("reconstructMessagesFromEvents ignores goal update events as message content", () => {
@@ -155,8 +150,8 @@ test("reconstructMessagesFromEvents ignores goal update events as message conten
     { activeSubagentStack: [] },
   );
 
-  assert.equal(messages.length, 1);
-  assert.equal(messages[0]?.role, "user");
+  expect(messages.length).toBe(1);
+  expect(messages[0]?.role).toBe("user");
 });
 
 test("reconstructMessagesFromEvents restores artifact result parts", () => {
@@ -189,9 +184,9 @@ test("reconstructMessagesFromEvents restores artifact result parts", () => {
     { activeSubagentStack: [] },
   );
 
-  assert.equal(messages.length, 1);
-  assert.equal(messages[0]?.role, "assistant");
-  assert.equal(messages[0]?.parts?.[0]?.type, "artifact");
+  expect(messages.length).toBe(1);
+  expect(messages[0]?.role).toBe("assistant");
+  expect(messages[0]?.parts?.[0]?.type).toBe("artifact");
 });
 
 test("reconstructMessagesFromEvents does not create duplicate assistant ids for goal lifecycle events", () => {
@@ -233,10 +228,10 @@ test("reconstructMessagesFromEvents does not create duplicate assistant ids for 
     { activeSubagentStack: [] },
   );
 
-  assert.deepEqual(
-    messages.map((message) => message.id),
-    [`${runId}:user`, runId],
-  );
+  expect(messages.map((message) => message.id)).toEqual([
+    `${runId}:user`,
+    runId,
+  ]);
 });
 
 test("reconstructMessagesFromEvents ignores duplicate persisted user messages for the same run", () => {
@@ -288,10 +283,10 @@ test("reconstructMessagesFromEvents ignores duplicate persisted user messages fo
     { activeSubagentStack: [] },
   );
 
-  assert.deepEqual(
-    messages.map((message) => message.id),
-    [`${runId}:user`, runId],
-  );
+  expect(messages.map((message) => message.id)).toEqual([
+    `${runId}:user`,
+    runId,
+  ]);
 });
 
 test("reconstructMessagesFromEvents ignores duplicate user messages with different ids for the same run", () => {
@@ -343,13 +338,10 @@ test("reconstructMessagesFromEvents ignores duplicate user messages with differe
     { activeSubagentStack: [] },
   );
 
-  assert.deepEqual(
-    messages.map((message) => [message.id, message.role]),
-    [
-      ["user-message-a", "user"],
-      [runId, "assistant"],
-    ],
-  );
+  expect(messages.map((message) => [message.id, message.role])).toEqual([
+    ["user-message-a", "user"],
+    [runId, "assistant"],
+  ]);
 });
 
 test("reconstructMessagesFromEvents treats timezone-less backend timestamps as UTC", () => {
@@ -373,8 +365,7 @@ test("reconstructMessagesFromEvents treats timezone-less backend timestamps as U
       { activeSubagentStack: [] },
     );
 
-    assert.equal(
-      messages[0]?.timestamp.toISOString(),
+    expect(messages[0]?.timestamp.toISOString()).toBe(
       "2026-05-07T16:30:00.000Z",
     );
   } finally {
@@ -458,12 +449,12 @@ test("reconstructMessagesFromEvents keeps token usage after cancel on the cancel
     { activeSubagentStack: [] },
   );
 
-  assert.equal(messages.length, 2);
-  assert.equal(messages[0]?.role, "user");
-  assert.equal(messages[1]?.role, "assistant");
-  assert.equal(messages[1]?.cancelled, true);
-  assert.equal(messages[1]?.tokenUsage?.total_tokens, 15649);
-  assert.equal(messages[1]?.duration, 24927.353858947754);
+  expect(messages.length).toBe(2);
+  expect(messages[0]?.role).toBe("user");
+  expect(messages[1]?.role).toBe("assistant");
+  expect(messages[1]?.cancelled).toBe(true);
+  expect(messages[1]?.tokenUsage?.total_tokens).toBe(15649);
+  expect(messages[1]?.duration).toBe(24927.353858947754);
 });
 
 test("reconstructMessagesFromEvents keeps late run events after cancel on the cancelled assistant", () => {
@@ -514,12 +505,12 @@ test("reconstructMessagesFromEvents keeps late run events after cancel on the ca
     { activeSubagentStack: [] },
   );
 
-  assert.deepEqual(
-    messages.map((message) => message.id),
-    [`${runId}:user`, runId],
-  );
-  assert.equal(messages[1]?.cancelled, true);
-  assert.deepEqual(messages[1]?.parts?.map((part) => part.type), [
+  expect(messages.map((message) => message.id)).toEqual([
+    `${runId}:user`,
+    runId,
+  ]);
+  expect(messages[1]?.cancelled).toBe(true);
+  expect(messages[1]?.parts?.map((part) => part.type)).toEqual([
     "sandbox",
     "cancelled",
     "thinking",

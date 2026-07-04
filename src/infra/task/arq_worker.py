@@ -123,6 +123,7 @@ async def run_agent_task(ctx: dict[str, Any], run_id: str) -> None:
             recommendation_input=payload.get("recommendation_input"),
             team_id=payload.get("team_id"),
             active_goal=payload.get("active_goal"),
+            auto_mode=bool(payload.get("auto_mode", False)),
         )
     except TaskInterruptedError:
         await payload_store.delete(run_id)

@@ -37,29 +37,29 @@
 .glass-card {
   background: var(--glass-bg);
   border: 1px solid var(--glass-border);
-  border-radius: 0.875rem;
-  box-shadow: var(--glass-shadow);
+  border-radius: var(--radius-container);
+  box-shadow: var(--shadow-low), var(--glass-shadow);
   transition:
-    border-color 0.24s ease,
-    box-shadow 0.24s ease,
-    background-color 0.24s ease;
+    border-color var(--duration-medium) ease,
+    box-shadow var(--duration-medium) ease,
+    background-color var(--duration-medium) ease;
 }
 
 .glass-card:hover {
   border-color: var(--glass-border-hover);
-  box-shadow: var(--glass-shadow-hover), var(--glass-glow);
+  box-shadow: var(--shadow-med), var(--glass-glow);
 }
 
 .glass-card-subtle {
   background: var(--glass-bg-subtle);
   border: 1px solid var(--glass-border);
-  border-radius: 0.75rem;
+  border-radius: var(--radius-container);
 }
 
 .glass-input {
   background: var(--theme-bg);
   border: 1px solid var(--theme-border);
-  border-radius: 0.625rem;
+  border-radius: var(--radius-element);
   color: var(--theme-text);
   transition:
     border-color 0.2s ease,

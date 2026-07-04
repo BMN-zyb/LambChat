@@ -5,6 +5,7 @@ import { useTranslation } from "react-i18next";
 import toast from "react-hot-toast";
 import { useAuth } from "../../hooks/useAuth";
 import { useFileUpload } from "../../hooks/useFileUpload";
+import { useStickyDropdownPosition } from "../../hooks/useStickyDropdownPosition";
 import type { MessageAttachment, FileCategory } from "../../types";
 import { Permission } from "../../types";
 
@@ -133,16 +134,16 @@ export const FileUploadButton = memo(function FileUploadButton({
     e.target.value = "";
   };
 
-  const getDropdownStyle = (): React.CSSProperties => {
-    const rect = triggerRef.current?.getBoundingClientRect();
-    if (!rect) return { display: "none" };
-    return {
+  const dropdownStyle = useStickyDropdownPosition(
+    triggerRef,
+    showDropdown,
+    (rect) => ({
       position: "fixed",
       bottom: window.innerHeight - rect.top + 8,
       left: rect.left,
       zIndex: 9999,
-    };
-  };
+    }),
+  );
 
   if (!canUpload) return null;
 
@@ -175,7 +176,7 @@ export const FileUploadButton = memo(function FileUploadButton({
             ref={dropdownRef}
             className="w-52 rounded-xl shadow-lg border overflow-hidden animate-in fade-in slide-in-from-bottom-2 duration-200"
             style={{
-              ...getDropdownStyle(),
+              ...dropdownStyle,
               background: "var(--theme-bg-card)",
               borderColor: "var(--theme-border)",
             }}

@@ -121,6 +121,18 @@ MAIN_AGENT_PROMPT_SECTIONS: tuple[str, ...] = (
     TODO_LIST_GUIDE,
 )
 
+AUTO_MODE_PROMPT_SECTION = """
+### Auto Mode (Autonomous Execution)
+
+You are running in **auto mode**. This means:
+- Execute tasks autonomously without asking the user for confirmation at each step.
+- Make reasonable assumptions when information is incomplete rather than pausing to ask.
+- Do **not** use `ask_human` — it is unavailable in this mode.
+- Proceed confidently through multi-step workflows without stopping for approval.
+- If a decision could cause irreversible damage or external side effects, exercise extra caution but still proceed autonomously.
+- Report your reasoning and actions clearly so the user can review what you did afterward.
+"""
+
 # ---------------------------------------------------------------------------
 # 共享 Memory 段
 # ---------------------------------------------------------------------------

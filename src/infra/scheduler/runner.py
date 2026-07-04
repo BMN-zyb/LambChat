@@ -369,6 +369,12 @@ class ScheduledTaskRunner:
             display_message = task.input_payload["prompt"]
         display_message = str(display_message or "")
         user_timezone = task.input_payload.get("user_timezone")
+        raw_attachments = task.input_payload.get("attachments")
+        attachments = (
+            [dict(item) for item in raw_attachments if isinstance(item, dict)]
+            if isinstance(raw_attachments, list)
+            else None
+        )
         message = format_user_message_with_timestamp(
             display_message,
             user_timezone if isinstance(user_timezone, str) else None,
@@ -442,6 +448,7 @@ class ScheduledTaskRunner:
                 run_id=run_id,
                 disabled_tools=task.input_payload.get("disabled_tools"),
                 agent_options=agent_options,
+                attachments=attachments,
                 project_id=None,
                 enabled_skills=enabled_skills,
                 persona_system_prompt=persona_system_prompt,
@@ -450,6 +457,7 @@ class ScheduledTaskRunner:
                 display_message=display_message,
                 recommendation_input=display_message,
                 session_metadata=session_metadata,
+                auto_mode=True,
                 write_user_message_immediately=True,
             )
         else:
@@ -468,6 +476,7 @@ class ScheduledTaskRunner:
                 run_id=run_id,
                 disabled_tools=task.input_payload.get("disabled_tools"),
                 agent_options=agent_options,
+                attachments=attachments,
                 project_id=None,
                 enabled_skills=enabled_skills,
                 persona_system_prompt=persona_system_prompt,
@@ -476,6 +485,7 @@ class ScheduledTaskRunner:
                 display_message=display_message,
                 recommendation_input=display_message,
                 session_metadata=session_metadata,
+                auto_mode=True,
                 write_user_message_immediately=True,
             )
         await SessionManager().update_session_metadata(

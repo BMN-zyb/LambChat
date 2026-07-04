@@ -4,6 +4,7 @@ import { clsx } from "clsx";
 import toast from "react-hot-toast";
 import { feedbackApi } from "../../../services/api/feedback";
 import type { RatingValue } from "../../../types/feedback";
+import type { MessageAttachment } from "../../../types/upload";
 import { useTranslation } from "react-i18next";
 import { FeedbackDialog } from "./FeedbackDialog";
 
@@ -31,6 +32,7 @@ export function FeedbackButtons({
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [showDialog, setShowDialog] = useState(false);
   const [comment, setComment] = useState("");
+  const [attachments, setAttachments] = useState<MessageAttachment[]>([]);
   const [submittedFeedback, setSubmittedFeedback] =
     useState<RatingValue | null>(externalFeedback || null);
 
@@ -44,6 +46,7 @@ export function FeedbackButtons({
     if (isSubmitting || submittedFeedback) return;
     setSelectedRating(rating);
     setComment("");
+    setAttachments([]);
     setShowDialog(true);
   }
 
@@ -57,6 +60,18 @@ export function FeedbackButtons({
         comment: comment.trim() || undefined,
         session_id: sessionId,
         run_id: runId || "",
+        attachments:
+          attachments.length > 0
+            ? attachments.map((a) => ({
+                id: a.id,
+                key: a.key,
+                name: a.name,
+                type: a.type,
+                mimeType: a.mimeType,
+                size: a.size,
+                url: a.url,
+              }))
+            : undefined,
       });
       setSubmittedFeedback(selectedRating);
       onFeedbackChange?.(selectedRating);
@@ -76,6 +91,7 @@ export function FeedbackButtons({
     setShowDialog(false);
     setSelectedRating(null);
     setComment("");
+    setAttachments([]);
   }
 
   function handleSkip() {
@@ -160,6 +176,8 @@ export function FeedbackButtons({
           onSubmit={handleSubmitFeedback}
           onSkip={handleSkip}
           isSubmitting={isSubmitting}
+          attachments={attachments}
+          onAttachmentsChange={setAttachments}
         />
       )}
     </>

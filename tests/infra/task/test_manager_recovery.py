@@ -206,6 +206,7 @@ async def test_resume_session_submits_localized_recovery_message(
             "disabled_mcp_tools": ["mcp.tool"],
             "project_id": "project-1",
             "team_id": "team-1",
+            "auto_mode": True,
         },
     )
     storage = _FakeStorage(session)
@@ -248,6 +249,7 @@ async def test_resume_session_submits_localized_recovery_message(
     assert submit_calls[0]["session_id"] == "session-1"
     assert submit_calls[0]["project_id"] == "project-1"
     assert submit_calls[0]["disabled_tools"] == ["bash"]
+    assert submit_calls[0]["auto_mode"] is True
     assert submit_calls[0]["message"] == "请继续处理当前会话中未完成的内容。"
     assert redis.set_calls
     assert storage.updates[-1][0] == "session-1"
@@ -270,6 +272,7 @@ async def test_resume_session_uses_arq_submission_when_task_backend_is_arq(
             "agent_options": {"model": "gpt-test"},
             "disabled_tools": ["bash"],
             "project_id": "project-1",
+            "auto_mode": True,
         },
     )
     storage = _FakeStorage(session)
@@ -325,6 +328,7 @@ async def test_resume_session_uses_arq_submission_when_task_backend_is_arq(
     assert len(arq_submit_calls) == 1
     assert arq_submit_calls[0]["executor_key"] == "agent_stream"
     assert arq_submit_calls[0]["trace_id"]
+    assert arq_submit_calls[0]["auto_mode"] is True
     assert arq_submit_calls[0].get("user_message_written") is not True
     assert arq_submit_calls[0]["message"] == "请继续处理当前会话中未完成的内容。"
 

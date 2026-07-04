@@ -1,5 +1,3 @@
-import assert from "node:assert/strict";
-import test from "node:test";
 import {
   createSubagentPanelStore,
   type SubagentPanelData,
@@ -23,7 +21,7 @@ test("notifies only listeners subscribed to the updated agent id", () => {
 
   store.set(createData("agent-a"));
 
-  assert.deepEqual(calls, ["a"]);
+  expect(calls).toEqual(["a"]);
 });
 
 test("notifies listeners when an agent entry is deleted", () => {
@@ -35,8 +33,8 @@ test("notifies listeners when an agent entry is deleted", () => {
 
   store.delete("agent-a");
 
-  assert.deepEqual(calls, ["a"]);
-  assert.equal(store.get("agent-a"), undefined);
+  expect(calls).toEqual(["a"]);
+  expect(store.get("agent-a")).toBe(undefined);
 });
 
 test("tracks current store size for lightweight observability", () => {
@@ -46,5 +44,5 @@ test("tracks current store size for lightweight observability", () => {
   store.set(createData("agent-b"));
   store.delete("agent-a");
 
-  assert.equal(store.size(), 1);
+  expect(store.size()).toBe(1);
 });

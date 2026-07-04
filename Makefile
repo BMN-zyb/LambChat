@@ -1,4 +1,4 @@
-.PHONY: help install install-pnpm dev build clean docker-up docker-down docker-logs docker-build test lint format typecheck check-all pre-commit install-hooks frontend-dev frontend-build frontend-install
+.PHONY: help install install-pnpm dev build clean docker-up docker-down docker-logs docker-build test lint format typecheck check-all pre-commit install-hooks frontend-dev frontend-build frontend-install frontend-test
 
 # 默认目标
 help:
@@ -33,8 +33,9 @@ help:
 	@echo "  make lint             - 运行 Ruff 代码检查"
 	@echo "  make format           - 格式化代码"
 	@echo "  make typecheck        - 运行 Mypy 类型检查"
-	@echo "  make test             - 运行测试"
-	@echo "  make check-all        - 运行所有检查（pre-commit + typecheck + test）"
+	@echo "  make test             - 运行所有测试（后端 pytest + 前端 vitest）"
+	@echo "  make frontend-test    - 运行前端测试（vitest）"
+	@echo "  make check-all        - 运行所有检查（pre-commit + typecheck + test + build）"
 	@echo ""
 	@echo "清理:"
 	@echo "  make clean            - 清理缓存和临时文件"
@@ -126,9 +127,13 @@ typecheck:
 	@echo "🔬 运行 Mypy 类型检查..."
 	uv run mypy src/
 
-test:
-	@echo "🧪 运行测试..."
+test: frontend-test
+	@echo "🧪 运行后端测试..."
 	uv run pytest
+
+frontend-test:
+	@echo "🧪 运行前端测试..."
+	cd frontend && pnpm test
 
 check-all: pre-commit typecheck test build-all
 	@echo "✅ 所有检查通过"

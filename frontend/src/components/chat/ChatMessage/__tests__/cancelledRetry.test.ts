@@ -1,5 +1,3 @@
-import assert from "node:assert/strict";
-import test from "node:test";
 import { findCancelledRetryTarget } from "../cancelledRetry.ts";
 import type { Message } from "../../../../types";
 
@@ -44,7 +42,7 @@ test("finds the closest user message before a cancelled assistant message", () =
     },
   ] satisfies Message[];
 
-  assert.deepEqual(findCancelledRetryTarget(messages, "assistant-cancelled"), {
+  expect(findCancelledRetryTarget(messages, "assistant-cancelled")).toEqual({
     content: "retry this prompt",
     attachments: messages[2]?.attachments,
   });
@@ -62,5 +60,5 @@ test("returns null when there is no user message to replay", () => {
     },
   ] satisfies Message[];
 
-  assert.equal(findCancelledRetryTarget(messages, "assistant-cancelled"), null);
+  expect(findCancelledRetryTarget(messages, "assistant-cancelled")).toBe(null);
 });

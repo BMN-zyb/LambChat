@@ -82,11 +82,13 @@ export function UserMessageBubble({
           {/* Message bubble */}
           {hasContent && (
             <div
-              className="rounded-3xl max-w-full px-5 py-2 shadow-sm border"
+              className="max-w-full px-5 py-2.5 shadow-sm border transition-shadow duration-200 hover:-translate-y-px"
               style={{
                 background:
                   "linear-gradient(135deg, var(--theme-primary-light), var(--theme-bg))",
                 borderColor: "var(--theme-border)",
+                borderRadius: "var(--radius-chat)",
+                boxShadow: "var(--shadow-low)",
               }}
             >
               <div

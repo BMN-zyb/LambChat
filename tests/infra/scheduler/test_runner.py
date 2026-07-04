@@ -509,6 +509,94 @@ async def test_execute_agent_hides_injected_timestamp_from_display(
 
 
 @pytest.mark.asyncio
+async def test_execute_agent_runs_scheduled_tasks_in_auto_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task = _make_task(input_payload={"message": "Run the report"})
+    submitted: dict[str, Any] = {}
+
+    class _FakeTaskManager:
+        async def submit(self, **kwargs: Any) -> tuple[str, str]:
+            submitted.update(kwargs)
+            return "run_1", "trace_1"
+
+        async def get_run_status(self, session_id: str, run_id: str) -> TaskStatus:
+            return TaskStatus.COMPLETED
+
+    class _FakeSessionManager:
+        async def update_session_metadata(
+            self,
+            session_id: str,
+            metadata: dict[str, Any],
+        ) -> None:
+            return None
+
+    monkeypatch.setattr("src.kernel.config.settings.TASK_BACKEND", "local")
+    monkeypatch.setattr("src.infra.task.manager.get_task_manager", lambda: _FakeTaskManager())
+    monkeypatch.setattr(
+        "src.infra.task.concurrency.get_registered_executor",
+        lambda key: (lambda *args, **kwargs: None) if key == "agent_stream" else None,
+    )
+    monkeypatch.setattr("src.infra.session.manager.SessionManager", lambda: _FakeSessionManager())
+
+    await ScheduledTaskRunner()._execute_agent(task, run_id="run_1", session_id="session_1")
+
+    assert submitted["auto_mode"] is True
+
+
+@pytest.mark.asyncio
+async def test_execute_agent_forwards_attachments_to_local_submit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attachments = [
+        {
+            "id": "att-1",
+            "key": "attachments/user-1/report.pdf",
+            "name": "report.pdf",
+            "type": "document",
+            "mime_type": "application/pdf",
+            "size": 12345,
+            "url": "/api/upload/file/attachments/user-1/report.pdf",
+        }
+    ]
+    task = _make_task(
+        input_payload={
+            "message": "Summarize the report",
+            "attachments": attachments,
+        }
+    )
+    submitted: dict[str, Any] = {}
+
+    class _FakeTaskManager:
+        async def submit(self, **kwargs: Any) -> tuple[str, str]:
+            submitted.update(kwargs)
+            return "run_1", "trace_1"
+
+        async def get_run_status(self, session_id: str, run_id: str) -> TaskStatus:
+            return TaskStatus.COMPLETED
+
+    class _FakeSessionManager:
+        async def update_session_metadata(
+            self,
+            session_id: str,
+            metadata: dict[str, Any],
+        ) -> None:
+            return None
+
+    monkeypatch.setattr("src.kernel.config.settings.TASK_BACKEND", "local")
+    monkeypatch.setattr("src.infra.task.manager.get_task_manager", lambda: _FakeTaskManager())
+    monkeypatch.setattr(
+        "src.infra.task.concurrency.get_registered_executor",
+        lambda key: (lambda *args, **kwargs: None) if key == "agent_stream" else None,
+    )
+    monkeypatch.setattr("src.infra.session.manager.SessionManager", lambda: _FakeSessionManager())
+
+    await ScheduledTaskRunner()._execute_agent(task, run_id="run_1", session_id="session_1")
+
+    assert submitted["attachments"] == attachments
+
+
+@pytest.mark.asyncio
 async def test_execute_agent_resolves_persona_id_for_non_team_agent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -651,7 +739,23 @@ async def test_execute_agent_passes_team_id_for_team_agent_without_persona(
 async def test_execute_agent_uses_arq_backend_when_enabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    task = _make_task(input_payload={"message": "Run distributed report"})
+    attachments = [
+        {
+            "id": "att-1",
+            "key": "attachments/user-1/report.pdf",
+            "name": "report.pdf",
+            "type": "document",
+            "mime_type": "application/pdf",
+            "size": 12345,
+            "url": "/api/upload/file/attachments/user-1/report.pdf",
+        }
+    ]
+    task = _make_task(
+        input_payload={
+            "message": "Run distributed report",
+            "attachments": attachments,
+        }
+    )
     submitted: dict[str, Any] = {}
 
     class _FakeTaskManager:
@@ -705,6 +809,7 @@ async def test_execute_agent_uses_arq_backend_when_enabled(
     assert submitted["run_id"] == "run_1"
     assert submitted["session_id"] == "session_1"
     assert submitted["display_message"] == "Run distributed report"
+    assert submitted["attachments"] == attachments
     assert submitted["session_metadata"] == {
         "source": "scheduled_task",
         "scheduled_task_id": "task_1",

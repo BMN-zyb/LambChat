@@ -114,6 +114,21 @@ def get_trace_id_from_runtime(runtime: Any) -> Optional[str]:
     return None
 
 
+def get_attachments_from_runtime(runtime: Any) -> list[dict[str, Any]] | None:
+    """Return current message attachments passed through ToolRuntime config."""
+    if runtime is not None:
+        if hasattr(runtime, "config") and runtime.config:
+            config = runtime.config
+            if isinstance(config, dict):
+                configurable = config.get("configurable", {})
+                if isinstance(configurable, dict):
+                    attachments = configurable.get("attachments")
+                    if isinstance(attachments, list):
+                        items = [dict(item) for item in attachments if isinstance(item, dict)]
+                        return items or None
+    return None
+
+
 def get_delivery_source_from_runtime(runtime: Any) -> Optional[str]:
     """Return the artifact delivery source marker carried by internal tool calls."""
     if runtime is not None:

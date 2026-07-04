@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 from langchain_core.tools import InjectedToolArg
 
 from src.infra.scheduler.service import ScheduledTaskService
-from src.infra.tool.backend_utils import get_user_id_from_runtime
+from src.infra.tool.backend_utils import get_attachments_from_runtime, get_user_id_from_runtime
 from src.infra.utils.datetime import ensure_utc, to_iso, utc_now
 from src.kernel.schemas.scheduled_task import ScheduledTaskCreate, TriggerType
 from src.kernel.types import Permission
@@ -153,6 +153,13 @@ async def scheduled_task_create(
         bool,
         "Whether to run the task immediately after creation",
     ] = False,
+    attachments: Annotated[
+        list[dict[str, Any]] | None,
+        "Optional uploaded attachment references to send to the agent on every task run. "
+        "Use the same attachment objects returned by the upload/chat flow "
+        "(id, key, name, type, mime_type, size, url). If omitted, the tool will inherit "
+        "current message attachments when available.",
+    ] = None,
     runtime: Annotated[ToolRuntime, InjectedToolArg] = None,  # type: ignore[assignment]
 ) -> str:
     """Create a scheduled task that automatically runs an agent at specified times.
@@ -240,6 +247,9 @@ async def scheduled_task_create(
             trigger_config["minute"] = "0"
 
     user = await _resolve_user(user_id)
+    effective_attachments = _normalize_attachments(
+        attachments if attachments is not None else get_attachments_from_runtime(runtime)
+    )
     if team_query:
         effective_agent_id = "team"
     elif role_query:
@@ -341,6 +351,7 @@ async def scheduled_task_create(
             "message": message,
             **({"agent_options": effective_agent_options} if effective_agent_options else {}),
             **({"user_timezone": session_user_timezone} if session_user_timezone else {}),
+            **({"attachments": effective_attachments} if effective_attachments else {}),
             **(
                 {"persona_preset_id": effective_persona_preset_id}
                 if effective_persona_preset_id
@@ -387,3 +398,10 @@ async def scheduled_task_create(
             ),
         }
     )
+
+
+def _normalize_attachments(value: Any) -> list[dict[str, Any]] | None:
+    if not isinstance(value, list):
+        return None
+    attachments = [dict(item) for item in value if isinstance(item, dict)]
+    return attachments or None

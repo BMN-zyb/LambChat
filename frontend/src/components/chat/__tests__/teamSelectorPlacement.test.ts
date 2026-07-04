@@ -1,7 +1,4 @@
-import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import test from "node:test";
-
 const toolbarSource = readFileSync(
   new URL("../ChatInputToolbar.tsx", import.meta.url),
   "utf8",
@@ -18,6 +15,10 @@ const chatViewSource = readFileSync(
   new URL("../../layout/AppContent/ChatView.tsx", import.meta.url),
   "utf8",
 );
+const chatViewPropsSource = readFileSync(
+  new URL("../../layout/AppContent/ChatViewProps.tsx", import.meta.url),
+  "utf8",
+);
 const chatMessageSource = readFileSync(
   new URL("../ChatMessage/index.tsx", import.meta.url),
   "utf8",
@@ -32,61 +33,61 @@ const teamPickerSource = readFileSync(
 );
 
 test("team toolbar chip only renders after a team is selected", () => {
-  assert.doesNotMatch(toolbarSource, /TeamPickerModal/);
-  assert.match(toolbarSource, /selectedPersonaName && currentAgent !== "team"/);
-  assert.match(
-    toolbarSource,
+  expect(toolbarSource).not.toMatch(/TeamPickerModal/);
+  expect(toolbarSource).toMatch(
+    /selectedPersonaName && currentAgent !== "team"/,
+  );
+  expect(toolbarSource).toMatch(
     /currentAgent === "team" && onSelectTeam && selectedTeamId/,
   );
-  assert.match(toolbarSource, /onActivePanelChange\("team"\)/);
-  assert.match(toolbarSource, /chat\.teamSelected/);
-  assert.doesNotMatch(toolbarSource, /Select team/);
-  assert.match(toolbarSource, /text-\[var\(--theme-primary\)\]/);
-  assert.doesNotMatch(toolbarSource, /text-amber-500/);
-  assert.match(selectorsSource, /TeamPickerModal/);
-  assert.match(selectorsSource, /isOpen=\{activePanel === "team"\}/);
-  assert.match(selectorsSource, /selectedTeamId=\{selectedTeamId \?\? null\}/);
-  assert.match(
-    chatInputSource,
+  expect(toolbarSource).toMatch(/onActivePanelChange\("team"\)/);
+  expect(toolbarSource).toMatch(/chat\.teamSelected/);
+  expect(toolbarSource).not.toMatch(/Select team/);
+  expect(toolbarSource).toMatch(/color:\s*"var\(--theme-primary\)"/);
+  expect(toolbarSource).not.toMatch(/text-amber-500/);
+  expect(selectorsSource).toMatch(/TeamPickerModal/);
+  expect(selectorsSource).toMatch(/isOpen=\{activePanel === "team"\}/);
+  expect(selectorsSource).toMatch(
+    /selectedTeamId=\{selectedTeamId \?\? null\}/,
+  );
+  expect(chatInputSource).toMatch(
     /selectedTeamId=\{selectedTeamId\}[\s\S]*onSelectTeam=\{onSelectTeam\}/,
   );
 });
 
 test("team selector uses the persona selector interaction surfaces", () => {
-  assert.match(
-    toolbarSource,
+  expect(toolbarSource).toMatch(
     /hasTeamSelector=\{currentAgent === "team" && !!onSelectTeam\}/,
   );
-  assert.match(
-    toolbarSource,
+  expect(toolbarSource).toMatch(
     /hasPersonaSelector=\{hasPersonaSelector && currentAgent !== "team"\}/,
   );
-  assert.match(toolbarSource, /onSelectTeam\?\.\(null\)/);
-  assert.match(toolbarSource, /group-hover:opacity-0/);
-  assert.match(featureMenuSource, /hasTeamSelector/);
-  assert.match(featureMenuSource, /label=\{t\("featureMenu\.team", "团队"\)\}/);
-  assert.match(featureMenuSource, /onClick=\{\(\) => onOpen\("team"\)\}/);
-  assert.match(
-    teamPickerSource,
+  expect(toolbarSource).toMatch(/onSelectTeam\?\.\(null\)/);
+  expect(toolbarSource).toMatch(/group-hover:opacity-0/);
+  expect(featureMenuSource).toMatch(/hasTeamSelector/);
+  expect(featureMenuSource).toMatch(
+    /label=\{t\("featureMenu\.team", "团队"\)\}/,
+  );
+  expect(featureMenuSource).toMatch(/onClick=\{\(\) => onOpen\("team"\)\}/);
+  expect(teamPickerSource).toMatch(
     /z-\[250\][\s\S]*sm:max-w-3xl[\s\S]*xl:max-w-6xl/,
   );
-  assert.match(teamPickerSource, /grid auto-grid-cols gap-3/);
-  assert.match(teamPickerSource, /pps-card__action/);
-  assert.match(teamPickerSource, /handleSelect\(team\.id\)/);
-  assert.match(teamPickerSource, /onSelect\(teamId\)/);
-  assert.doesNotMatch(teamPickerSource, /sm:w-\[420px\]/);
+  expect(teamPickerSource).toMatch(/grid auto-grid-cols gap-3/);
+  expect(teamPickerSource).toMatch(/pps-card__action/);
+  expect(teamPickerSource).toMatch(/handleSelect\(team\.id\)/);
+  expect(teamPickerSource).toMatch(/onSelect\(teamId\)/);
+  expect(teamPickerSource).not.toMatch(/sm:w-\[420px\]/);
 });
 
 test("assistant message header shows the selected team in team mode", () => {
-  assert.match(chatViewSource, /import \{ teamApi \} from/);
-  assert.match(chatViewSource, /function useCurrentTeam/);
-  assert.match(chatViewSource, /function resolveChatAssistantIdentity/);
-  assert.match(chatViewSource, /getTeamFallbackAvatar/);
-  assert.match(chatViewSource, /const assistantIdentity = useMemo\(/);
-  assert.match(chatViewSource, /personaAvatar=\{assistantIdentity\.avatar\}/);
-  assert.match(chatViewSource, /personaName=\{assistantIdentity\.name\}/);
-  assert.match(
-    chatMessageSource,
+  expect(chatViewPropsSource).toMatch(/import \{ teamApi \} from/);
+  expect(chatViewPropsSource).toMatch(/function useCurrentTeam/);
+  expect(chatViewPropsSource).toMatch(/function resolveChatAssistantIdentity/);
+  expect(chatViewPropsSource).toMatch(/getTeamFallbackAvatar/);
+  expect(chatViewSource).toMatch(/const assistantIdentity = useMemo\(/);
+  expect(chatViewSource).toMatch(/personaAvatar=\{assistantIdentity\.avatar\}/);
+  expect(chatViewSource).toMatch(/personaName=\{assistantIdentity\.name\}/);
+  expect(chatMessageSource).toMatch(
     /\{personaName \|\| t\("chat\.message\.assistant"\)\}/,
   );
 });

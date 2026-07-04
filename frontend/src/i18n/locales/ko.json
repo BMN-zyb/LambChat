@@ -1450,9 +1450,9 @@
       "commandPlaceholder": "npx -y @anthropic/mcp-server-fetch",
       "createServer": "서버 생성",
       "dailyLimit": "일일 제한",
-      "enabled": "활성화",
       "disableInlineExposure": "필요 시 검색으로 전환",
       "enableInlineExposure": "함수로 직접 노출",
+      "enabled": "활성화",
       "envKeys": "환경 변수",
       "envKeysDescription": "이 MCP 서버 프로세스에 주입할 환경 변수를 선택하세요. 환경 변수 설정에서 미리 정의되어 있어야 합니다.",
       "envKeysPlaceholder": "환경 변수 선택...",
@@ -1582,6 +1582,14 @@
   "mermaidViewer": {
     "hideCode": "코드 숨기기",
     "showCode": "코드 보기"
+  },
+  "mode": {
+    "auto": "자동",
+    "autoDesc": "자동 실행, 확인 생략",
+    "goal": "목표",
+    "goalDesc": "메시지를 목표로 안내 실행",
+    "hint": "두 모드를 동시에 활성화할 수 있습니다",
+    "title": "실행 모드"
   },
   "nav": {
     "adminMarketplace": "관리자 마켓플레이스",
@@ -2186,9 +2194,9 @@
     "ENABLE_SKILLS": "스킬 기능 활성화",
     "EVENT_MERGE_BATCH_SIZE": "이벤트 병합 배치 크기",
     "EVENT_MERGE_CONCURRENCY": "이벤트 병합 동시성 수",
+    "EVENT_MERGE_IMMEDIATE_DEBOUNCE_SECONDS": "즉시 이벤트 병합 디바운스 시간(초)",
     "EVENT_MERGE_INTERVAL": "이벤트 병합 간격(초)",
     "EVENT_MERGE_MAX_EVENTS_PER_TRACE": "이벤트 병합 시 트레이스당 최대 이벤트 수",
-    "EVENT_MERGE_IMMEDIATE_DEBOUNCE_SECONDS": "즉시 이벤트 병합 디바운스 시간(초)",
     "EVENT_MERGE_TIMEOUT_SECONDS": "이벤트 병합 타임아웃(초)",
     "FEISHU_UPLOAD_BYTES_MAX_SIZE": "Feishu(랙) 최대 파일 업로드 크기（바이트）",
     "FILE_UPLOAD_MAX_FILES": "업로드당 최대 파일 수",
@@ -2605,6 +2613,7 @@
     "filterDisabled": "사용 안 함",
     "filterEnabled": "사용 중",
     "form": {
+      "addBinaryFile": "바이너리 파일 업로드",
       "addFile": "파일 추가",
       "content": "내용 (Markdown 및 선택적 YAML frontmatter 지원)",
       "contentPlaceholder": "# 스킬 지침...",

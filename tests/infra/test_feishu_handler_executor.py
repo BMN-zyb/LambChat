@@ -186,6 +186,7 @@ class _FakeTaskManager:
             recommendation_input="hello",
             team_id="team-1",
             active_goal={"objective": "ship it"},
+            auto_mode=kwargs.get("auto_mode", False),
         ):
             pass
         return "run-1", ""
@@ -353,6 +354,8 @@ async def test_feishu_executor_accepts_task_runtime_skill_kwargs(
     assert captured["persona_system_prompt"] == "Persona prompt"
     assert captured["disabled_mcp_tools"] == ["mcp.tool"]
     assert captured["recommendation_input"] == "hello"
+    assert captured["auto_mode"] is True
+    assert fake_task_manager.submit_calls[0]["auto_mode"] is True
 
 
 @pytest.mark.asyncio

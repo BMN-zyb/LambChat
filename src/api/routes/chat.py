@@ -266,6 +266,7 @@ def build_conversation_config(
         "enabled_skills": request.enabled_skills,
         "disabled_mcp_tools": request.disabled_mcp_tools or [],
         "language": language,
+        "auto_mode": request.auto_mode,
     }
     if trace_id:
         conversation_config["trace_id"] = trace_id
@@ -324,6 +325,7 @@ async def _execute_agent_stream(
     team_id: str | None = None,
     active_goal: dict | None = None,
     recommendation_input: str | None = None,
+    auto_mode: bool = False,
 ):
     """执行 Agent 并流式输出事件（供 TaskManager 调用）"""
     from src.infra.task.manager import TaskInterruptedError
@@ -352,6 +354,7 @@ async def _execute_agent_stream(
             disabled_mcp_tools=disabled_mcp_tools,
             team_id=team_id,
             active_goal=active_goal,
+            auto_mode=auto_mode,
             goal_started_at=started_at,
             recommendation_input=recommendation_input,
         ):
@@ -487,6 +490,7 @@ async def chat_stream(
         "team_id": request.team_id,
         "active_goal": active_goal_data,
         "recommendation_input": request.message,
+        "auto_mode": request.auto_mode,
     }
 
     # 检查并发限制
@@ -596,6 +600,7 @@ async def chat_stream(
             trace_id=trace_id,
             team_id=request.team_id,
             active_goal=active_goal_data,
+            auto_mode=request.auto_mode,
             write_user_message_immediately=True,
         )
     else:
@@ -620,6 +625,7 @@ async def chat_stream(
             team_id=request.team_id,
             trace_id=trace_id,
             active_goal=active_goal_data,
+            auto_mode=request.auto_mode,
             write_user_message_immediately=True,
         )
 

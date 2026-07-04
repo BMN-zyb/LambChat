@@ -1,5 +1,3 @@
-import test from "node:test";
-import assert from "node:assert/strict";
 import {
   rewriteProjectFileContent,
   rewriteProjectTextFiles,
@@ -12,7 +10,7 @@ test("rewrites relative css asset urls against the source file path", () => {
     "/src/assets/icon.png": "https://cdn.example.com/icon.png",
   });
 
-  assert.match(rewritten, /https:\/\/cdn\.example\.com\/icon\.png/);
+  expect(rewritten).toMatch(/https:\/\/cdn\.example\.com\/icon\.png/);
 });
 
 test("rewrites default static asset imports to string urls", () => {
@@ -22,8 +20,7 @@ test("rewrites default static asset imports to string urls", () => {
     "/src/assets/logo.png": "https://cdn.example.com/logo.png",
   });
 
-  assert.match(
-    rewritten,
+  expect(rewritten).toMatch(
     /const logo = "https:\/\/cdn\.example\.com\/logo\.png";/,
   );
 });
@@ -36,8 +33,7 @@ test("rewrites new URL asset lookups while preserving usage shape", () => {
     "/src/assets/icon.png": "https://cdn.example.com/icon.png",
   });
 
-  assert.equal(
-    rewritten,
+  expect(rewritten).toBe(
     'const iconHref = "https://cdn.example.com/icon.png";',
   );
 });
@@ -53,10 +49,9 @@ test("rewrites project text files without touching unresolved imports", () => {
     "/src/assets/logo.png": "https://cdn.example.com/logo.png",
   });
 
-  assert.match(
-    rewritten["/src/App.tsx"],
+  expect(rewritten["/src/App.tsx"]).toMatch(
     /const logo = "https:\/\/cdn\.example\.com\/logo\.png";/,
   );
-  assert.match(rewritten["/src/App.tsx"], /import "\.\/styles\.css";/);
-  assert.match(rewritten["/src/styles.css"], /url\("\.\/bg\.png"\)/);
+  expect(rewritten["/src/App.tsx"]).toMatch(/import "\.\/styles\.css";/);
+  expect(rewritten["/src/styles.css"]).toMatch(/url\("\.\/bg\.png"\)/);
 });

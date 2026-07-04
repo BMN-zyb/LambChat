@@ -2,6 +2,8 @@
 // Feedback Types
 // ============================================
 
+import type { MessageAttachment } from "./upload";
+
 // 评分值类型：up（好评）或 down（差评）
 export type RatingValue = "up" | "down";
 
@@ -13,6 +15,7 @@ export interface Feedback {
   run_id: string;
   rating: RatingValue;
   comment: string | null;
+  attachments?: MessageAttachment[];
   created_at: string;
 }
 
@@ -21,6 +24,7 @@ export interface FeedbackCreate {
   run_id: string;
   rating: RatingValue;
   comment?: string;
+  attachments?: MessageAttachment[];
 }
 
 export interface FeedbackStats {

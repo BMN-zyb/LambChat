@@ -1,6 +1,3 @@
-import assert from "node:assert/strict";
-import test from "node:test";
-
 import {
   buildScheduledTaskInputPayload,
   getScheduledTaskPersonaPresetId,
@@ -8,7 +5,7 @@ import {
 } from "../scheduledTaskPayload.ts";
 
 test("clearing the model removes stale scheduled task agent options", () => {
-  assert.deepEqual(
+  expect(
     buildScheduledTaskInputPayload(
       {
         message: "run",
@@ -25,14 +22,13 @@ test("clearing the model removes stale scheduled task agent options", () => {
         availableModels: null,
       },
     ),
-    {
-      message: "run",
-    },
-  );
+  ).toEqual({
+    message: "run",
+  });
 });
 
 test("clearing the model preserves non-model agent options", () => {
-  assert.deepEqual(
+  expect(
     buildScheduledTaskInputPayload(
       {
         message: "run",
@@ -48,17 +44,16 @@ test("clearing the model preserves non-model agent options", () => {
         availableModels: null,
       },
     ),
-    {
-      message: "run",
-      agent_options: {
-        temperature: 0.2,
-      },
+  ).toEqual({
+    message: "run",
+    agent_options: {
+      temperature: 0.2,
     },
-  );
+  });
 });
 
 test("non-team scheduled tasks store only persona id", () => {
-  assert.deepEqual(
+  expect(
     buildScheduledTaskInputPayload(
       {
         message: "run",
@@ -73,15 +68,14 @@ test("non-team scheduled tasks store only persona id", () => {
         teamId: "team-1",
       },
     ),
-    {
-      message: "run",
-      persona_preset_id: "persona-1",
-    },
-  );
+  ).toEqual({
+    message: "run",
+    persona_preset_id: "persona-1",
+  });
 });
 
 test("team scheduled tasks store only team id", () => {
-  assert.deepEqual(
+  expect(
     buildScheduledTaskInputPayload(
       {
         message: "run",
@@ -96,19 +90,17 @@ test("team scheduled tasks store only team id", () => {
         teamId: "team-1",
       },
     ),
-    {
-      message: "run",
-      team_id: "team-1",
-    },
-  );
+  ).toEqual({
+    message: "run",
+    team_id: "team-1",
+  });
 });
 
 test("scheduled task payload id readers ignore wrong types", () => {
-  assert.equal(
+  expect(
     getScheduledTaskPersonaPresetId({ persona_preset_id: "persona-1" }),
-    "persona-1",
-  );
-  assert.equal(getScheduledTaskPersonaPresetId({ persona_preset_id: 1 }), "");
-  assert.equal(getScheduledTaskTeamId({ team_id: "team-1" }), "team-1");
-  assert.equal(getScheduledTaskTeamId({ team_id: null }), "");
+  ).toBe("persona-1");
+  expect(getScheduledTaskPersonaPresetId({ persona_preset_id: 1 })).toBe("");
+  expect(getScheduledTaskTeamId({ team_id: "team-1" })).toBe("team-1");
+  expect(getScheduledTaskTeamId({ team_id: null })).toBe("");
 });

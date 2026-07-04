@@ -260,7 +260,7 @@
 .panel-filter-trigger--active {
   border-color: var(--theme-primary);
   color: var(--theme-text);
-  box-shadow: 0 0 0 1px var(--theme-primary-light);
+  box-shadow: var(--shadow-inset-selected);
 }
 
 .panel-filter-trigger__label {
@@ -309,19 +309,13 @@
   overflow-y: auto;
   border-color: color-mix(in srgb, var(--theme-border) 70%, transparent);
   background: var(--theme-bg-card);
-  box-shadow:
-    0 1px 3px rgb(0 0 0 / 0.06),
-    0 8px 24px rgb(0 0 0 / 0.1),
-    0 20px 48px -12px rgb(15 23 42 / 0.2);
+  box-shadow: var(--shadow-med);
   overscroll-behavior: contain;
 }
 
 .dark .panel-filter-menu {
   border-color: color-mix(in srgb, var(--theme-border) 50%, transparent);
-  box-shadow:
-    0 1px 3px rgb(0 0 0 / 0.15),
-    0 8px 24px rgb(0 0 0 / 0.25),
-    0 20px 48px -12px rgb(0 0 0 / 0.4);
+  box-shadow: var(--shadow-med);
 }
 
 /* ── Thin separator between filter selects ── */
@@ -1929,11 +1923,8 @@
   background: var(--theme-bg-card);
   border: 1px solid var(--glass-border);
   border-radius: 0.5rem;
-  box-shadow:
-    0 1px 3px rgb(0 0 0 / 0.04),
-    0 4px 12px rgb(0 0 0 / 0.08),
-    0 8px 24px rgb(0 0 0 / 0.04);
-  animation: glass-select-in 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+  box-shadow: var(--shadow-med);
+  animation: glass-select-in var(--duration-fast) var(--ease-spring);
   overscroll-behavior: contain;
 }
 
@@ -1948,10 +1939,7 @@
 .dark .glass-select-dropdown {
   background: var(--theme-bg-card);
   border-color: var(--theme-border);
-  box-shadow:
-    0 1px 3px rgb(0 0 0 / 0.12),
-    0 4px 12px rgb(0 0 0 / 0.2),
-    0 8px 24px rgb(0 0 0 / 0.1);
+  box-shadow: var(--shadow-med);
 }
 
 @keyframes glass-select-in {

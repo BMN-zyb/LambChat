@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import { ChevronDown, Check, Info, Pin, Eye, Star, Search } from "lucide-react";
 import toast from "react-hot-toast";
 import { useTranslation } from "react-i18next";
+import { useStickyDropdownPosition } from "../../hooks/useStickyDropdownPosition";
 import { ModelIconImg } from "./modelIcon.tsx";
 import { shouldCloseModelSelector } from "./modelSelectorGuards";
 import type { ModelOption } from "../../services/api/model";
@@ -346,18 +347,21 @@ const ModelSelector = memo(function ModelSelector({
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, [showSelector]);
 
-  const dropdownStyle = (() => {
-    if (!showSelector || !containerRef.current) return undefined;
-    const rect = containerRef.current.getBoundingClientRect();
-    const dropdownWidth = Math.min(384, window.innerWidth - 12);
-    return {
-      top: rect.bottom + 6,
-      left: Math.min(
-        Math.max(rect.left, 6),
-        window.innerWidth - dropdownWidth - 6,
-      ),
-    };
-  })();
+  const dropdownStyle = useStickyDropdownPosition(
+    containerRef,
+    showSelector,
+    (rect) => {
+      const dropdownWidth = Math.min(384, window.innerWidth - 12);
+      return {
+        position: "fixed",
+        top: rect.bottom + 6,
+        left: Math.min(
+          Math.max(rect.left, 6),
+          window.innerWidth - dropdownWidth - 6,
+        ),
+      };
+    },
+  );
 
   const pinnedSet = useMemo(() => new Set(pinnedModelIds), [pinnedModelIds]);
 

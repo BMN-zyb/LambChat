@@ -62,6 +62,7 @@ class AgentRequest(BaseModel):
     project_id: Optional[str] = Field(None, description="Project ID to assign to new session")
     team_id: Optional[str] = Field(None, description="Team ID for team agent mode")
     goal: Optional[GoalSpec] = Field(None, description="Active goal for rubric-guided execution")
+    auto_mode: bool = Field(False, description="Auto mode: skip ask_human, autonomous execution")
 
 
 class AgentStep(BaseModel):

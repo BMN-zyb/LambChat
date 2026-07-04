@@ -257,6 +257,10 @@ export interface UseAgentReturn {
   switchAgent: (agentId: string) => void;
   selectTeam: (teamId: string | null) => void;
   selectedTeamId: string | null;
+  goalModeEnabled: boolean;
+  setGoalModeEnabled: React.Dispatch<React.SetStateAction<boolean>>;
+  autoModeEnabled: boolean;
+  setAutoModeEnabled: React.Dispatch<React.SetStateAction<boolean>>;
   refreshAgents: () => Promise<void>;
   loadHistory: (
     targetSessionId: string,

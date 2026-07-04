@@ -1,4 +1,4 @@
-import { useRef, useEffect, useState, useCallback } from "react";
+import { useRef, useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import { useLocation, useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
@@ -17,6 +17,7 @@ import { useAuth } from "../../hooks/useAuth";
 import { Permission } from "../../types";
 import { clearSessionSelectionGuard } from "../../utils/sessionSelectionGuard";
 import { useSwipeToClose } from "../../hooks/useSwipeToClose";
+import { useStickyDropdownPosition } from "../../hooks/useStickyDropdownPosition";
 import { getFullUrl } from "../../services/api";
 import { ImageWithSkeleton } from "../chat/ChatMessage/ImageWithSkeleton";
 
@@ -29,7 +30,6 @@ export function UserMenu({ onShowProfile }: UserMenuProps) {
   const { logout, hasAnyPermission, user } = useAuth();
   const navigate = useNavigate();
   const [showMenu, setShowMenu] = useState(false);
-  const [menuPosition, setMenuPosition] = useState({ top: 0, right: 0 });
   const [isMobile, setIsMobile] = useState(
     () => typeof window !== "undefined" && window.innerWidth < 640,
   );
@@ -62,16 +62,15 @@ export function UserMenu({ onShowProfile }: UserMenuProps) {
     return () => window.removeEventListener("resize", handleResize);
   }, []);
 
-  // Update menu position (desktop only)
-  const updateMenuPosition = useCallback(() => {
-    if (buttonRef.current && !isMobile) {
-      const rect = buttonRef.current.getBoundingClientRect();
-      setMenuPosition({
-        top: rect.bottom + 8,
-        right: window.innerWidth - rect.right,
-      });
-    }
-  }, [isMobile]);
+  // Position dropdown once on open, never recalculate (desktop only)
+  const menuPosition = useStickyDropdownPosition(
+    buttonRef,
+    showMenu && !isMobile,
+    (rect) => ({
+      top: rect.bottom + 8,
+      right: window.innerWidth - rect.right,
+    }),
+  );
 
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
@@ -86,20 +85,15 @@ export function UserMenu({ onShowProfile }: UserMenuProps) {
       }
     };
     if (showMenu) {
-      updateMenuPosition();
       const timer = setTimeout(() => {
         document.addEventListener("click", handleClickOutside);
       }, 0);
-      window.addEventListener("resize", updateMenuPosition);
-      window.addEventListener("scroll", updateMenuPosition, true);
       return () => {
         clearTimeout(timer);
         document.removeEventListener("click", handleClickOutside);
-        window.removeEventListener("resize", updateMenuPosition);
-        window.removeEventListener("scroll", updateMenuPosition, true);
       };
     }
-  }, [showMenu, updateMenuPosition]);
+  }, [showMenu]);
 
   // Lock body scroll on mobile when menu is open
   useEffect(() => {

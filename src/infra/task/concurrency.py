@@ -566,6 +566,7 @@ class UserConcurrencyLimiter:
                 disabled_mcp_tools = task_ctx.get("disabled_mcp_tools")
                 team_id = task_ctx.get("team_id")
                 active_goal = task_ctx.get("active_goal")
+                auto_mode = bool(task_ctx.get("auto_mode", False))
             else:
                 # Legacy fallback: context in process memory (single-worker)
                 pending = task_manager.pop_pending_task(run_id)
@@ -586,6 +587,7 @@ class UserConcurrencyLimiter:
                 disabled_mcp_tools = pending.get("disabled_mcp_tools")
                 team_id = pending.get("team_id")
                 active_goal = pending.get("active_goal")
+                auto_mode = bool(pending.get("auto_mode", False))
 
             if task_ctx and settings.TASK_BACKEND == "arq":
                 await task_manager.submit_arq(
@@ -608,6 +610,7 @@ class UserConcurrencyLimiter:
                     user_message_written=task_ctx.get("user_message_written", False),
                     team_id=team_id,
                     active_goal=active_goal,
+                    auto_mode=auto_mode,
                 )
                 await self._send_queue_processing_event(session_id, run_id)
                 return
@@ -648,6 +651,7 @@ class UserConcurrencyLimiter:
                         else None,
                         team_id=team_id,
                         active_goal=active_goal,
+                        auto_mode=auto_mode,
                     )
                 )
                 task_manager._tasks[run_id] = task

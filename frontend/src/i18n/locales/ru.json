@@ -1053,7 +1053,12 @@
     "submitSuccess": "Отзыв успешно отправлен",
     "subtitle": "Управление отзывами и оценками пользователей",
     "title": "Отзывы",
-    "totalCount": "Всего"
+    "totalCount": "Всего",
+    "addImage": "Добавить изображения (макс. 9)",
+    "imageLimit": "Максимум 9 изображений",
+    "uploadFailed": "Не удалось загрузить изображение",
+    "uploading": "Загрузка...",
+    "attachments": "Вложения"
   },
   "feishu": {
     "appId": "App ID",
@@ -1450,9 +1455,9 @@
       "commandPlaceholder": "npx -y @anthropic/mcp-server-fetch",
       "createServer": "Создать сервер",
       "dailyLimit": "Дневной лимит",
-      "enabled": "Включён",
       "disableInlineExposure": "Искать по требованию",
       "enableInlineExposure": "Показывать как функцию",
+      "enabled": "Включён",
       "envKeys": "Переменные окружения",
       "envKeysDescription": "Выберите переменные окружения для внедрения в процесс MCP сервера. Они должны быть предварительно определены в настройках переменных окружения.",
       "envKeysPlaceholder": "Выберите переменные окружения...",
@@ -1582,6 +1587,14 @@
   "mermaidViewer": {
     "hideCode": "Скрыть код",
     "showCode": "Показать код"
+  },
+  "mode": {
+    "auto": "Авто",
+    "autoDesc": "Автовыполнение, пропуск подтверждений",
+    "goal": "Цель",
+    "goalDesc": "Сообщения как цели для управляемого выполнения",
+    "hint": "Оба режима могут быть активны одновременно",
+    "title": "Режим выполнения"
   },
   "nav": {
     "adminMarketplace": "Администрирование магазина",
@@ -2186,9 +2199,9 @@
     "ENABLE_SKILLS": "Включить функцию навыков",
     "EVENT_MERGE_BATCH_SIZE": "Размер пакета объединения событий",
     "EVENT_MERGE_CONCURRENCY": "Количество параллельных объединений событий",
+    "EVENT_MERGE_IMMEDIATE_DEBOUNCE_SECONDS": "Задержка debounce для немедленного объединения событий в секундах",
     "EVENT_MERGE_INTERVAL": "Интервал объединения событий в секундах",
     "EVENT_MERGE_MAX_EVENTS_PER_TRACE": "Максимальное количество событий на трассировку при слиянии событий",
-    "EVENT_MERGE_IMMEDIATE_DEBOUNCE_SECONDS": "Задержка debounce для немедленного объединения событий в секундах",
     "EVENT_MERGE_TIMEOUT_SECONDS": "Таймаут объединения событий в секундах",
     "FEISHU_UPLOAD_BYTES_MAX_SIZE": "Максимальный размер загрузки файла для Feishu в байтах",
     "FILE_UPLOAD_MAX_FILES": "Максимальное количество файлов за одну загрузку",
@@ -2605,6 +2618,7 @@
     "filterDisabled": "Отключено",
     "filterEnabled": "Включено",
     "form": {
+      "addBinaryFile": "Загрузить бинарный файл",
       "addFile": "Добавить файл",
       "content": "Содержимое (Markdown с необязательным YAML заголовком)",
       "contentPlaceholder": "# Инструкции навыка...",

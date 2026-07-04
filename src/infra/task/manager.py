@@ -250,6 +250,7 @@ class BackgroundTaskManager:
         team_id: Optional[str] = None,
         trace_id: Optional[str] = None,
         active_goal: Optional[Dict[str, Any]] = None,
+        auto_mode: bool = False,
         session_metadata: Optional[Dict[str, Any]] = None,
         user_message_written: bool = False,
         write_user_message_immediately: bool = False,
@@ -336,6 +337,7 @@ class BackgroundTaskManager:
                     team_id=team_id,
                     existing_trace_id=trace_id or None,
                     active_goal=active_goal,
+                    auto_mode=auto_mode,
                     user_message_written=user_message_written,
                 )
             )
@@ -372,6 +374,7 @@ class BackgroundTaskManager:
         arq_pool: Any | None = None,
         team_id: Optional[str] = None,
         active_goal: Optional[Dict[str, Any]] = None,
+        auto_mode: bool = False,
         session_metadata: Optional[Dict[str, Any]] = None,
         write_user_message_immediately: bool = False,
     ) -> Tuple[str, str]:
@@ -430,6 +433,7 @@ class BackgroundTaskManager:
                     "team_id": team_id,
                     "active_goal": active_goal,
                     "recommendation_input": recommendation_input,
+                    "auto_mode": auto_mode,
                 },
             )
 

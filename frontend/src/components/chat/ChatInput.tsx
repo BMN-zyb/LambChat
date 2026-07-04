@@ -105,6 +105,10 @@ export const ChatInput = memo(function ChatInput({
   goalClearLabel,
   showHelpMenu,
   helpMenuClassName,
+  autoModeEnabled = false,
+  goalModeEnabled = false,
+  onToggleAutoMode,
+  onToggleGoalMode,
 }: ChatInputProps) {
   const { t } = useTranslation();
   const [input, setInput] = useState("");
@@ -632,17 +636,12 @@ export const ChatInput = memo(function ChatInput({
           onDragLeave={handleDragLeave}
           onDrop={handleDrop}
           className={`chat-input-container flex flex-col relative w-full rounded-3xl px-1 border transition-all duration-300 ${
-            isDraggingOver ? "border-dashed border-2 scale-[1.01]" : ""
+            isDraggingOver ? "data-drag-over" : ""
           }`}
           data-mention-active={mention.isActive || undefined}
+          data-drag-over={isDraggingOver || undefined}
           style={{
             backgroundColor: "var(--theme-bg-card)",
-            borderColor: isDraggingOver
-              ? "var(--theme-primary)"
-              : "var(--theme-border)",
-            boxShadow: isDraggingOver
-              ? "0 0 0 3px color-mix(in srgb, var(--theme-primary) 15%, transparent), 0 4px 20px rgba(0,0,0,0.08)"
-              : "0 2px 12px rgba(0,0,0,0.06)",
           }}
         >
           {/* Drag-over overlay */}
@@ -836,6 +835,10 @@ export const ChatInput = memo(function ChatInput({
             onToggleAgentOption={onToggleAgentOption}
             onStopClick={() => setStopConfirmOpen(true)}
             onNoPermissionClick={() => setContactAdminOpen(true)}
+            autoModeEnabled={autoModeEnabled}
+            goalModeEnabled={goalModeEnabled}
+            onToggleAutoMode={onToggleAutoMode}
+            onToggleGoalMode={onToggleGoalMode}
           />
         </div>
       </form>

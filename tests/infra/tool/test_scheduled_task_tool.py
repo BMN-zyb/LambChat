@@ -24,9 +24,17 @@ from src.kernel.schemas.scheduled_task import (
 class _Runtime:
     """Fake ToolRuntime with user_id."""
 
-    def __init__(self, user_id: str | None) -> None:
+    def __init__(
+        self,
+        user_id: str | None,
+        *,
+        attachments: list[dict[str, Any]] | None = None,
+    ) -> None:
         context = SimpleNamespace(user_id=user_id) if user_id is not None else None
-        self.config = {"configurable": {"context": context}}
+        configurable = {"context": context}
+        if attachments is not None:
+            configurable["attachments"] = attachments
+        self.config = {"configurable": configurable}
 
 
 async def _call_tool(tool: Any, *args: Any, **kwargs: Any) -> Any:
@@ -149,6 +157,7 @@ def test_create_tool_has_trigger_params() -> None:
     assert "team_id" in fields
     assert "role_query" in fields
     assert "team_query" in fields
+    assert "attachments" in fields
 
 
 def test_create_tool_timeout_prompt_prefers_3600s_default() -> None:
@@ -215,6 +224,88 @@ async def test_create_interval_task(monkeypatch: pytest.MonkeyPatch) -> None:
     assert request.input_payload == {"message": "Clean up expired cache entries"}
     approval_mock.assert_awaited_once()
     assert approval_mock.call_args.kwargs["preview"]["trigger_config"] == {"seconds": 300}
+
+
+@pytest.mark.asyncio
+async def test_create_task_persists_explicit_attachments(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attachment = {
+        "id": "att-1",
+        "key": "attachments/user-1/report.pdf",
+        "name": "report.pdf",
+        "type": "document",
+        "mime_type": "application/pdf",
+        "size": 12345,
+        "url": "/api/upload/file/attachments/user-1/report.pdf",
+    }
+    task = _task()
+    create_mock = AsyncMock(return_value=task)
+    _auto_approve(monkeypatch)
+
+    monkeypatch.setattr(
+        scheduled_task_tool,
+        "ScheduledTaskService",
+        _fake_service_cls(create_task=create_mock),
+    )
+
+    result = json.loads(
+        await _call_tool(
+            scheduled_task_tool.scheduled_task_create,
+            name="Report With File",
+            message="Summarize the attached report",
+            trigger_type="interval",
+            interval_seconds=300,
+            attachments=[attachment],
+            runtime=_Runtime("user-1"),
+        )
+    )
+
+    assert result["success"] is True
+    request = create_mock.call_args.kwargs.get("request") or create_mock.call_args[0][0]
+    assert request.input_payload["message"] == "Summarize the attached report"
+    assert request.input_payload["attachments"] == [attachment]
+
+
+@pytest.mark.asyncio
+async def test_create_task_inherits_runtime_attachments_when_omitted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attachments = [
+        {
+            "id": "att-1",
+            "key": "attachments/user-1/report.pdf",
+            "name": "report.pdf",
+            "type": "document",
+            "mime_type": "application/pdf",
+            "size": 12345,
+            "url": "/api/upload/file/attachments/user-1/report.pdf",
+        }
+    ]
+    task = _task()
+    create_mock = AsyncMock(return_value=task)
+    _auto_approve(monkeypatch)
+
+    monkeypatch.setattr(
+        scheduled_task_tool,
+        "ScheduledTaskService",
+        _fake_service_cls(create_task=create_mock),
+    )
+
+    result = json.loads(
+        await _call_tool(
+            scheduled_task_tool.scheduled_task_create,
+            name="Inherited File Task",
+            message="Summarize the current file",
+            trigger_type="interval",
+            interval_seconds=300,
+            runtime=_Runtime("user-1", attachments=attachments),
+        )
+    )
+
+    assert result["success"] is True
+    request = create_mock.call_args.kwargs.get("request") or create_mock.call_args[0][0]
+    assert request.input_payload["attachments"] == attachments
 
 
 @pytest.mark.asyncio
@@ -1027,6 +1118,17 @@ async def test_update_task_with_message(monkeypatch: pytest.MonkeyPatch) -> None
         "message": "Old message content",
         "agent_options": {"model_id": "model-1", "model": "gpt-4.1"},
         "user_timezone": "Asia/Shanghai",
+        "attachments": [
+            {
+                "id": "att-1",
+                "key": "attachments/user-1/report.pdf",
+                "name": "report.pdf",
+                "type": "document",
+                "mime_type": "application/pdf",
+                "size": 12345,
+                "url": "/api/upload/file/attachments/user-1/report.pdf",
+            }
+        ],
     }
     updated = _task()
     get_mock = AsyncMock(side_effect=[original, updated])
@@ -1055,6 +1157,17 @@ async def test_update_task_with_message(monkeypatch: pytest.MonkeyPatch) -> None
         "message": "New message content",
         "agent_options": {"model_id": "model-1", "model": "gpt-4.1"},
         "user_timezone": "Asia/Shanghai",
+        "attachments": [
+            {
+                "id": "att-1",
+                "key": "attachments/user-1/report.pdf",
+                "name": "report.pdf",
+                "type": "document",
+                "mime_type": "application/pdf",
+                "size": 12345,
+                "url": "/api/upload/file/attachments/user-1/report.pdf",
+            }
+        ],
     }
 
 

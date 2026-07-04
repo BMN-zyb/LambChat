@@ -130,6 +130,29 @@ async def test_submit_arq_persists_payload_and_enqueues_job() -> None:
 
 
 @pytest.mark.asyncio
+async def test_submit_arq_persists_auto_mode() -> None:
+    manager = BackgroundTaskManager()
+    fake_executor = _FakeExecutor()
+    payload_store = _FakePayloadStore()
+    arq_pool = _FakeArqPool()
+    manager._executor = fake_executor  # type: ignore[assignment]
+
+    await manager.submit_arq(
+        session_id="session-1",
+        agent_id="search",
+        message="hello",
+        user_id="user-1",
+        executor_key="agent_stream",
+        payload_store=cast(Any, payload_store),
+        arq_pool=arq_pool,
+        run_id="run-1",
+        auto_mode=True,
+    )
+
+    assert payload_store.saved[0][1]["auto_mode"] is True
+
+
+@pytest.mark.asyncio
 async def test_submit_arq_passes_session_metadata_to_initial_session() -> None:
     manager = BackgroundTaskManager()
     fake_executor = _FakeExecutor()
@@ -308,6 +331,31 @@ async def test_submit_persists_user_message_before_background_task_starts(
         ("ensure_trace", "trace-1"),
         ("emit_user_message", "hello", [{"name": "a.txt"}]),
     ]
+
+
+@pytest.mark.asyncio
+async def test_submit_passes_auto_mode_to_executor() -> None:
+    manager = BackgroundTaskManager()
+    fake_executor = _FakeExecutor()
+    manager._executor = fake_executor  # type: ignore[assignment]
+
+    async def _executor_fn(*args, **kwargs):
+        if False:
+            yield None
+
+    await manager.submit(
+        session_id="session-1",
+        agent_id="search",
+        message="hello",
+        user_id="user-1",
+        executor=_executor_fn,
+        run_id="run-1",
+        auto_mode=True,
+    )
+
+    await asyncio.sleep(0)
+
+    assert fake_executor.run_calls[0]["auto_mode"] is True
 
 
 @pytest.mark.asyncio
