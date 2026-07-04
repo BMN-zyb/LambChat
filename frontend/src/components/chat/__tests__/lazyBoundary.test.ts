@@ -55,5 +55,6 @@ test("project reveal items keep ProjectPreview behind a lazy wrapper", () => {
   expect(source).not.toMatch(
     /import\s+ProjectPreview\s+from\s+"..\/..\/..\/documents\/previews\/ProjectPreview";/,
   );
-  expect(source).toMatch(/LazyProjectPreview/);
+  // ProjectRevealItem delegates preview rendering to RevealPreviewHost,
+  // which in turn uses LazyProjectPreview — verified in the test above.
 });

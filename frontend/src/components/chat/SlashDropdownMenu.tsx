@@ -48,6 +48,21 @@ export function SlashDropdownMenu({
     }
   }, [open, highlightIndex, containerRef]);
 
+  // Compute placement before any early return — hooks must not be called conditionally
+  const placement = useStickyDropdownPosition(containerRef, open, (rect) => {
+    const pos = getMentionPopupFixedPlacement({
+      inputRect: rect ?? null,
+      viewportHeight: window.visualViewport?.height ?? window.innerHeight,
+    });
+    if (!pos) return { display: "none" };
+    return {
+      left: pos.left,
+      width: Math.min(pos.width, 320),
+      bottom: pos.bottom,
+      maxHeight: pos.maxHeight,
+    };
+  });
+
   if (!open) return null;
 
   const renderSections = () =>
@@ -155,20 +170,6 @@ export function SlashDropdownMenu({
         </div>
       );
     });
-
-  const placement = useStickyDropdownPosition(containerRef, open, (rect) => {
-    const pos = getMentionPopupFixedPlacement({
-      inputRect: rect ?? null,
-      viewportHeight: window.visualViewport?.height ?? window.innerHeight,
-    });
-    if (!pos) return { display: "none" };
-    return {
-      left: pos.left,
-      width: Math.min(pos.width, 320),
-      bottom: pos.bottom,
-      maxHeight: pos.maxHeight,
-    };
-  });
 
   // Fallback to absolute positioning when placement unavailable
   if ("display" in placement && placement.display === "none") {

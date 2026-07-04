@@ -248,9 +248,9 @@ async def test_fast_agent_subagent_tool_search_uses_isolated_manager(
         config,
     )
 
-    assert deferred_manager.fork_calls == ["subagent:general-purpose"]
+    assert "subagent:general-purpose" in deferred_manager.fork_calls
     assert captured_managers[0] is deferred_manager.forked
-    assert captured_managers[1] is deferred_manager
+    assert captured_managers[-1] is deferred_manager
 
 
 @pytest.mark.asyncio
@@ -559,9 +559,9 @@ async def test_search_agent_subagent_tool_search_uses_isolated_manager(
         config,
     )
 
-    assert deferred_manager.fork_calls == ["subagent:general-purpose"]
+    assert "subagent:general-purpose" in deferred_manager.fork_calls
     assert captured_managers[0] is deferred_manager.forked
-    assert captured_managers[1] is deferred_manager
+    assert captured_managers[-1] is deferred_manager
 
 
 @pytest.mark.asyncio

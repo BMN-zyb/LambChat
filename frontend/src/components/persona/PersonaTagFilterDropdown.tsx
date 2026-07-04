@@ -57,11 +57,12 @@ export function PersonaTagFilterDropdown({
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [isOpen, onClose]);
 
-  if (!isOpen) return null;
-
+  // Compute style before any early return — hooks must not be called conditionally
   const dropdownStyle = useStickyDropdownPosition(tagBtnRef, isOpen, (rect) =>
     getDropdownPosition(rect, TAG_DROPDOWN_WIDTH),
   );
+
+  if (!isOpen) return null;
 
   return createPortal(
     <div

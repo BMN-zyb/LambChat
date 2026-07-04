@@ -17,7 +17,7 @@ test("rewrites default static asset imports to string urls", () => {
   const content = 'import logo from "../assets/logo.png";\nconsole.log(logo);';
 
   const rewritten = rewriteProjectFileContent("/src/App.tsx", content, {
-    "/src/assets/logo.png": "https://cdn.example.com/logo.png",
+    "/assets/logo.png": "https://cdn.example.com/logo.png",
   });
 
   expect(rewritten).toMatch(
@@ -46,7 +46,7 @@ test("rewrites project text files without touching unresolved imports", () => {
   };
 
   const rewritten = rewriteProjectTextFiles(files, {
-    "/src/assets/logo.png": "https://cdn.example.com/logo.png",
+    "/assets/logo.png": "https://cdn.example.com/logo.png",
   });
 
   expect(rewritten["/src/App.tsx"]).toMatch(

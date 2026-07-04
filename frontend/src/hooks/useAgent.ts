@@ -92,7 +92,9 @@ export function useAgent(options?: UseAgentOptions): UseAgentReturn {
   useEffect(() => {
     try {
       localStorage.setItem("lamb-chat-auto-mode", String(autoModeEnabled));
-    } catch {}
+    } catch {
+      /* storage unavailable */
+    }
   }, [autoModeEnabled]);
 
   // Refs for connection management

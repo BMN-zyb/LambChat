@@ -59,6 +59,24 @@ export const AgentOptionButton = memo(function AgentOptionButton({
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, [showDropdown, externalOnOpenChange, setShowDropdown]);
 
+  // Compute dropdown style before any conditional returns — hooks must not be called conditionally
+  const dropdownStyle = useStickyDropdownPosition(
+    dropdownRef,
+    showDropdown,
+    (rect) => {
+      const vw = window.innerWidth;
+      const dropdownW = Math.min(288, vw - 16);
+      const left = Math.max(8, Math.min(rect.left, vw - dropdownW - 8));
+      return {
+        position: "fixed" as const,
+        bottom: window.innerHeight - rect.top + 4,
+        left,
+        width: dropdownW,
+        zIndex: 9999,
+      };
+    },
+  );
+
   if (externalOnOpenChange) {
     if (option.type === "boolean") return null;
     const options = option.options;
@@ -171,23 +189,6 @@ export const AgentOptionButton = memo(function AgentOptionButton({
     const selectedLabel = selectedOption?.label_key
       ? t(selectedOption.label_key)
       : selectedOption?.label || String(value);
-
-    const dropdownStyle = useStickyDropdownPosition(
-      dropdownRef,
-      showDropdown,
-      (rect) => {
-        const vw = window.innerWidth;
-        const dropdownW = Math.min(288, vw - 16);
-        const left = Math.max(8, Math.min(rect.left, vw - dropdownW - 8));
-        return {
-          position: "fixed",
-          bottom: window.innerHeight - rect.top + 4,
-          left,
-          width: dropdownW,
-          zIndex: 9999,
-        };
-      },
-    );
 
     const ActiveIcon = IconComponent || Brain;
     const isOff = String(value) === "off";

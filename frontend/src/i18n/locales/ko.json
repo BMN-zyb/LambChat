@@ -1053,7 +1053,12 @@
     "submitSuccess": "피드백이 성공적으로 제출되었습니다",
     "subtitle": "시스템에 대한 피드백",
     "title": "피드백",
-    "totalCount": "전체"
+    "totalCount": "전체",
+    "addImage": "이미지 추가 (최대 9장)",
+    "attachments": "첨부파일",
+    "imageLimit": "최대 9장의 이미지를 첨부할 수 있습니다",
+    "uploadFailed": "이미지 업로드 실패",
+    "uploading": "업로드 중..."
   },
   "feishu": {
     "appId": "App ID",

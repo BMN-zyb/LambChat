@@ -73,7 +73,7 @@ function findMatchingParen(src: string, openIdx: number): number {
     if (ch === "/") {
       const prev = src.slice(0, i).trimEnd();
       const last = prev[prev.length - 1];
-      if (i === 0 || /[(,=\[!&|?{};\n:>~^%+*\/-]$/.test(last ?? "\n")) {
+      if (i === 0 || /[(,=[!&|?{};\n:>~^%+*/-]$/.test(last ?? "\n")) {
         i++;
         while (i < src.length && src[i] !== "/") {
           if (src[i] === "\\") {
@@ -159,7 +159,7 @@ function splitArgs(src: string, start: number, end: number): string[] {
       if (
         current.length === 0 ||
         prev === "" ||
-        /[(,=\[!&|?{};\n:>~^%+*\/-]$/.test(last ?? "\n")
+        /[(,=[!&|?{};\n:>~^%+*/-]$/.test(last ?? "\n")
       ) {
         // Entire regex is part of this argument
         current += ch;
