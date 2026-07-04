@@ -25,8 +25,13 @@ from src.agents.core.node_utils import (
 )
 from src.agents.core.persona import build_persona_prompt_sections
 from src.agents.core.subagent_prompts import (
+    CODEBASE_INVESTIGATOR_PROMPT,
+    IMPLEMENTATION_WORKER_PROMPT,
     MAIN_AGENT_PROMPT_SECTIONS,
+    RESEARCH_SUBAGENT_PROMPT,
+    SPECIALIZED_SUBAGENT_DESCRIPTIONS,
     SUBAGENT_PROMPT,
+    VERIFICATION_RUNNER_PROMPT,
     build_role_subagent_section,
     get_memory_guide,
 )
@@ -54,6 +59,7 @@ from src.infra.agent.middleware import (
     ArtifactDeliveryMiddleware,
     EnvVarPromptMiddleware,
     ImageUrlToBase64Middleware,
+    MainAgentContextMiddleware,
     PromptCachingMiddleware,
     SandboxMCPMiddleware,
     SectionPromptMiddleware,
@@ -661,7 +667,7 @@ async def team_router_node(state: Dict[str, Any], config: RunnableConfig) -> Dic
             logger.error(f"[TeamAgent] Failed to build team subagents: {e}")
             raise ValueError("team_subagents_unavailable") from e
 
-    # Fallback: single general-purpose subagent
+    # Fallback: built-in specialist subagents when no explicit team is selected
     if not custom_subagents:
         subagent_prompt_sections = [
             s
@@ -674,9 +680,46 @@ async def team_router_node(state: Dict[str, Any], config: RunnableConfig) -> Dic
                 "description": "General-purpose agent for researching complex questions, searching for files and content, and executing multi-step tasks. When you are searching for a keyword or file and are not confident that you will find the right match in the first few tries use this agent to perform the search for you. This agent has access to all tools as the main agent.",
                 "system_prompt": SUBAGENT_PROMPT,
                 "middleware": _build_subagent_middleware(
+                    "general-purpose",
                     prompt_sections=subagent_prompt_sections,
                 ),
-            }
+            },
+            {
+                "name": "codebase-investigator",
+                "description": SPECIALIZED_SUBAGENT_DESCRIPTIONS["codebase-investigator"],
+                "system_prompt": CODEBASE_INVESTIGATOR_PROMPT,
+                "middleware": _build_subagent_middleware(
+                    "codebase-investigator",
+                    prompt_sections=subagent_prompt_sections,
+                ),
+            },
+            {
+                "name": "implementation-worker",
+                "description": SPECIALIZED_SUBAGENT_DESCRIPTIONS["implementation-worker"],
+                "system_prompt": IMPLEMENTATION_WORKER_PROMPT,
+                "middleware": _build_subagent_middleware(
+                    "implementation-worker",
+                    prompt_sections=subagent_prompt_sections,
+                ),
+            },
+            {
+                "name": "verification-runner",
+                "description": SPECIALIZED_SUBAGENT_DESCRIPTIONS["verification-runner"],
+                "system_prompt": VERIFICATION_RUNNER_PROMPT,
+                "middleware": _build_subagent_middleware(
+                    "verification-runner",
+                    prompt_sections=subagent_prompt_sections,
+                ),
+            },
+            {
+                "name": "researcher",
+                "description": SPECIALIZED_SUBAGENT_DESCRIPTIONS["researcher"],
+                "system_prompt": RESEARCH_SUBAGENT_PROMPT,
+                "middleware": _build_subagent_middleware(
+                    "researcher",
+                    prompt_sections=subagent_prompt_sections,
+                ),
+            },
         ]
 
     # ── 主代理中间件栈 ──
@@ -734,6 +777,8 @@ async def team_router_node(state: Dict[str, Any], config: RunnableConfig) -> Dic
     user_middleware.extend(create_code_interpreter_middleware(agent_options))
     if rubric_middleware is not None:
         user_middleware.append(rubric_middleware)
+
+    user_middleware.append(MainAgentContextMiddleware(backend=backend))
 
     user_middleware.append(PromptCachingMiddleware())
 

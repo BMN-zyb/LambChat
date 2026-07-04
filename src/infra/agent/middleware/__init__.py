@@ -3,6 +3,7 @@
 from src.infra.agent.middleware.artifact_delivery import ArtifactDeliveryMiddleware
 from src.infra.agent.middleware.code_interpreter import create_code_interpreter_middleware
 from src.infra.agent.middleware.image_url import ImageUrlToBase64Middleware
+from src.infra.agent.middleware.main_agent_context import MainAgentContextMiddleware
 from src.infra.agent.middleware.prompt_caching import PromptCachingMiddleware
 from src.infra.agent.middleware.prompt_injection import (
     EnvVarPromptMiddleware,
@@ -29,6 +30,7 @@ __all__ = [
     "EmptyContentRetryMiddleware",
     "EnvVarPromptMiddleware",
     "ImageUrlToBase64Middleware",
+    "MainAgentContextMiddleware",
     "MCPQuotaMiddleware",
     "MemoryIndexMiddleware",
     "ModelFallbackMiddleware",

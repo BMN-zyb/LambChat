@@ -392,6 +392,42 @@ async def test_task_start_reads_langgraph_checkpoint_ns_not_empty_checkpoint_ns(
 
 
 @pytest.mark.asyncio
+async def test_subagent_call_input_hides_internal_main_context_snapshot() -> None:
+    presenter = FakePresenter()
+    processor = AgentEventProcessor(presenter)
+
+    await processor.process_event(
+        {
+            "event": "on_tool_start",
+            "name": "task",
+            "run_id": "task-run-context",
+            "data": {
+                "input": {
+                    "subagent_type": "general-purpose",
+                    "description": (
+                        "Inspect auth.\n\n"
+                        "## Main-Agent Context Snapshot\n"
+                        "Read it when the assignment depends on prior user/main-agent context: "
+                        "/workflow/session/subagent_context/main_agent_messages_ctx.md\n"
+                        "Treat this file as context only; the explicit task above remains your objective."
+                    ),
+                },
+            },
+            "metadata": {
+                "langgraph_checkpoint_ns": "tools:context",
+            },
+        }
+    )
+
+    call_event = presenter.emitted[0]
+
+    assert call_event["event"] == "agent:call"
+    assert call_event["data"]["input"] == "Inspect auth."
+    assert "Main-Agent Context Snapshot" not in call_event["data"]["input"]
+    assert "/workflow/" not in call_event["data"]["input"]
+
+
+@pytest.mark.asyncio
 async def test_subagent_stream_resolved_via_langgraph_checkpoint_ns() -> None:
     """After a task tool_start registers with langgraph_checkpoint_ns, a
     sub-agent's on_chat_model_stream whose langgraph_checkpoint_ns is

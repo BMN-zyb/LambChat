@@ -19,6 +19,7 @@ from langchain.agents.middleware.types import (
 )
 from langchain_core.messages import AIMessage, ToolMessage
 
+from src.infra.agent.middleware.main_agent_context import CompressibleMarkdownLog
 from src.infra.async_utils import run_blocking_io
 
 if TYPE_CHECKING:
@@ -80,11 +81,40 @@ class SubagentActivityMiddleware(AgentMiddleware):
         self._run_id = uuid.uuid4().hex[:8]
         self._log_path = f"/workspace/subagent_logs/activity_{self._run_id}.md"
         self._payload_dir = f"/workspace/subagent_logs/payloads/{self._run_id}"
-        self._entries: list[str] = []
-        self._total_chars = 0
-        self._compressed = False
+        self._log = CompressibleMarkdownLog(
+            token_limit=self._token_limit,
+            keep_recent=self._keep_recent,
+            max_log_chars=self._max_log_chars,
+            compressed_heading="Summary of Earlier Activity",
+            truncated_label="activity entries",
+        )
         self._written = False
         self._payload_counter = 0
+
+    @property
+    def _entries(self) -> list[str]:
+        return self._log.entries
+
+    @_entries.setter
+    def _entries(self, value: list[str]) -> None:
+        self._log._entries = value
+        self._log._total_chars = sum(len(entry) for entry in value)
+
+    @property
+    def _total_chars(self) -> int:
+        return self._log.total_chars
+
+    @_total_chars.setter
+    def _total_chars(self, value: int) -> None:
+        self._log._total_chars = value
+
+    @property
+    def _compressed(self) -> bool:
+        return self._log.compressed
+
+    @_compressed.setter
+    def _compressed(self, value: bool) -> None:
+        self._log._compressed = value
 
     def _get_backend(self, runtime: Any) -> Any:
         """Resolve backend instance (mirrors FilesystemMiddleware pattern)."""
@@ -251,39 +281,12 @@ class SubagentActivityMiddleware(AgentMiddleware):
     # ------------------------------------------------------------------
 
     def _append_entry(self, entry: str) -> None:
-        if not entry:
-            return
-        self._entries.append(entry)
-        self._total_chars += len(entry)
-        self._trim_entries_to_memory_cap()
+        self._log._max_log_chars = self._max_log_chars
+        self._log.append(entry)
 
     def _trim_entries_to_memory_cap(self) -> None:
-        if self._total_chars <= self._max_log_chars:
-            return
-
-        omitted_count = 0
-        marker = "\n## [TRUNCATED] Earlier subagent activity entries omitted to cap memory."
-
-        while self._entries and self._total_chars + len(marker) > self._max_log_chars:
-            removed = self._entries.pop(0)
-            self._total_chars -= len(removed)
-            omitted_count += 1
-
-        if omitted_count <= 0:
-            return
-
-        marker = f"\n## [TRUNCATED] {omitted_count} older activity entries omitted to cap memory."
-        if self._entries and self._entries[0].startswith("\n## [TRUNCATED]"):
-            self._total_chars -= len(self._entries[0])
-            self._entries[0] = marker
-            self._total_chars += len(marker)
-        else:
-            self._entries.insert(0, marker)
-            self._total_chars += len(marker)
-
-        while self._entries and self._total_chars > self._max_log_chars:
-            removed = self._entries.pop(0)
-            self._total_chars -= len(removed)
+        self._log._max_log_chars = self._max_log_chars
+        self._log._trim_to_memory_cap()
 
     async def _check_and_compress(self, runtime: Any) -> None:
         """Compress older entries in memory if log exceeds token limit.
@@ -291,34 +294,10 @@ class SubagentActivityMiddleware(AgentMiddleware):
         No file I/O here — the compressed log is written only once at the end.
         Guard: only compresses once per run to avoid re-compressing a summary.
         """
-        if self._compressed:
-            return  # Already compressed once — don't re-compress the summary
-
-        estimated_tokens = self._total_chars // _CHARS_PER_TOKEN
-        if estimated_tokens <= self._token_limit:
-            return
-
-        if len(self._entries) <= self._keep_recent:
-            return  # Not enough entries to compress
-
-        # Split: compress old, keep recent
-        split_idx = len(self._entries) - self._keep_recent
-        old_entries = self._entries[:split_idx]
-        recent_entries = self._entries[split_idx:]
-
-        old_text = "\n".join(old_entries)
-
-        # Compress via LLM
         try:
-            compressed_summary = await self._compress_with_llm(old_text)
+            await self._log.check_and_compress(self._compress_with_llm)
         except Exception:
             logger.warning("[SubagentActivity] Compression failed, keeping raw entries")
-            return
-
-        # Rebuild entries (in-memory only)
-        self._entries = [compressed_summary, *recent_entries]
-        self._total_chars = sum(len(e) for e in self._entries)
-        self._compressed = True
 
     async def _compress_with_llm(self, text: str) -> str:
         """Use a lightweight LLM to compress activity entries."""
@@ -341,12 +320,12 @@ class SubagentActivityMiddleware(AgentMiddleware):
 
         response = await llm.ainvoke([HumanMessage(content=prompt)])
         summary = response.content if isinstance(response.content, str) else str(response.content)
-        return f"\n## [COMPRESSED] Summary of Earlier Activity\n{summary.strip()}"
+        return summary.strip()
 
     def _render_log(self) -> str:
         """Render all entries into the final log markdown."""
         header = f"# Subagent Activity Log (run: {self._run_id})\n"
-        return header + "\n".join(self._entries) + "\n"
+        return self._log.render(header)
 
     # ------------------------------------------------------------------
     # Middleware hooks

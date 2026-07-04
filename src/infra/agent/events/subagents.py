@@ -12,6 +12,16 @@ from src.infra.logging import get_logger
 
 logger = get_logger(__name__)
 
+_MAIN_AGENT_CONTEXT_MARKER = "\n## Main-Agent Context Snapshot"
+
+
+def _strip_internal_main_context_snapshot(description: str) -> str:
+    """Remove internal context handoff details from user-visible subagent cards."""
+    if _MAIN_AGENT_CONTEXT_MARKER not in description:
+        return description
+    visible, _, _ = description.partition(_MAIN_AGENT_CONTEXT_MARKER)
+    return visible.rstrip()
+
 
 class SubagentEventMixin:
     checkpoint_to_agent: dict[str, tuple[str, str]]
@@ -65,6 +75,7 @@ class SubagentEventMixin:
 
         subagent_type = inp.get("subagent_type", "unknown") if isinstance(inp, dict) else "unknown"
         description = inp.get("description", "") if isinstance(inp, dict) else ""
+        description = _strip_internal_main_context_snapshot(description)
         subagent_display_name = self._subagent_display_names.get(subagent_type, subagent_type)
         subagent_avatar = self._subagent_avatars.get(subagent_type)
         run_id = event.get("run_id", uuid.uuid4().hex)
