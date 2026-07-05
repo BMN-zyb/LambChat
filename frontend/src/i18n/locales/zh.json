@@ -633,6 +633,7 @@
       "starterPrompts": "开场提示词",
       "subagentProgress": "子代理进度",
       "summary": "总结",
+      "summaryDescription": "本轮要点",
       "synthesizing": "正在综合 {{count}} 个子代理的结果...",
       "systemPrompt": "系统提示词",
       "table": "表格",

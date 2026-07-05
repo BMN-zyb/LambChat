@@ -36,11 +36,53 @@ interface RunModePopoverProps {
   onToggleAgentOption?: (key: string, value: boolean | string | number) => void;
 }
 
-function getPositionStyle(): CSSProperties {
-  const vw = typeof window !== "undefined" ? window.innerWidth : 640;
-  const isMobile = vw < 640;
-  const dropdownW = isMobile ? Math.min(280, vw - 40) : 320;
-  return { position: "fixed", zIndex: 9999, width: dropdownW };
+interface RunModePopoverPositionOptions {
+  triggerRect: DOMRect;
+  viewportWidth: number;
+  viewportHeight: number;
+}
+
+export function getRunModePopoverPosition({
+  triggerRect,
+  viewportWidth,
+  viewportHeight,
+}: RunModePopoverPositionOptions): CSSProperties {
+  const isMobile = viewportWidth < 640;
+  const edgeInset = 16;
+  const gap = 8;
+  const width = isMobile
+    ? Math.min(280, Math.max(0, viewportWidth - edgeInset * 2))
+    : 320;
+  const left = isMobile
+    ? Math.max(edgeInset, (viewportWidth - width) / 2)
+    : Math.max(
+        edgeInset,
+        Math.min(
+          triggerRect.left + triggerRect.width / 2 - width / 2,
+          viewportWidth - width - edgeInset,
+        ),
+      );
+  const availableAbove = triggerRect.top - edgeInset - gap;
+
+  if (isMobile && availableAbove < 240) {
+    return {
+      position: "fixed",
+      zIndex: 9999,
+      width,
+      left,
+      top: edgeInset,
+      maxHeight: viewportHeight - edgeInset * 2,
+    };
+  }
+
+  return {
+    position: "fixed",
+    zIndex: 9999,
+    width,
+    left,
+    bottom: viewportHeight - triggerRect.top + gap,
+    maxHeight: Math.max(160, availableAbove),
+  };
 }
 
 /** Toggle switch – track + thumb, fully themed. */
@@ -79,17 +121,11 @@ export function RunModePopover({
     Object.keys(booleanAgentOptions ?? {}).length > 0;
 
   const getStyle = (rect: DOMRect): CSSProperties => {
-    const vw = window.innerWidth;
-    const pos = getPositionStyle();
-    const w = parseInt(String(pos.width));
-    // Center on trigger, then clamp within viewport
-    let left = rect.left + rect.width / 2 - w / 2;
-    left = Math.max(8, Math.min(left, vw - w - 8));
-    return {
-      ...pos,
-      bottom: window.innerHeight - rect.top + 8,
-      left,
-    };
+    return getRunModePopoverPosition({
+      triggerRect: rect,
+      viewportWidth: window.innerWidth,
+      viewportHeight: window.innerHeight,
+    });
   };
 
   const position = useStickyDropdownPosition(triggerRef, open, getStyle);

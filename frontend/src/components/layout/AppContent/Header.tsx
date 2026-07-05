@@ -140,14 +140,14 @@ export function Header({
             <>
               <button
                 onClick={() => setMobileSidebarOpen(true)}
-                className={`flex h-8 w-8 items-center justify-center rounded-lg hover:bg-[var(--color-background-muted)] sm:hidden transition-colors`}
+                className={`flex h-8 w-8 items-center justify-center rounded-lg text-stone-600 hover:bg-[var(--color-background-muted)] dark:text-stone-300 sm:hidden transition-colors`}
                 title={t("sidebar.expandSidebar")}
               >
                 <svg
                   xmlns="http://www.w3.org/2000/svg"
                   fill="none"
                   viewBox="0 0 24 24"
-                  className="w-5 h-5 text-[var(--color-text-secondary)]"
+                  className="w-5 h-5"
                 >
                   <path
                     fillRule="evenodd"
@@ -221,7 +221,7 @@ export function Header({
             <button
               ref={mobileMenuBtnRef}
               onClick={() => setMobileMenuOpen((v) => !v)}
-              className="flex h-8 w-8 items-center justify-center rounded-lg text-[var(--color-text-secondary)] hover:bg-[var(--color-background-muted)] transition-colors"
+              className="flex h-8 w-8 items-center justify-center rounded-lg text-stone-600 hover:bg-[var(--color-background-muted)] dark:text-stone-300 transition-colors"
               title={t("common.menu")}
             >
               <MoreHorizontal size={20} />

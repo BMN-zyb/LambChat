@@ -451,14 +451,14 @@ const ModelSelector = memo(function ModelSelector({
     >
       <button
         onClick={toggleSelector}
-        className="flex items-center gap-1.5 hover:opacity-70 transition-opacity"
+        className="flex items-center gap-1.5 text-stone-600 hover:opacity-70 dark:text-stone-300 transition-opacity"
       >
-        <span className="text-base font-semibold text-stone-600 dark:text-stone-300 max-w-[200px] truncate">
+        <span className="text-base font-semibold max-w-[200px] truncate">
           {currentModelInfo?.label || currentModelId}
         </span>
         <ChevronDown
           size={14}
-          className={`text-stone-400 dark:text-stone-300 transition-transform duration-200 ${
+          className={`transition-transform duration-200 ${
             showSelector ? "rotate-180" : ""
           }`}
         />
@@ -468,7 +468,7 @@ const ModelSelector = memo(function ModelSelector({
         createPortal(
           <div
             ref={dropdownRef}
-            className="fixed z-[10000] w-[min(calc(100vw-0.75rem),24rem)] rounded-lg bg-white/95 dark:bg-stone-800/95 shadow-[0_14px_36px_-22px_rgba(0,0,0,0.45)] border border-stone-200/90 dark:border-stone-700/90 overflow-hidden animate-scale-in"
+            className="fixed z-[10000] w-[min(calc(100vw-0.75rem),24rem)] rounded-lg bg-white dark:bg-stone-800 shadow-[0_14px_36px_-22px_rgba(0,0,0,0.45)] border border-stone-200 dark:border-stone-700 overflow-hidden animate-scale-in"
             style={dropdownStyle}
           >
             <div className="px-3 pt-2 pb-1.5">

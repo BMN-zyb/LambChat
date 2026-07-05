@@ -633,6 +633,7 @@
       "starterPrompts": "Начальные промпты",
       "subagentProgress": "Прогресс подагента",
       "summary": "Итог",
+      "summaryDescription": "Ключевые пункты",
       "synthesizing": "Синтезирование результатов из {{count}} подагента(ов)...",
       "systemPrompt": "Системный промпт",
       "table": "Таблица",

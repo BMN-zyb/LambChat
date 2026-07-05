@@ -147,6 +147,39 @@ test("tool result panel exposes console chrome styling hooks", () => {
   expect(componentsSource).not.toMatch(/\.tool-console-header-icon::after/);
 });
 
+test("tool result panel uses refined professional chrome treatment", () => {
+  const componentSource = readFileSync(
+    new URL("../ToolResultPanel.tsx", import.meta.url),
+    "utf8",
+  );
+  const componentsSource = readFileSync(
+    new URL("../../../../../styles/components.css", import.meta.url),
+    "utf8",
+  );
+
+  expect(componentSource).toMatch(/tool-console-resize-handle/);
+  expect(componentSource).toMatch(/tool-console-actions/);
+  expect(componentSource).toMatch(/tool-console-body__loading/);
+  expect(componentsSource).toMatch(
+    /\.tool-console-panel\s*\{[\s\S]*?--tool-console-surface-glow:/,
+  );
+  expect(componentsSource).toMatch(
+    /\.tool-console-panel\[data-tool-panel-mode="center"\]\s*\{[\s\S]*?box-shadow:/,
+  );
+  expect(componentsSource).toMatch(
+    /\.tool-console-header\s*\{[\s\S]*?padding-inline:/,
+  );
+  expect(componentsSource).toMatch(
+    /\.tool-console-actions\s*\{[\s\S]*?background:/,
+  );
+  expect(componentsSource).toMatch(
+    /\.tool-console-resize-handle__rail\s*\{[\s\S]*?box-shadow:/,
+  );
+  expect(componentsSource).toMatch(
+    /\.tool-console-body__loading\s*\{[\s\S]*?backdrop-filter:\s*blur\(6px\);/,
+  );
+});
+
 test("tool result panel masks rich content until the first panel paint settles", () => {
   const componentSource = readFileSync(
     new URL("../ToolResultPanel.tsx", import.meta.url),

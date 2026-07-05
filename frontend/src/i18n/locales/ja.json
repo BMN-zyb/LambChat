@@ -633,6 +633,7 @@
       "starterPrompts": "スタータープロンプト",
       "subagentProgress": "サブエージェントの進捗",
       "summary": "要約",
+      "summaryDescription": "要点",
       "synthesizing": "{{count}}件のサブエージェントの結果を統合中...",
       "systemPrompt": "システムプロンプト",
       "table": "テーブル",

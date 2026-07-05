@@ -3089,6 +3089,11 @@
    ═══════════════════════════════════════════ */
 
 .tool-console-panel {
+  --tool-console-surface-glow: color-mix(
+    in srgb,
+    var(--theme-primary) 8%,
+    transparent
+  );
   isolation: isolate;
 }
 
@@ -3100,6 +3105,20 @@
       var(--theme-bg-card) 10rem
     ),
     var(--theme-bg-card);
+}
+
+.tool-console-panel[data-tool-panel-mode="center"] {
+  border: 1px solid color-mix(in srgb, var(--theme-border) 72%, transparent);
+  background: linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--theme-bg-card) 94%, var(--theme-bg-subtle)) 0%,
+      var(--theme-bg-card) 11rem
+    ),
+    var(--theme-bg-card);
+  box-shadow:
+    0 32px 80px -42px var(--theme-shadow-lg),
+    0 14px 34px -26px var(--theme-shadow-md),
+    inset 0 1px 0 color-mix(in srgb, var(--theme-bg-card) 80%, transparent);
 }
 
 .tool-console-panel[data-tool-panel-mode="sidebar"] {
@@ -3136,14 +3155,14 @@
 .tool-console-chrome {
   position: relative;
   background: radial-gradient(
-      circle at 1.25rem 1rem,
-      color-mix(in srgb, var(--theme-primary) 10%, transparent),
-      transparent 9rem
+      ellipse at 1.75rem 0,
+      var(--tool-console-surface-glow),
+      transparent 10rem
     ),
     linear-gradient(
       180deg,
-      color-mix(in srgb, var(--theme-bg-card) 92%, var(--theme-primary-light)),
-      color-mix(in srgb, var(--theme-bg-card) 98%, var(--theme-bg-subtle))
+      color-mix(in srgb, var(--theme-bg-card) 96%, var(--theme-bg-subtle)),
+      color-mix(in srgb, var(--theme-bg-card) 99%, var(--theme-bg))
     );
 }
 
@@ -3165,7 +3184,16 @@
 
 .tool-console-header {
   min-height: 3.5rem;
+  padding-inline: 0.625rem;
   border-bottom-color: transparent;
+}
+
+.tool-console-actions {
+  padding: 0.125rem;
+  border-radius: 0.75rem;
+  background: color-mix(in srgb, var(--theme-bg) 64%, transparent);
+  box-shadow: inset 0 0 0 1px
+    color-mix(in srgb, var(--theme-border) 58%, transparent);
 }
 
 .tool-console-header-icon {
@@ -3175,6 +3203,22 @@
   box-shadow:
     inset 0 0 0 1px color-mix(in srgb, var(--theme-border) 70%, transparent),
     0 1px 2px color-mix(in srgb, var(--theme-shadow-sm) 70%, transparent);
+}
+
+.tool-console-resize-handle {
+  width: 1rem;
+}
+
+.tool-console-resize-handle__rail {
+  opacity: 0;
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--theme-primary) 18%, transparent),
+    0 8px 18px -12px var(--theme-primary);
+}
+
+.tool-console-resize-handle:hover .tool-console-resize-handle__rail {
+  opacity: 1;
+  background: color-mix(in srgb, var(--theme-primary) 54%, transparent);
 }
 
 .tool-console-title {
@@ -3217,6 +3261,11 @@
 
 .tool-console-body::-webkit-scrollbar-thumb:hover {
   background: color-mix(in srgb, var(--theme-border-hover) 86%, transparent);
+}
+
+.tool-console-body__loading {
+  background: color-mix(in srgb, var(--theme-bg) 92%, transparent);
+  backdrop-filter: blur(6px);
 }
 
 .tool-console-footer {

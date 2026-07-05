@@ -373,10 +373,10 @@ export function ToolResultPanel({
             }}
           />
           <div
-            className="hidden sm:block absolute left-0 top-0 bottom-0 -translate-x-1/2 z-10 cursor-col-resize pointer-events-auto group"
+            className="tool-console-resize-handle hidden sm:block absolute left-0 top-0 bottom-0 -translate-x-1/2 z-10 cursor-col-resize pointer-events-auto group"
             onMouseDown={handleResize}
           >
-            <div className="absolute inset-y-0 left-1/2 -translate-x-1/2 w-1 rounded-full bg-transparent group-hover:bg-[var(--theme-primary)]/50 transition-colors duration-200" />
+            <div className="tool-console-resize-handle__rail absolute inset-y-0 left-1/2 -translate-x-1/2 w-1 rounded-full bg-transparent transition-colors duration-200" />
           </div>
         </>
       )}
@@ -489,7 +489,7 @@ export function ToolResultPanel({
 
               {/* Center / Fullscreen / Close */}
               {!hideViewToggle && (
-                <div className="flex items-center gap-px sm:gap-1 shrink-0">
+                <div className="tool-console-actions flex items-center gap-px sm:gap-1 shrink-0">
                   <ToolbarIconButton
                     variant="muted"
                     onClick={() => {
@@ -534,15 +534,17 @@ export function ToolResultPanel({
                 </div>
               )}
               {hideViewToggle && (
-                <ToolbarIconButton
-                  variant="muted"
-                  onClick={() => {
-                    handleUserClose();
-                  }}
-                  aria-label={t("common.close")}
-                  title={t("common.close")}
-                  icon={<X size={16} />}
-                />
+                <div className="tool-console-actions flex items-center gap-px sm:gap-1 shrink-0">
+                  <ToolbarIconButton
+                    variant="muted"
+                    onClick={() => {
+                      handleUserClose();
+                    }}
+                    aria-label={t("common.close")}
+                    title={t("common.close")}
+                    icon={<X size={16} />}
+                  />
+                </div>
               )}
             </div>
           )}
@@ -567,7 +569,7 @@ export function ToolResultPanel({
           {children}
         </div>
         {!contentReady && (
-          <div className="tool-console-body__loading absolute inset-0 z-[1] flex items-center justify-center bg-theme-bg/95-[1px]">
+          <div className="tool-console-body__loading absolute inset-0 z-[1] flex items-center justify-center">
             <LoadingSpinner
               size="md"
               color="text-theme-text-tertiary"

@@ -1,5 +1,7 @@
 import {
+  useCallback,
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   type CSSProperties,
@@ -25,24 +27,32 @@ export function useStickyDropdownPosition<T extends HTMLElement = HTMLElement>(
   const posFnRef = useRef(getPosition);
   posFnRef.current = getPosition;
 
-  useEffect(() => {
+  const updatePositionNow = useCallback(() => {
+    const rect = triggerRef.current?.getBoundingClientRect();
+    if (rect) {
+      setStyle(posFnRef.current(rect));
+    }
+  }, [triggerRef]);
+
+  useLayoutEffect(() => {
     if (!isOpen) {
       setStyle({});
       return;
     }
 
+    updatePositionNow();
+  }, [isOpen, triggerRef, updatePositionNow]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+
     let raf = 0;
     const update = () => {
       cancelAnimationFrame(raf);
       raf = requestAnimationFrame(() => {
-        const rect = triggerRef.current?.getBoundingClientRect();
-        if (rect) {
-          setStyle(posFnRef.current(rect));
-        }
+        updatePositionNow();
       });
     };
-
-    update();
 
     window.addEventListener("resize", update);
     window.addEventListener("scroll", update, true);
@@ -56,7 +66,7 @@ export function useStickyDropdownPosition<T extends HTMLElement = HTMLElement>(
       window.visualViewport?.removeEventListener("resize", update);
       window.visualViewport?.removeEventListener("scroll", update);
     };
-  }, [isOpen, triggerRef]);
+  }, [isOpen, triggerRef, updatePositionNow]);
 
   return style;
 }
