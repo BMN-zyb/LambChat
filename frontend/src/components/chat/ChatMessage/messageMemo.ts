@@ -28,7 +28,7 @@ function getPreviewKey(preview?: RevealPreviewRequest | null): string {
 
 function partOwnsPreview(part: MessagePart, previewKey: string): boolean {
   if (part.type === "artifact") {
-    return part.artifact.preview.previewKey === previewKey;
+    return part.artifact.preview?.previewKey === previewKey;
   }
   if (part.type === "subagent") {
     return (

@@ -31,6 +31,36 @@ _SENSITIVE_JSON_RE = re.compile(
 _AUTHORIZATION_BEARER_RE = re.compile(r"(?i)(authorization\s*:\s*bearer\s+)([^\s,;]+)")
 
 
+def subagent_handoff_dir_for_backend(backend: Any, dirname: str) -> str:
+    """Resolve a subagent handoff directory using the same backend workspace rules."""
+    for candidate in (backend, getattr(backend, "default", None)):
+        work_dir = getattr(candidate, "work_dir", None)
+        if isinstance(work_dir, str) and work_dir.strip():
+            return f"{work_dir.rstrip('/')}/{dirname.strip('/')}"
+    return f"/{dirname.strip('/')}"
+
+
+async def write_subagent_handoff_file(
+    backend: Any,
+    *,
+    dirname: str,
+    filename: str,
+    content: str,
+    log_context: str,
+) -> str | None:
+    """Write a subagent handoff file and return the backend-visible path."""
+    path = f"{subagent_handoff_dir_for_backend(backend, dirname)}/{filename.strip('/')}"
+    try:
+        write_result = await backend.awrite(path, content)
+        if getattr(write_result, "error", None):
+            logger.warning("[%s] Write failed: %s", log_context, write_result.error)
+            return None
+        return str(getattr(write_result, "path", None) or path)
+    except Exception:
+        logger.warning("[%s] Backend write failed", log_context, exc_info=True)
+        return None
+
+
 class CompressibleMarkdownLog:
     """Small reusable markdown log with one-shot older-entry compression."""
 
@@ -228,14 +258,6 @@ class MainAgentContextMiddleware(AgentMiddleware):
         return self._backend
 
     @staticmethod
-    def _context_dir_for_backend(backend: Any) -> str:
-        for candidate in (backend, getattr(backend, "default", None)):
-            work_dir = getattr(candidate, "work_dir", None)
-            if isinstance(work_dir, str) and work_dir.strip():
-                return f"{work_dir.rstrip('/')}/subagent_context"
-        return "/subagent_context"
-
-    @staticmethod
     def _cache_key(request: Any, messages: list[Any]) -> tuple[Any, ...]:
         runtime = getattr(request, "runtime", None)
         message_ids = tuple(getattr(message, "id", None) or id(message) for message in messages)
@@ -298,24 +320,23 @@ class MainAgentContextMiddleware(AgentMiddleware):
 
         run_id = self._run_id_factory()
         backend = self._get_backend(getattr(request, "runtime", None))
-        path = f"{self._context_dir_for_backend(backend)}/main_agent_messages_{run_id}.md"
         header = (
             f"# Main Agent Conversation Context (snapshot: {run_id})\n"
             f"Captured at: {time.strftime(_CONTEXT_TIMESTAMP_FORMAT)}\n\n"
         )
         content = log.render(header)
 
-        try:
-            write_result = await backend.awrite(path, content)
-            if getattr(write_result, "error", None):
-                logger.warning("[MainAgentContext] Context write failed: %s", write_result.error)
-                return None
-            context_path = str(getattr(write_result, "path", None) or path)
-            self._snapshot_cache[cache_key] = context_path
-            return context_path
-        except Exception:
-            logger.warning("[MainAgentContext] Backend write failed", exc_info=True)
+        context_path = await write_subagent_handoff_file(
+            backend,
+            dirname="subagent_context",
+            filename=f"main_agent_messages_{run_id}.md",
+            content=content,
+            log_context="MainAgentContext",
+        )
+        if not context_path:
             return None
+        self._snapshot_cache[cache_key] = context_path
+        return context_path
 
     @staticmethod
     def _description_with_context(description: str, context_path: str) -> str:

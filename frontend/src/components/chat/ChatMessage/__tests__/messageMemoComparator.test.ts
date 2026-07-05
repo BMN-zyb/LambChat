@@ -81,6 +81,47 @@ test("updates the message that owns an active preview", () => {
   ).toBe(false);
 });
 
+test("ignores artifact parts without preview data when checking active previews", () => {
+  const messageWithLegacyArtifact: Message = {
+    ...baseMessage,
+    parts: [
+      {
+        type: "artifact",
+        success: true,
+        artifact: {
+          kind: "file",
+          id: "artifact-1",
+          name: "legacy.txt",
+          path: "/tmp/legacy.txt",
+        },
+      } as Message["parts"][number],
+    ],
+  };
+
+  expect(
+    areChatMessagePropsEqual(
+      {
+        message: messageWithLegacyArtifact,
+        isLastMessage: false,
+        activePreview: {
+          kind: "file",
+          previewKey: "file-1",
+          filePath: "/tmp/one.txt",
+        },
+      },
+      {
+        message: messageWithLegacyArtifact,
+        isLastMessage: false,
+        activePreview: {
+          kind: "file",
+          previewKey: "file-2",
+          filePath: "/tmp/two.txt",
+        },
+      },
+    ),
+  ).toBe(true);
+});
+
 test("updates streaming messages when their message object changes", () => {
   expect(
     areChatMessagePropsEqual(

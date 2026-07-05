@@ -16,3 +16,7 @@ def test_all_deep_agent_nodes_install_main_agent_context_middleware() -> None:
         source = path.read_text()
         assert "MainAgentContextMiddleware" in source, path
         assert "user_middleware.append(MainAgentContextMiddleware(backend=backend))" in source, path
+        assert "SubagentResultHandoffMiddleware" in source, path
+        assert (
+            "user_middleware.append(SubagentResultHandoffMiddleware(backend=backend))" in source
+        ), path

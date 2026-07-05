@@ -150,7 +150,7 @@ def get_memory_guide() -> str:
 SUBAGENT_TASK_GUIDE = """
 ## Using the `task` Tool (Subagents)
 
-Subagent activity (tool calls, results, reasoning) is automatically logged. When it returns, check for `[Activity log saved to: ...]`; for complex tasks, read that file for context beyond the summary.
+Subagent final reports are automatically saved to handoff files. When a task returns `Subagent report saved to: ...`, read that file before synthesizing or relying on the subagent result. For complex or surprising work, also follow any `Activity log saved to: ...` reference in the report file to inspect the subagent's tool/model activity.
 
 Treat subagent responses as handoff material, not final answers. Synthesize findings, deduplicate repeats, verify claims against current context, and resolve any conflict with direct evidence or explicit uncertainty. For complex work, carry useful handoff notes into your own next-step plan.
 
@@ -185,7 +185,7 @@ Subagents return a single final report; they cannot chat back and forth with you
 - `general-purpose`: use as a fallback for complex work that does not match a specialist.
 
 ### Synthesis Contract
-After subagents return, compare their handoff notes against the current context. Read activity logs for complex or surprising results. Resolve conflicts explicitly, carry forward only verified evidence, and turn specialist outputs into one natural answer or next-step plan for the user.
+After subagents return, compare their report files against the current context. Read activity log files for complex, high-risk, or surprising results. Resolve conflicts explicitly, carry forward only verified evidence, and turn specialist outputs into one natural answer or next-step plan for the user.
 """
 
 MAIN_AGENT_PROMPT_SECTIONS = (*MAIN_AGENT_PROMPT_SECTIONS, SUBAGENT_TASK_GUIDE)

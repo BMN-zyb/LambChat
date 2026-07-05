@@ -17,6 +17,8 @@ from src.infra.agent.middleware.retry import (
     _is_empty_content,
     create_retry_middleware,
 )
+from src.infra.agent.middleware.subagent_activity import SubagentActivityMiddleware
+from src.infra.agent.middleware.subagent_result_handoff import SubagentResultHandoffMiddleware
 from src.infra.agent.middleware.tool_interception import (
     MCPQuotaMiddleware,
     ToolResultBinaryMiddleware,
@@ -37,6 +39,8 @@ __all__ = [
     "PromptCachingMiddleware",
     "SandboxMCPMiddleware",
     "SectionPromptMiddleware",
+    "SubagentActivityMiddleware",
+    "SubagentResultHandoffMiddleware",
     "ToolResultBinaryMiddleware",
     "ToolSearchMiddleware",
     "_is_empty_content",

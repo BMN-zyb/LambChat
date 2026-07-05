@@ -2,6 +2,8 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from langchain_core.messages import ToolMessage
+from langgraph.types import Command
 
 from src.infra.agent import AgentEventProcessor
 from src.infra.agent.events.buffers import TextChunkBuffer
@@ -554,6 +556,57 @@ async def test_task_end_resolves_agent_info_via_langgraph_checkpoint_ns() -> Non
     assert result_event["data"]["success"] is True
     # checkpoint_to_agent entry must have been popped
     assert tools_ns not in processor.checkpoint_to_agent
+
+
+@pytest.mark.asyncio
+async def test_task_end_prefers_original_subagent_content_for_visible_result() -> None:
+    presenter = FakePresenter()
+    processor = AgentEventProcessor(presenter)
+    tools_ns = "tools:original-result"
+
+    await processor.process_event(
+        {
+            "event": "on_tool_start",
+            "name": "task",
+            "run_id": "task-run-original",
+            "data": {
+                "input": {
+                    "subagent_type": "general-purpose",
+                    "description": "Investigate",
+                },
+            },
+            "metadata": {"langgraph_checkpoint_ns": tools_ns},
+        }
+    )
+
+    presenter.emitted.clear()
+    await processor.process_event(
+        {
+            "event": "on_tool_end",
+            "name": "task",
+            "run_id": "task-run-original",
+            "data": {
+                "output": Command(
+                    update={
+                        "messages": [
+                            ToolMessage(
+                                "Subagent report saved to: /subagent_reports/report.md",
+                                tool_call_id="call-1",
+                                additional_kwargs={
+                                    "lambchat_original_content": "Original final report"
+                                },
+                            )
+                        ]
+                    }
+                )
+            },
+            "metadata": {"langgraph_checkpoint_ns": tools_ns},
+        }
+    )
+
+    result_event = presenter.emitted[0]
+    assert result_event["event"] == "agent:result"
+    assert result_event["data"]["result"] == "Original final report"
 
 
 @pytest.mark.asyncio

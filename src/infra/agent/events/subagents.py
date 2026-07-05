@@ -134,7 +134,18 @@ class SubagentEventMixin:
         if isinstance(out_update, dict):
             messages = out_update.get("messages", [])
             if messages:
-                result_text = getattr(messages[0], "content", result_text)
+                message = messages[0]
+                original_content = getattr(message, "additional_kwargs", {}).get(
+                    "lambchat_original_content"
+                )
+                if original_content is not None:
+                    result_text = (
+                        original_content
+                        if isinstance(original_content, str)
+                        else str(original_content)
+                    )
+                else:
+                    result_text = getattr(message, "content", result_text)
 
         error_message = None
         tool_status = get_tool_status(out)

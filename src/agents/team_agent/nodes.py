@@ -64,11 +64,12 @@ from src.infra.agent.middleware import (
     PromptCachingMiddleware,
     SandboxMCPMiddleware,
     SectionPromptMiddleware,
+    SubagentActivityMiddleware,
+    SubagentResultHandoffMiddleware,
     ToolResultBinaryMiddleware,
     create_code_interpreter_middleware,
     create_retry_middleware,
 )
-from src.infra.agent.middleware_subagent import SubagentActivityMiddleware
 from src.infra.backend import (
     create_persistent_backend_factory,
     create_sandbox_backend_factory,
@@ -782,6 +783,7 @@ async def team_router_node(state: Dict[str, Any], config: RunnableConfig) -> Dic
         user_middleware.append(rubric_middleware)
 
     user_middleware.append(MainAgentContextMiddleware(backend=backend))
+    user_middleware.append(SubagentResultHandoffMiddleware(backend=backend))
 
     user_middleware.append(PromptCachingMiddleware())
 

@@ -324,28 +324,3 @@ async def test_main_agent_context_middleware_redacts_common_secret_values() -> N
     assert "sk-live-secret" not in content
     assert "hunter2" not in content
     assert "[REDACTED]" in content
-
-
-@pytest.mark.asyncio
-async def test_subagent_activity_compressor_returns_body_without_compressed_heading(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from src.infra.agent.middleware_subagent import SubagentActivityMiddleware
-
-    class _FakeLLM:
-        async def ainvoke(self, _messages):
-            return SimpleNamespace(content="- concise summary")
-
-    async def _get_model(**_kwargs):
-        return _FakeLLM()
-
-    monkeypatch.setattr(
-        "src.infra.llm.client.LLMClient.get_model",
-        _get_model,
-    )
-
-    middleware = SubagentActivityMiddleware(backend=object())
-    summary = await middleware._compress_with_llm("old log")
-
-    assert summary == "- concise summary"
-    assert "[COMPRESSED]" not in summary

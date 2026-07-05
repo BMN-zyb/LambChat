@@ -68,7 +68,8 @@ def test_main_agent_guide_requires_synthesizing_subagent_results() -> None:
         "synthesize",
         "deduplicate",
         "conflict",
-        "handoff notes",
+        "report files",
+        "activity log",
     ]
 
     guide = SUBAGENT_TASK_GUIDE.lower()
