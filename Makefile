@@ -129,7 +129,7 @@ typecheck:
 
 test: frontend-test
 	@echo "🧪 运行后端测试..."
-	uv run pytest
+	uv run --no-sync pytest
 
 frontend-test:
 	@echo "🧪 运行前端测试..."
