@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback, useMemo, memo } from "react";
 import toast from "react-hot-toast";
-import { Ban, Plus, UploadCloud } from "lucide-react";
+import { Ban, Plus } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { ImageViewer } from "../common";
 import { ConfirmDialog } from "../common/ConfirmDialog";
@@ -21,6 +21,7 @@ import { ChatInputToolbar } from "./ChatInputToolbar";
 import { ChatInputSelectors } from "./ChatInputSelectors";
 import { ChatInputHelpMenu } from "./ChatInputHelpMenu";
 import { ChatInputAttachments } from "./ChatInputAttachments";
+import { ChatInputDragOverlay } from "./ChatInputDragOverlay";
 import { SkillChip } from "./SkillChip";
 import { SkillSelector } from "../selectors/SkillSelector";
 import { FILE_CATEGORY_PERMISSIONS } from "./chatInputConstants";
@@ -645,36 +646,7 @@ export const ChatInput = memo(function ChatInput({
             backgroundColor: "var(--theme-bg-card)",
           }}
         >
-          {/* Drag-over overlay */}
-          {isDraggingOver && (
-            <div className="absolute inset-0 z-10 flex items-center justify-center rounded-3xl pointer-events-none">
-              <div
-                className="flex flex-col items-center gap-2 rounded-2xl px-10 py-8 transition-all"
-                style={{
-                  backgroundColor:
-                    "color-mix(in srgb, var(--theme-primary) 6%, transparent)",
-                }}
-              >
-                <UploadCloud
-                  size={28}
-                  className="animate-bounce"
-                  style={{
-                    color: "var(--theme-primary)",
-                    opacity: 0.7,
-                  }}
-                />
-                <span
-                  className="text-sm font-medium"
-                  style={{
-                    color: "var(--theme-primary)",
-                    opacity: 0.7,
-                  }}
-                >
-                  {t("chat.dropFilesHere", "Drop files here to upload")}
-                </span>
-              </div>
-            </div>
-          )}
+          {isDraggingOver && <ChatInputDragOverlay />}
           <ActiveGoalBar
             goal={activeGoal ?? null}
             label={goalLabel}
