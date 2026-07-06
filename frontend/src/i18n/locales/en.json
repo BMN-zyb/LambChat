@@ -780,6 +780,7 @@
   "common": {
     "about": "About",
     "accessDenied": "Access Denied",
+    "add": "common.add",
     "all": "All",
     "assistant": "Assistant",
     "back": "Back",
@@ -883,6 +884,7 @@
     "copied": "Copied",
     "copy": "Copy",
     "copyCode": "Copy code",
+    "copyLink": "documents.copyLink",
     "csv": "CSV",
     "csvDataFile": "CSV data file",
     "daysAgo": "{{count}}d ago",
@@ -916,6 +918,7 @@
     "htmlDocument": "HTML Document",
     "invalidExcalidrawFormat": "Invalid Excalidraw file format",
     "lines": "{{count}} lines",
+    "linkCopied": "documents.linkCopied",
     "list": "List",
     "listView": "List view",
     "loading": "Loading...",
@@ -1027,8 +1030,10 @@
   },
   "feedback": {
     "addComment": "Add comment",
+    "addImage": "Add images (max 9)",
     "allRatings": "All Ratings",
     "alreadySubmitted": "You've already submitted feedback for this conversation",
+    "attachments": "Attachments",
     "buttonLabel": "Feedback",
     "comment": "Comment",
     "commentLabel": "Comment (optional)",
@@ -1041,6 +1046,7 @@
     "deleteSuccess": "Feedback deleted successfully",
     "detailTitle": "Feedback Details",
     "filterByRating": "Filter by Rating",
+    "imageLimit": "Maximum 9 images allowed",
     "negative": "Negative",
     "noFeedback": "No feedback yet",
     "noFeedbackHint": "User feedback will appear here",
@@ -1055,11 +1061,9 @@
     "subtitle": "Manage user feedback and ratings",
     "title": "Feedback",
     "totalCount": "Total Count",
-    "addImage": "Add images (max 9)",
-    "imageLimit": "Maximum 9 images allowed",
     "uploadFailed": "Failed to upload image",
     "uploading": "Uploading...",
-    "attachments": "Attachments"
+    "viewDetail": "feedback.viewDetail"
   },
   "feishu": {
     "appId": "App ID",

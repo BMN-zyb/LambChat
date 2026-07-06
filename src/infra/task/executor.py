@@ -137,7 +137,9 @@ class TaskExecutor:
             # 立即发送 user:message 事件（任务开始时固定发送）
             if message and not already_written:
                 await presenter.emit_user_message(
-                    display_message or message, attachments=attachments
+                    display_message or message,
+                    attachments=attachments,
+                    enabled_skills=enabled_skills,
                 )
 
             # 保存 trace_id 和 agent_id 到 run_info，保留已有的 flag

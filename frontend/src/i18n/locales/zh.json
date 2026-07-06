@@ -780,6 +780,7 @@
   "common": {
     "about": "关于",
     "accessDenied": "访问被拒绝",
+    "add": "添加",
     "all": "全部",
     "assistant": "助手",
     "back": "返回",
@@ -883,6 +884,7 @@
     "copied": "已复制",
     "copy": "复制",
     "copyCode": "复制代码",
+    "copyLink": "复制链接",
     "csv": "CSV",
     "csvDataFile": "CSV 数据文件",
     "daysAgo": "{{count}}天前",
@@ -916,6 +918,7 @@
     "htmlDocument": "HTML 文档",
     "invalidExcalidrawFormat": "无效的 Excalidraw 文件格式",
     "lines": "{{count}} 行",
+    "linkCopied": "链接已复制到剪贴板",
     "list": "列表",
     "listView": "列表视图",
     "loading": "加载中...",
@@ -1027,8 +1030,10 @@
   },
   "feedback": {
     "addComment": "添加评论",
+    "addImage": "添加图片（最多 9 张）",
     "allRatings": "所有评分",
     "alreadySubmitted": "您已对此对话提交过反馈",
+    "attachments": "附件",
     "buttonLabel": "反馈",
     "comment": "评论",
     "commentLabel": "评论（可选）",
@@ -1041,6 +1046,7 @@
     "deleteSuccess": "反馈已删除",
     "detailTitle": "详情",
     "filterByRating": "按评分筛选",
+    "imageLimit": "最多上传 9 张图片",
     "negative": "差评",
     "noFeedback": "暂无反馈",
     "noFeedbackHint": "用户提交的反馈将显示在这里",
@@ -1055,11 +1061,9 @@
     "subtitle": "管理用户反馈和评价",
     "title": "反馈管理",
     "totalCount": "反馈总数",
-    "addImage": "添加图片（最多 9 张）",
-    "imageLimit": "最多上传 9 张图片",
     "uploadFailed": "图片上传失败",
     "uploading": "上传中...",
-    "attachments": "附件"
+    "viewDetail": "查看详情"
   },
   "feishu": {
     "appId": "App ID",

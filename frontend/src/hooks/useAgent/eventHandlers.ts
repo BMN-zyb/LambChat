@@ -405,6 +405,9 @@ function handleUserMessage(
         : uuid();
   const userContent = data.content || "";
   const userAttachments = convertAttachments(data.attachments) || [];
+  const enabledSkills = Array.isArray(data.enabled_skills)
+    ? data.enabled_skills
+    : undefined;
 
   if (userContent) {
     ctx.setMessages((prev) => {
@@ -415,6 +418,7 @@ function handleUserMessage(
           content: userContent,
           timestamp: eventTimestamp ? parseDate(eventTimestamp) : new Date(),
           attachments: userAttachments,
+          enabledSkills,
         };
         return [...prev, newUserMessage];
       }
@@ -439,6 +443,7 @@ function handleUserMessage(
                 userAttachments.length > 0
                   ? userAttachments
                   : candidate.attachments,
+              enabledSkills,
             };
             return updatedMessages;
           }
@@ -451,6 +456,7 @@ function handleUserMessage(
         content: userContent,
         timestamp: eventTimestamp ? parseDate(eventTimestamp) : new Date(),
         attachments: userAttachments,
+        enabledSkills,
       };
       const streamingAssistantIndex = prev.findIndex(
         (m) => m.role === "assistant" && m.isStreaming,

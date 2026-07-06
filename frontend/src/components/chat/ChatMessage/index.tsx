@@ -466,6 +466,7 @@ export const ChatMessage = memo(function ChatMessage({
           content={message.content}
           attachments={message.attachments}
           isLastMessage={isLastMessage}
+          enabledSkills={message.enabledSkills}
         />
       </div>
     );
@@ -528,7 +529,7 @@ export const ChatMessage = memo(function ChatMessage({
           {isStreaming && !hasParts && <ThinkingIndicator />}
 
           {hasParts ? (
-            <div className="space-y-3 my-2 pl-1">
+            <div className="space-y-3 my-2">
               {message.parts!.map((part: MessagePart, index: number) =>
                 part.type === "recommend_questions" ? null : (
                   <MessagePartRenderer
@@ -598,7 +599,7 @@ export const ChatMessage = memo(function ChatMessage({
           )}
           {/* Streaming indicator - bottom of message (when not showing thinking indicator) */}
           {message.isStreaming && !(isStreaming && !hasParts) && (
-            <div className="mt-3 pl-1">
+            <div className="mt-3">
               <CollapsiblePill
                 status="loading"
                 icon={<Sparkles size={12} className="shrink-0 opacity-50" />}
@@ -687,7 +688,7 @@ export const ChatMessage = memo(function ChatMessage({
         {!message.isStreaming &&
           isLastMessage &&
           message.parts?.some((p) => p.type === "recommend_questions") && (
-            <div className="space-y-3 my-2 pl-1">
+            <div className="space-y-3 my-2">
               {message
                 .parts!.filter((p) => p.type === "recommend_questions")
                 .map((part, index) => (

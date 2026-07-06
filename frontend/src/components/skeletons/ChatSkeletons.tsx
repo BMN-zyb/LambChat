@@ -102,7 +102,7 @@ function AssistantMessageSkeleton() {
         </div>
         {/* Response content skeleton */}
         <div className="min-w-0 min-h-0 py-1 sm:py-2">
-          <div className="space-y-3 my-2 pl-1">
+          <div className="space-y-3 my-2">
             <div className="skeleton-line w-full h-2 sm:h-[7px] rounded-full" />
             <div className="flex gap-2 sm:gap-3">
               <div className="skeleton-line flex-1 h-2 sm:h-[7px] rounded-full" />
@@ -124,7 +124,7 @@ function AssistantMessageSkeleton() {
 function ChatInputSkeleton() {
   return (
     <div className="shrink-0">
-      <div className="mx-auto w-full max-w-4xl lg:max-w-5xl xl:max-w-6xl px-4 sm:px-6 py-3">
+      <div className="mx-auto w-full max-w-4xl lg:max-w-5xl xl:max-w-6xl px-3 sm:px-5 pb-3">
         <div
           className="flex flex-col w-full rounded-3xl px-1 border"
           style={{

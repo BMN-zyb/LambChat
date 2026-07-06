@@ -550,6 +550,7 @@ async def chat_stream(
             attachments=[a.model_dump() for a in request.attachments]
             if request.attachments
             else None,
+            enabled_skills=request.enabled_skills,
         )
 
         # Mark user message as already written so executor skips re-emitting

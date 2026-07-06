@@ -10,6 +10,7 @@ import { openAttachmentPreview } from "../attachmentPreviewStore";
 import { getUserMessageActionButtonVisibilityClass } from "./userMessageBubbleState";
 import { copyToClipboard } from "../../../utils/clipboard";
 import { useSessionImageGallery } from "./sessionImageGallery";
+import { SkillChip } from "../SkillChip";
 
 // User message bubble component (with copy function, supports markdown rendering) - ChatGPT style
 export function UserMessageBubble({
@@ -17,11 +18,13 @@ export function UserMessageBubble({
   attachments,
   onFork,
   isLastMessage,
+  enabledSkills,
 }: {
   content?: string;
   attachments?: MessageAttachment[];
   onFork?: () => void;
   isLastMessage?: boolean;
+  enabledSkills?: string[];
 }) {
   const { t } = useTranslation();
   const [copied, setCopied] = useState(false);
@@ -91,11 +94,21 @@ export function UserMessageBubble({
                 boxShadow: "var(--shadow-low)",
               }}
             >
-              <div
-                className="leading-relaxed text-[15px] sm:text-base"
-                style={{ color: "var(--theme-text)" }}
-              >
-                <MarkdownContent content={content!} />
+              <div className="flex flex-wrap items-baseline gap-x-1.5 gap-y-1">
+                {/* Skill chips - inline with content */}
+                {enabledSkills && enabledSkills.length > 0 && (
+                  <div className="skill-chip-row shrink-0">
+                    {enabledSkills.map((skillName) => (
+                      <SkillChip key={skillName} name={skillName} tags={[]} />
+                    ))}
+                  </div>
+                )}
+                <div
+                  className="leading-relaxed text-[15px] sm:text-base min-w-0 flex-1"
+                  style={{ color: "var(--theme-text)" }}
+                >
+                  <MarkdownContent content={content!} />
+                </div>
               </div>
             </div>
           )}

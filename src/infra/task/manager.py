@@ -125,6 +125,7 @@ class BackgroundTaskManager:
         message: str,
         display_message: str | None,
         attachments: Optional[List[Dict[str, Any]]],
+        enabled_skills: Optional[List[str]] = None,
     ) -> str:
         """Persist the user message before the background worker starts."""
         from src.agents.core import resolve_agent_name
@@ -142,7 +143,9 @@ class BackgroundTaskManager:
             )
         )
         await presenter._ensure_trace()
-        await presenter.emit_user_message(display_message or message, attachments=attachments)
+        await presenter.emit_user_message(
+            display_message or message, attachments=attachments, enabled_skills=enabled_skills
+        )
         return presenter.trace_id
 
     def _status_queries(self) -> TaskStatusQueries:
@@ -305,6 +308,7 @@ class BackgroundTaskManager:
                     message=message,
                     display_message=display_message,
                     attachments=attachments,
+                    enabled_skills=enabled_skills,
                 )
                 user_message_written = True
 
@@ -408,6 +412,7 @@ class BackgroundTaskManager:
                     message=message,
                     display_message=display_message,
                     attachments=attachments,
+                    enabled_skills=enabled_skills,
                 )
                 user_message_written = True
 

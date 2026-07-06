@@ -780,6 +780,7 @@
   "common": {
     "about": "정보",
     "accessDenied": "접근이 거부되었습니다",
+    "add": "추가",
     "all": "전체",
     "assistant": "어시스턴트",
     "back": "뒤로",
@@ -883,6 +884,7 @@
     "copied": "복사됨",
     "copy": "복사",
     "copyCode": "코드 복사",
+    "copyLink": "링크 복사",
     "csv": "CSV",
     "csvDataFile": "CSV 데이터 파일",
     "daysAgo": "{{count}}일 전",
@@ -916,6 +918,7 @@
     "htmlDocument": "HTML 문서",
     "invalidExcalidrawFormat": "잘못된 Excalidraw 파일 형식",
     "lines": "{{count}}줄",
+    "linkCopied": "링크가 복사되었습니다",
     "list": "목록",
     "listView": "목록 보기",
     "loading": "로딩 중...",
@@ -1027,8 +1030,10 @@
   },
   "feedback": {
     "addComment": "댓글 추가",
+    "addImage": "이미지 추가 (최대 9장)",
     "allRatings": "전체 평점",
     "alreadySubmitted": "이 대화에 대한 피드백을 이미 제출했습니다",
+    "attachments": "첨부파일",
     "buttonLabel": "피드백",
     "comment": "코멘트",
     "commentLabel": "댓글 (선택사항)",
@@ -1041,6 +1046,7 @@
     "deleteSuccess": "피드백이 성공적으로 삭제되었습니다",
     "detailTitle": "세부정보",
     "filterByRating": "평점으로 필터",
+    "imageLimit": "최대 9장의 이미지를 첨부할 수 있습니다",
     "negative": "부정",
     "noFeedback": "아직 피드백이 없습니다",
     "noFeedbackHint": "사용자 피드백이 여기에 표시됩니다",
@@ -1055,11 +1061,9 @@
     "subtitle": "시스템에 대한 피드백",
     "title": "피드백",
     "totalCount": "전체",
-    "addImage": "이미지 추가 (최대 9장)",
-    "attachments": "첨부파일",
-    "imageLimit": "최대 9장의 이미지를 첨부할 수 있습니다",
     "uploadFailed": "이미지 업로드 실패",
-    "uploading": "업로드 중..."
+    "uploading": "업로드 중...",
+    "viewDetail": "상세 보기"
   },
   "feishu": {
     "appId": "App ID",

@@ -780,6 +780,7 @@
   "common": {
     "about": "について",
     "accessDenied": "アクセスが拒否されました",
+    "add": "追加",
     "all": "すべて",
     "assistant": "アシスタント",
     "back": "戻る",
@@ -883,6 +884,7 @@
     "copied": "コピーしました",
     "copy": "コピー",
     "copyCode": "コードをコピー",
+    "copyLink": "リンクをコピー",
     "csv": "CSV",
     "csvDataFile": "CSVデータファイル",
     "daysAgo": "{{count}}日前",
@@ -916,6 +918,7 @@
     "htmlDocument": "HTML 文書",
     "invalidExcalidrawFormat": "無効なExcalidrawファイル形式",
     "lines": "{{count}}行",
+    "linkCopied": "リンクをコピーしました",
     "list": "リスト",
     "listView": "リスト表示",
     "loading": "読み込み中...",
@@ -1027,8 +1030,10 @@
   },
   "feedback": {
     "addComment": "コメントを追加",
+    "addImage": "画像を追加（最大9枚）",
     "allRatings": "すべての評価",
     "alreadySubmitted": "この会話にはすでにフィードバックを送信済みです",
+    "attachments": "添付ファイル",
     "buttonLabel": "フィードバック",
     "comment": "コメント",
     "commentLabel": "コメント（任意）",
@@ -1041,6 +1046,7 @@
     "deleteSuccess": "フィードバックが正常に削除されました",
     "detailTitle": "詳細",
     "filterByRating": "評価で絞り込み",
+    "imageLimit": "画像は最大9枚までです",
     "negative": "ネガティブ",
     "noFeedback": "フィードバックはまだありません",
     "noFeedbackHint": "ユーザーのフィードバックがここに表示されます",
@@ -1055,11 +1061,9 @@
     "subtitle": "システムへのフィードバック",
     "title": "フィードバック",
     "totalCount": "合計",
-    "addImage": "画像を追加（最大9枚）",
-    "imageLimit": "画像は最大9枚までです",
     "uploadFailed": "画像のアップロードに失敗しました",
     "uploading": "アップロード中...",
-    "attachments": "添付ファイル"
+    "viewDetail": "詳細を見る"
   },
   "feishu": {
     "appId": "App ID",

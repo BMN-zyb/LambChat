@@ -28,6 +28,8 @@ export interface Message {
   feedbackId?: string;
   // 是否被取消
   cancelled?: boolean;
+  // 用户消息发送时启用的技能名称列表
+  enabledSkills?: string[];
 }
 
 // 消息内容块类型

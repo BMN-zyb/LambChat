@@ -594,6 +594,7 @@ export function useAgent(options?: UseAgentOptions): UseAgentReturn {
           previousMessages: messagesRef.current,
           content,
           attachments,
+          enabledSkills: runOptions?.enabledSkills,
         });
 
       setMessages(optimisticMessages);

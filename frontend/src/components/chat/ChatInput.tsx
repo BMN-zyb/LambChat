@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback, useMemo, memo } from "react";
 import toast from "react-hot-toast";
-import { Ban, Sparkles, UploadCloud } from "lucide-react";
+import { Ban, Plus, UploadCloud } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { ImageViewer } from "../common";
 import { ConfirmDialog } from "../common/ConfirmDialog";
@@ -21,6 +21,7 @@ import { ChatInputToolbar } from "./ChatInputToolbar";
 import { ChatInputSelectors } from "./ChatInputSelectors";
 import { ChatInputHelpMenu } from "./ChatInputHelpMenu";
 import { ChatInputAttachments } from "./ChatInputAttachments";
+import { SkillChip } from "./SkillChip";
 import { SkillSelector } from "../selectors/SkillSelector";
 import { FILE_CATEGORY_PERMISSIONS } from "./chatInputConstants";
 import { getMentionPopupFixedPlacement } from "./chatInputViewport";
@@ -683,34 +684,6 @@ export const ChatInput = memo(function ChatInput({
             disabled={isLoading || !canSend}
             embedded
           />
-          {runEnabledSkillNames && (
-            <div className="flex items-center gap-2 border-b px-3 py-2 text-xs sm:px-4">
-              <Sparkles
-                size={14}
-                className="shrink-0"
-                style={{ color: "var(--theme-primary)" }}
-              />
-              <button
-                type="button"
-                className="min-w-0 flex-1 truncate text-left"
-                style={{ color: "var(--theme-text-secondary)" }}
-                onClick={() => setRunSkillSelectorOpen(true)}
-              >
-                {t("chat.commands.runSkillsCount", {
-                  count: runEnabledSkillNames.length,
-                  defaultValue: "{{count}} skills for next message",
-                })}
-              </button>
-              <button
-                type="button"
-                className="rounded-md px-2 py-1 transition-colors hover:bg-stone-100 dark:hover:bg-stone-800"
-                style={{ color: "var(--theme-text-secondary)" }}
-                onClick={() => setRunEnabledSkillNames(null)}
-              >
-                {t("common.clear", "Clear")}
-              </button>
-            </div>
-          )}
           {mention.isActive &&
             !onMentionQueryChange &&
             mentionMode === "persona" && (
@@ -752,6 +725,66 @@ export const ChatInput = memo(function ChatInput({
           />
 
           <div className="px-2.5 pt-1">
+            {runEnabledSkillNames && runEnabledSkillNames.length > 0 && (
+              <div
+                className="group flex flex-wrap items-center gap-2.5 px-2.5 py-2.5 mb-px"
+                style={{
+                  borderBottom:
+                    "1px solid color-mix(in srgb, var(--theme-border) 50%, transparent)",
+                }}
+              >
+                <div
+                  className="skill-chip-row min-w-0 flex-1"
+                  style={{ gap: "0.75rem" }}
+                >
+                  {runEnabledSkillNames.map((skillName) => {
+                    const skill = availableRunSkills.find(
+                      (s) => s.name === skillName,
+                    );
+                    return (
+                      <span key={skillName} className="group">
+                        <SkillChip
+                          name={skillName}
+                          tags={skill?.tags ?? []}
+                          onClick={() => setRunSkillSelectorOpen(true)}
+                          onRemove={() => {
+                            updateRunSkillSelection((current) => {
+                              current.delete(skillName);
+                              return current;
+                            });
+                          }}
+                        />
+                      </span>
+                    );
+                  })}
+                  <button
+                    type="button"
+                    onClick={() => setRunSkillSelectorOpen(true)}
+                    className="skill-chip"
+                    aria-label={t("common.add", "Add")}
+                    title={t("common.add", "Add")}
+                    style={{
+                      opacity: 0.4,
+                      cursor: "pointer",
+                    }}
+                  >
+                    <Plus
+                      size={14}
+                      style={{ color: "var(--theme-text-secondary)" }}
+                    />
+                  </button>
+                </div>
+                <button
+                  type="button"
+                  className="shrink-0 transition-colors opacity-0 group-hover:opacity-100 ml-1"
+                  style={{ color: "var(--theme-text-tertiary)" }}
+                  onClick={() => setRunEnabledSkillNames(null)}
+                  title={t("common.clear", "Clear")}
+                >
+                  <Ban size={12} />
+                </button>
+              </div>
+            )}
             <div className="relative">
               <textarea
                 ref={textareaRef}

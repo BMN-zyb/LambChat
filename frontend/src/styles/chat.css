@@ -112,6 +112,77 @@
   color: var(--theme-primary);
 }
 
+/* ─── Skill Chip Node ─── */
+.skill-chip-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  overflow-x: auto;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+  vertical-align: middle;
+}
+.skill-chip-row::-webkit-scrollbar {
+  display: none;
+}
+
+.skill-chip-node {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  white-space: nowrap;
+  flex-shrink: 0;
+  vertical-align: middle;
+  cursor: default;
+}
+.skill-chip-node[role="button"] {
+  cursor: pointer;
+}
+
+.skill-chip-node-avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.skill-chip-node-avatar[role="button"] {
+  cursor: pointer;
+}
+.skill-chip-node-avatar[role="button"]:hover {
+  filter: brightness(0.92);
+}
+
+.skill-chip-node-name {
+  font-size: 0.8125rem;
+  font-weight: 500;
+  color: var(--theme-primary);
+  line-height: 1.4;
+}
+
+.skill-chip-node-remove {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  border-radius: 9999px;
+  margin-left: -0.125rem;
+  color: var(--theme-text-tertiary);
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+.group:hover .skill-chip-node-remove {
+  display: inline-flex;
+  opacity: 1;
+}
+.skill-chip-node-remove:hover {
+  background: color-mix(in srgb, var(--theme-text-tertiary) 12%, transparent);
+  color: var(--theme-text-secondary);
+}
+
 /* Feature menu dropdown */
 /* ─── Feature Menu (ChatGPT-style) ─── */
 .feature-menu-dropdown {

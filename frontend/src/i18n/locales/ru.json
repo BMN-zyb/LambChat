@@ -780,6 +780,7 @@
   "common": {
     "about": "О программе",
     "accessDenied": "Доступ запрещён",
+    "add": "Добавить",
     "all": "Все",
     "assistant": "Ассистент",
     "back": "Назад",
@@ -883,6 +884,7 @@
     "copied": "Скопировано",
     "copy": "Копировать",
     "copyCode": "Копировать код",
+    "copyLink": "Копировать ссылку",
     "csv": "CSV",
     "csvDataFile": "Файл данных CSV",
     "daysAgo": "{{count}} дн. назад",
@@ -916,6 +918,7 @@
     "htmlDocument": "HTML документ",
     "invalidExcalidrawFormat": "Неверный формат файла Excalidraw",
     "lines": "{{count}} строк",
+    "linkCopied": "Ссылка скопирована",
     "list": "Список",
     "listView": "Вид списком",
     "loading": "Загрузка...",
@@ -1027,8 +1030,10 @@
   },
   "feedback": {
     "addComment": "Добавить комментарий",
+    "addImage": "Добавить изображения (макс. 9)",
     "allRatings": "Все оценки",
     "alreadySubmitted": "Вы уже отправили отзыв для этого разговора",
+    "attachments": "Вложения",
     "buttonLabel": "Отзыв",
     "comment": "Комментарий",
     "commentLabel": "Комментарий (необязательно)",
@@ -1041,6 +1046,7 @@
     "deleteSuccess": "Отзыв успешно удалён",
     "detailTitle": "Детали отзыва",
     "filterByRating": "Фильтр по оценке",
+    "imageLimit": "Максимум 9 изображений",
     "negative": "Отрицательный",
     "noFeedback": "Отзывов пока нет",
     "noFeedbackHint": "Отзывы пользователей появятся здесь",
@@ -1055,11 +1061,9 @@
     "subtitle": "Управление отзывами и оценками пользователей",
     "title": "Отзывы",
     "totalCount": "Всего",
-    "addImage": "Добавить изображения (макс. 9)",
-    "imageLimit": "Максимум 9 изображений",
     "uploadFailed": "Не удалось загрузить изображение",
     "uploading": "Загрузка...",
-    "attachments": "Вложения"
+    "viewDetail": "Подробнее"
   },
   "feishu": {
     "appId": "App ID",
