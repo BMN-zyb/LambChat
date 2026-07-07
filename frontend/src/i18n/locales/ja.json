@@ -543,6 +543,7 @@
     "addMoreFiles": "[TODO]chat.addMoreFiles",
     "assistant": "アシスタント",
     "attachFile": "ファイルを添付",
+    "attachments": "添付ファイル",
     "cancelled": "キャンセル済み",
     "commands": {
       "agent": "エージェント",
@@ -1390,6 +1391,7 @@
     "noMatchingSkills": "フィルターに一致するスキルがありません",
     "noSkills": "マーケットプレイスに利用可能なスキルがありません",
     "preview": "プレビュー",
+    "closePreview": "プレビューを閉じる",
     "previewCollapse": "クリックして折りたたむ",
     "previewExpand": "クリックしてプレビュー",
     "publishSuccess": "スキル「{{name}}」がマーケットに公開されました",

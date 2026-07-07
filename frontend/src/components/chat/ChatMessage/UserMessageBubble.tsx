@@ -94,21 +94,21 @@ export function UserMessageBubble({
                 boxShadow: "var(--shadow-low)",
               }}
             >
-              <div className="flex flex-wrap items-baseline gap-x-1.5 gap-y-1">
+              <div
+                className="user-message-inline-markdown leading-relaxed text-[15px] sm:text-base"
+                style={{ color: "var(--theme-text)" }}
+              >
                 {/* Skill chips - inline with content */}
                 {enabledSkills && enabledSkills.length > 0 && (
-                  <div className="skill-chip-row shrink-0">
+                  <span className="skill-chip-row align-baseline mr-1.5">
                     {enabledSkills.map((skillName) => (
                       <SkillChip key={skillName} name={skillName} tags={[]} />
                     ))}
-                  </div>
+                  </span>
                 )}
-                <div
-                  className="leading-relaxed text-[15px] sm:text-base min-w-0 flex-1"
-                  style={{ color: "var(--theme-text)" }}
-                >
+                <span className="inline leading-relaxed min-w-0">
                   <MarkdownContent content={content!} />
-                </div>
+                </span>
               </div>
             </div>
           )}

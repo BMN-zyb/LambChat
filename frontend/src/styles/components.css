@@ -1393,10 +1393,50 @@
   z-index: 1000;
   display: flex;
   flex-direction: column;
-  background: var(--theme-bg-card);
+  background: linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--theme-bg-card) 96%, var(--theme-bg-subtle)) 0%,
+      var(--theme-bg-card) 10rem
+    ),
+    var(--theme-bg-card);
   pointer-events: auto;
   border-radius: 1rem;
   overflow: hidden;
+  isolation: isolate;
+}
+
+/* --- Shared right sidebar chrome --- */
+:where(
+    .editor-sidebar--sidebar,
+    .tool-console-panel[data-tool-panel-mode="sidebar"]
+  ) {
+  --right-sidebar-ring: color-mix(
+    in srgb,
+    var(--theme-text) 10%,
+    var(--theme-border)
+  );
+  box-sizing: border-box;
+  height: var(--right-sidebar-height, calc(100% - 1.5rem));
+  margin: 0.75rem;
+  border: 1px solid transparent;
+  border-radius: 0.75rem;
+  box-shadow:
+    0 0 0 1px var(--right-sidebar-ring),
+    inset 0 1px 0 color-mix(in srgb, var(--theme-bg-card) 82%, transparent),
+    0 18px 46px -28px var(--theme-shadow-lg),
+    0 8px 24px -20px var(--theme-shadow-md);
+}
+
+:is(.dark, .dark *)
+  :where(
+    .editor-sidebar--sidebar,
+    .tool-console-panel[data-tool-panel-mode="sidebar"]
+  ) {
+  --right-sidebar-ring: color-mix(
+    in srgb,
+    var(--theme-border) 70%,
+    transparent
+  );
 }
 
 /* Desktop: right sidebar */
@@ -1404,15 +1444,15 @@
   top: var(--app-safe-area-top-active, var(--app-safe-area-top, 0px));
   right: 0;
   bottom: var(--app-safe-area-bottom-active, var(--app-safe-area-bottom, 0px));
-  width: var(--editor-sidebar-width, 30%);
+  --right-sidebar-height: calc(
+    100% - var(--app-safe-area-top-active, var(--app-safe-area-top, 0px)) -
+      var(--app-safe-area-bottom-active, var(--app-safe-area-bottom, 0px)) -
+      1.5rem
+  );
+  width: calc(var(--editor-sidebar-width, 30%) - 1.5rem);
   min-width: 18rem;
-  max-width: 75vw;
+  max-width: calc(75vw - 1.5rem);
   transform: translateX(100%);
-  border-left: 0.5px solid var(--theme-border);
-  border-radius: 0;
-  box-shadow:
-    -2px 0 8px var(--theme-shadow-sm),
-    -8px 0 32px -4px var(--theme-shadow-md);
 }
 
 .editor-sidebar--sidebar.editor-sidebar--animate-in {
@@ -3121,35 +3161,9 @@
     inset 0 1px 0 color-mix(in srgb, var(--theme-bg-card) 80%, transparent);
 }
 
-.tool-console-panel[data-tool-panel-mode="sidebar"] {
-  --tool-console-sidebar-ring: color-mix(
-    in srgb,
-    var(--theme-text) 10%,
-    var(--theme-border)
-  );
-  box-sizing: border-box;
-  height: calc(100% - 1.5rem);
-  margin: 0.75rem;
-  border-radius: 0.75rem;
-  border: 1px solid transparent;
-  box-shadow:
-    0 0 0 1px var(--tool-console-sidebar-ring),
-    inset 0 1px 0 color-mix(in srgb, var(--theme-bg-card) 82%, transparent),
-    0 18px 46px -28px var(--theme-shadow-lg),
-    0 8px 24px -20px var(--theme-shadow-md);
-}
-
 .tool-console-panel[data-tool-panel-mode="sidebar"][data-sidebar-panel] {
   width: calc(var(--sidebar-preview-width, 60%) - 1.5rem) !important;
   max-width: calc(var(--sidebar-preview-width, 60%) - 1.5rem) !important;
-}
-
-.dark .tool-console-panel[data-tool-panel-mode="sidebar"] {
-  --tool-console-sidebar-ring: color-mix(
-    in srgb,
-    var(--theme-border) 70%,
-    transparent
-  );
 }
 
 .tool-console-chrome {
@@ -3265,7 +3279,6 @@
 
 .tool-console-body__loading {
   background: color-mix(in srgb, var(--theme-bg) 92%, transparent);
-  backdrop-filter: blur(6px);
 }
 
 .tool-console-footer {
@@ -3403,9 +3416,7 @@
   padding-left: 0.75rem;
   border-left: 2px solid
     color-mix(in srgb, var(--theme-primary) 22%, transparent);
-  max-height: 20rem;
-  overflow-y: auto;
-  overflow-x: hidden;
+  overflow-x: auto;
   min-width: 0;
   /* Smooth scrollbar */
   scrollbar-width: thin;

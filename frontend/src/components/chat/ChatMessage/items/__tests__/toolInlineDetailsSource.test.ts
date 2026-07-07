@@ -21,7 +21,7 @@ const inlineConsumers = [
   "../WriteFileItem.tsx",
 ];
 
-test("tool inline preview details share the indented scroll container", () => {
+test("tool inline preview details share the indented natural-height container", () => {
   const source = readSource("../ToolInlineDetails.tsx");
 
   expect(source).toMatch(/export function ToolInlineDetails/);
@@ -31,9 +31,13 @@ test("tool inline preview details share the indented scroll container", () => {
   expect(componentsCss).toMatch(/margin-left:\s*1rem/);
   expect(componentsCss).toMatch(/padding-left:\s*0\.75rem/);
   expect(componentsCss).toMatch(/border-left:\s*2px solid/);
-  expect(componentsCss).toMatch(/max-height:\s*20rem/);
-  expect(componentsCss).toMatch(/overflow-y:\s*auto/);
-  expect(componentsCss).toMatch(/overflow-x:\s*hidden/);
+  expect(componentsCss).not.toMatch(
+    /\.tool-inline-details\s*\{[\s\S]*max-height:/,
+  );
+  expect(componentsCss).not.toMatch(
+    /\.tool-inline-details\s*\{[\s\S]*overflow-y:\s*auto/,
+  );
+  expect(componentsCss).toMatch(/overflow-x:\s*auto/);
   expect(componentsCss).toMatch(/min-width:\s*0/);
 
   for (const relativePath of inlineConsumers) {

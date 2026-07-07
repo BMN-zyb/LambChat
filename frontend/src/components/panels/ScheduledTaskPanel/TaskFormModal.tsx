@@ -30,11 +30,19 @@ import type { PersonaPreset } from "../../../types/personaPreset";
 import type { Team } from "../../../types/team";
 import { personaPresetApi } from "../../../services/api/personaPreset";
 import { teamApi } from "../../../services/api/team";
+import { getFullUrl, uploadApi } from "../../../services/api";
+import { useFileUpload } from "../../../hooks/useFileUpload";
+import { AttachmentCard } from "../../common/AttachmentCard";
+import { FileUploadButton } from "../../chat/FileUploadButton";
+import { openAttachmentPreview } from "../../chat/attachmentPreviewStore";
+import type { MessageAttachment } from "../../../types";
 import {
   buildScheduledTaskInputPayload,
   getAgentOptionsFromScheduledTaskPayload,
+  getScheduledTaskAttachments,
   getScheduledTaskPersonaPresetId,
   getScheduledTaskTeamId,
+  withScheduledTaskAttachments,
 } from "../scheduledTaskPayload";
 import { getBrowserTimezone, toDateTimeLocalValue } from "./utils";
 
@@ -142,6 +150,9 @@ export function TaskFormModal({
   const [inputPayload, setInputPayload] = useState(
     task ? JSON.stringify(task.input_payload ?? {}, null, 2) : "{}",
   );
+  const [attachments, setAttachments] = useState<MessageAttachment[]>(
+    getScheduledTaskAttachments(task?.input_payload),
+  );
   const [enabled, setEnabled] = useState(task?.enabled ?? true);
   const [runOnStart, setRunOnStart] = useState(task?.run_on_start ?? false);
   const [maxRetries, setMaxRetries] = useState(String(task?.max_retries ?? 0));
@@ -151,6 +162,11 @@ export function TaskFormModal({
   const [isSaving, setIsSaving] = useState(false);
   const [jsonError, setJsonError] = useState<string | null>(null);
   const isTeamAgent = agentId === "team";
+  const { cancelUpload } = useFileUpload({
+    attachments,
+    onAttachmentsChange: setAttachments,
+  });
+  const hasUploadingAttachment = attachments.some((item) => item.isUploading);
 
   useEffect(() => {
     let cancelled = false;
@@ -194,6 +210,7 @@ export function TaskFormModal({
       return;
     }
     setJsonError(null);
+    payload = withScheduledTaskAttachments(payload, attachments);
 
     // Build trigger config
     let triggerConfig: Record<string, unknown>;
@@ -262,6 +279,12 @@ export function TaskFormModal({
       <span className="truncate">{label}</span>
     </span>
   );
+  const handleRemoveAttachment = (attachment: MessageAttachment) => {
+    setAttachments((prev) => prev.filter((item) => item.id !== attachment.id));
+    if (attachment.key && !attachment.isUploading) {
+      uploadApi.deleteFile(attachment.key).catch(() => {});
+    }
+  };
 
   return (
     <EditorSidebar
@@ -276,6 +299,7 @@ export function TaskFormModal({
             variant="primary"
             onClick={handleSave}
             loading={isSaving}
+            disabled={hasUploadingAttachment}
             leftIcon={<Save size={16} />}
           >
             {t("common.save")}
@@ -532,6 +556,51 @@ export function TaskFormModal({
             />
             {jsonError && (
               <p className="mt-1 text-xs text-red-500">{jsonError}</p>
+            )}
+          </div>
+
+          <div className="scheduled-task-form-field">
+            <div className="mb-2 flex items-center justify-between gap-3">
+              <label className="scheduled-task-label">
+                {t("chat.attachments")}
+              </label>
+              <FileUploadButton
+                attachments={attachments}
+                onAttachmentsChange={setAttachments}
+              />
+            </div>
+            {attachments.length > 0 && (
+              <div className="flex gap-3 overflow-x-auto attachment-scroll pb-1">
+                {attachments.map((attachment) => {
+                  const isImage =
+                    attachment.mimeType?.startsWith("image/") &&
+                    Boolean(attachment.url);
+                  return (
+                    <AttachmentCard
+                      key={attachment.id}
+                      attachment={attachment}
+                      variant="editable"
+                      size="compact"
+                      isUploading={attachment.isUploading}
+                      onClick={() => {
+                        if (isImage && attachment.url) {
+                          window.open(
+                            getFullUrl(attachment.url) ?? attachment.url,
+                          );
+                        } else {
+                          openAttachmentPreview(attachment, "chat-input");
+                        }
+                      }}
+                      onRemove={() => handleRemoveAttachment(attachment)}
+                      onCancel={
+                        attachment.isUploading
+                          ? () => cancelUpload(attachment.id)
+                          : undefined
+                      }
+                    />
+                  );
+                })}
+              </div>
             )}
           </div>
 

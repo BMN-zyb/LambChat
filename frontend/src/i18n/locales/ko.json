@@ -543,6 +543,7 @@
     "addMoreFiles": "[TODO]chat.addMoreFiles",
     "assistant": "어시스턴트",
     "attachFile": "파일 첨부",
+    "attachments": "첨부파일",
     "cancelled": "취소됨",
     "commands": {
       "agent": "에이전트",
@@ -1390,6 +1391,7 @@
     "noMatchingSkills": "필터 조건에 맞는 스킬이 없습니다",
     "noSkills": "마켓플레이스에 사용 가능한 스킬이 없습니다",
     "preview": "미리보기",
+    "closePreview": "미리보기 닫기",
     "previewCollapse": "클릭하여 접기",
     "previewExpand": "클릭하여 미리보기",
     "publishSuccess": "스킬 \"{{name}}\"이(가) 마켓플레이스에 공개되었습니다",

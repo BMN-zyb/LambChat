@@ -543,6 +543,7 @@
     "addMoreFiles": "[TODO]chat.addMoreFiles",
     "assistant": "Ассистент",
     "attachFile": "Прикрепить файл",
+    "attachments": "Вложения",
     "cancelled": "Отменено",
     "commands": {
       "agent": "Агент",
@@ -1390,6 +1391,7 @@
     "noMatchingSkills": "Нет навыков, соответствующих вашим фильтрам",
     "noSkills": "В магазине нет доступных навыков",
     "preview": "Предпросмотр",
+    "closePreview": "Закрыть предпросмотр",
     "previewCollapse": "Нажмите, чтобы свернуть",
     "previewExpand": "Нажмите для предпросмотра",
     "publishSuccess": "Навык «{{name}}» опубликован в магазине",

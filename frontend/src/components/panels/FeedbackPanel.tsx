@@ -363,10 +363,7 @@ function FeedbackDetailModal({
 
   return (
     <>
-      <div
-        className="fixed inset-0 z-50 bg-black/40 backdrop-blur-[2px]"
-        onClick={onClose}
-      />
+      <div className="fixed inset-0 z-50 bg-black/40" onClick={onClose} />
       <div className="safe-area-viewport-padding fixed inset-0 z-50 flex items-end sm:items-center sm:justify-center">
         <div
           className="w-full sm:max-w-lg bg-white dark:bg-stone-800 sm:rounded-2xl rounded-t-2xl shadow-2xl border-t sm:border border-stone-200/50 dark:border-stone-700/50 max-h-[85vh] flex flex-col animate-slide-up-sheet sm:animate-in sm:fade-in sm:zoom-in-95 sm:duration-200"

@@ -671,7 +671,7 @@ function SubagentPanelContent({ agentId }: { agentId: string }) {
         <button
           type="button"
           onClick={handleJumpToBottom}
-          className="sticky bottom-3 left-1/2 z-10 mt-3 inline-flex min-h-9 -translate-x-1/2 items-center gap-1.5 rounded-full border border-theme-border bg-theme-bg-card/95 px-3 text-xs font-medium text-theme-text-secondary shadow-lg backdrop-blur transition-colors hover:bg-theme-bg-subtle hover:text-theme-text"
+          className="sticky bottom-3 left-1/2 z-10 mt-3 inline-flex min-h-9 -translate-x-1/2 items-center gap-1.5 rounded-full border border-theme-border bg-theme-bg-card/95 px-3 text-xs font-medium text-theme-text-secondary shadow-lg transition-colors hover:bg-theme-bg-subtle hover:text-theme-text"
         >
           <ArrowDown size={13} />
           {t("common.scrollToBottom")}

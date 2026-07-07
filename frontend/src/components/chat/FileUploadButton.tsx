@@ -1,4 +1,5 @@
 import { useState, useRef, useCallback, memo, useEffect } from "react";
+import type { CSSProperties } from "react";
 import { createPortal } from "react-dom";
 import { Paperclip, Image, Video, Music, FileText } from "lucide-react";
 import { useTranslation } from "react-i18next";
@@ -45,6 +46,36 @@ const CATEGORY_ICONS: Record<FileCategory, React.ElementType> = {
   audio: Music,
   document: FileText,
 };
+
+const UPLOAD_DROPDOWN_WIDTH = 208;
+const UPLOAD_DROPDOWN_GUTTER = 8;
+
+export function getFileUploadDropdownStyle(
+  rect: DOMRect,
+  {
+    viewportWidth,
+    viewportHeight,
+  }: {
+    viewportWidth: number;
+    viewportHeight: number;
+  },
+): CSSProperties {
+  const width = Math.min(
+    UPLOAD_DROPDOWN_WIDTH,
+    Math.max(0, viewportWidth - UPLOAD_DROPDOWN_GUTTER * 2),
+  );
+  const left = Math.max(
+    UPLOAD_DROPDOWN_GUTTER,
+    Math.min(rect.left, viewportWidth - width - UPLOAD_DROPDOWN_GUTTER),
+  );
+  return {
+    position: "fixed",
+    bottom: viewportHeight - rect.top + 8,
+    left,
+    width,
+    zIndex: 9999,
+  };
+}
 
 export const FileUploadButton = memo(function FileUploadButton({
   attachments = [],
@@ -137,12 +168,11 @@ export const FileUploadButton = memo(function FileUploadButton({
   const dropdownStyle = useStickyDropdownPosition(
     triggerRef,
     showDropdown,
-    (rect) => ({
-      position: "fixed",
-      bottom: window.innerHeight - rect.top + 8,
-      left: rect.left,
-      zIndex: 9999,
-    }),
+    (rect) =>
+      getFileUploadDropdownStyle(rect, {
+        viewportWidth: window.visualViewport?.width ?? window.innerWidth,
+        viewportHeight: window.visualViewport?.height ?? window.innerHeight,
+      }),
   );
 
   if (!canUpload) return null;

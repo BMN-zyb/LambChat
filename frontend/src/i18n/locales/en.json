@@ -543,6 +543,7 @@
     "addMoreFiles": "Add more files",
     "assistant": "Assistant",
     "attachFile": "Attach file",
+    "attachments": "Attachments",
     "cancelled": "Cancelled",
     "commands": {
       "agent": "Agent",
@@ -780,7 +781,7 @@
   "common": {
     "about": "About",
     "accessDenied": "Access Denied",
-    "add": "common.add",
+    "add": "Add",
     "all": "All",
     "assistant": "Assistant",
     "back": "Back",
@@ -884,7 +885,7 @@
     "copied": "Copied",
     "copy": "Copy",
     "copyCode": "Copy code",
-    "copyLink": "documents.copyLink",
+    "copyLink": "Copy link",
     "csv": "CSV",
     "csvDataFile": "CSV data file",
     "daysAgo": "{{count}}d ago",
@@ -918,7 +919,7 @@
     "htmlDocument": "HTML Document",
     "invalidExcalidrawFormat": "Invalid Excalidraw file format",
     "lines": "{{count}} lines",
-    "linkCopied": "documents.linkCopied",
+    "linkCopied": "Link copied",
     "list": "List",
     "listView": "List view",
     "loading": "Loading...",
@@ -1063,7 +1064,7 @@
     "totalCount": "Total Count",
     "uploadFailed": "Failed to upload image",
     "uploading": "Uploading...",
-    "viewDetail": "feedback.viewDetail"
+    "viewDetail": "View details"
   },
   "feishu": {
     "appId": "App ID",
@@ -1390,6 +1391,7 @@
     "noMatchingSkills": "No skills match your filters",
     "noSkills": "No skills available in marketplace",
     "preview": "Preview",
+    "closePreview": "Close preview",
     "previewCollapse": "Click to collapse",
     "previewExpand": "Click to preview",
     "publishSuccess": "Skill \"{{name}}\" published to marketplace",
