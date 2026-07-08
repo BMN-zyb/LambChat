@@ -12,6 +12,8 @@ import { copyToClipboard } from "../../../utils/clipboard";
 import { useSessionImageGallery } from "./sessionImageGallery";
 import { SkillChip } from "../SkillChip";
 
+// 用户消息气泡：右对齐，支持 Markdown 渲染与复制/分叉操作；附件卡片显示在气泡外，
+// 启用的技能以 SkillChip 内联在正文前展示。
 // User message bubble component (with copy function, supports markdown rendering) - ChatGPT style
 export function UserMessageBubble({
   content,
@@ -38,6 +40,7 @@ export function UserMessageBubble({
     setTimeout(() => setCopied(false), 2000);
   };
 
+  // 渲染附件预览：统一用文件卡片样式；图片走画廊/灯箱，其他文件走附件预览
   // Render attachment preview - use file card style uniformly
   const renderAttachments = () => {
     if (!attachments || attachments.length === 0) return null;
@@ -72,6 +75,7 @@ export function UserMessageBubble({
     );
   };
 
+  // 是否有附件 / 是否有正文（后者决定是否渲染消息气泡）
   const hasAttachments = attachments && attachments.length > 0;
   const hasContent = content && content.trim().length > 0;
 

@@ -2,6 +2,10 @@
 角色路由
 """
 
+# 角色路由模块（挂载于 /api/roles），RBAC 权限体系的核心
+# 职责：角色的增删改查；每个角色关联一组权限点(permission)，用户通过所属角色获得权限
+# 权限约束：列表仅需登录；创建/查看/修改/删除均需 role:manage 权限
+# 安全保护：系统内置角色(is_system) 不允许用户修改自己所属角色的权限，防止自我提权/锁死
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from src.api.deps import (
@@ -16,6 +20,8 @@ from src.kernel.schemas.user import TokenPayload
 router = APIRouter()
 
 
+# GET /api/roles/ —— 分页列出角色，仅需登录（供前端选择角色用）
+# 查询参数：q 关键词过滤，skip/limit 分页；返回角色列表 + total
 @router.get("/", response_model=RoleListResponse)
 async def list_roles(
     skip: int = Query(0, ge=0),
@@ -30,6 +36,8 @@ async def list_roles(
     return RoleListResponse(roles=roles, total=total, skip=skip, limit=limit)
 
 
+# POST /api/roles/ —— 创建角色，需要 role:manage 权限
+# 请求体 RoleCreate（角色名 + 权限点集合）
 @router.post("/", response_model=Role)
 async def create_role(
     role_data: RoleCreate,
@@ -40,6 +48,7 @@ async def create_role(
     return await manager.create_role(role_data)
 
 
+# GET /api/roles/{role_id} —— 获取单个角色详情，需要 role:manage 权限；不存在抛 404
 @router.get("/{role_id}", response_model=Role)
 async def get_role(
     role_id: str,
@@ -53,6 +62,9 @@ async def get_role(
     return role
 
 
+# PUT /api/roles/{role_id} —— 更新角色（含权限点），需要 role:manage 权限
+# 关键保护：若目标是系统角色且当前用户正属于该角色，则禁止修改（避免改动自己的权限，400）
+# 角色不存在抛 404；权限点校验失败(ValidationError) 抛 400
 @router.put("/{role_id}", response_model=Role)
 async def update_role(
     role_id: str,
@@ -74,6 +86,7 @@ async def update_role(
 
         user_manager = UserManager()
         user = await user_manager.get_user(current_user.sub)
+        # 当前用户确实属于该系统角色时，拒绝修改（防止误删自己权限或越权提权）
         if user and user.roles and target_role.name in user.roles:
             raise HTTPException(
                 status_code=400,
@@ -89,6 +102,8 @@ async def update_role(
     return role
 
 
+# DELETE /api/roles/{role_id} —— 删除角色，需要 role:manage 权限
+# 先取角色（用于缓存失效与 404 判断）；被占用/系统角色等约束不满足时抛 400（ValidationError）
 @router.delete("/{role_id}")
 async def delete_role(
     role_id: str,

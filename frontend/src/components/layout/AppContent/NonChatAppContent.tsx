@@ -5,6 +5,7 @@ import { AppShell } from "./AppShell";
 import { TabContent } from "./TabContent";
 import type { TabType } from "./types";
 
+// NonChatAppContent 的 props：与 ChatAppContent 相同的外壳共享状态，activeTab 限定为非 chat 标签
 export interface NonChatAppContentProps {
   activeTab: Exclude<TabType, "chat">;
   showProfileModal: boolean;
@@ -17,6 +18,8 @@ export interface NonChatAppContentProps {
   onShowProfile: () => void;
 }
 
+// 非聊天标签页的外壳装配：用 AppShell 包裹会话侧栏与 TabContent（各管理面板）。
+// 侧栏里的「选择/新建会话」会导航回 /chat 路由，从而切回聊天标签。
 export function NonChatAppContent({
   activeTab,
   showProfileModal,
@@ -30,6 +33,7 @@ export function NonChatAppContent({
 }: NonChatAppContentProps) {
   const navigate = useNavigate();
 
+  // 在非聊天页选中某会话：关闭移动侧栏并跳转到该会话的聊天路由
   const handleSelectSession = useCallback(
     (id: string) => {
       setMobileSidebarOpen(false);
@@ -37,6 +41,7 @@ export function NonChatAppContent({
     },
     [navigate, setMobileSidebarOpen],
   );
+  // 新建会话：关闭移动侧栏并跳转到 /chat
   const handleNewSession = useCallback(() => {
     setMobileSidebarOpen(false);
     navigate("/chat");
@@ -46,6 +51,7 @@ export function NonChatAppContent({
     [setMobileSidebarOpen],
   );
 
+  // 渲染：外壳 + 会话侧栏 + 当前标签对应的面板内容（TabContent）
   return (
     <AppShell
       activeTab={activeTab}

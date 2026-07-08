@@ -4,6 +4,10 @@ WebSocket 路由
 提供 WebSocket 连接用于实时任务通知。
 """
 
+# WebSocket 路由模块（挂载于 /ws）
+# 职责：建立长连接，服务端主动推送任务完成等实时通知；连接需鉴权
+# 鉴权顺序：URL ?token= 或首条 {"type":"auth","token":...} 消息 -> 校验 JWT -> accept 连接
+# 防护：基于客户端 IP 的失败限速（多次鉴权失败会被临时封禁）
 import json
 
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
@@ -18,6 +22,7 @@ router = APIRouter()
 logger = get_logger(__name__)
 
 
+# WS /ws —— WebSocket 通知端点；token 查询参数可选（也可用 Sec-WebSocket-Protocol 或首条 auth 消息传递）
 @router.websocket("/ws")
 async def websocket_endpoint(
     websocket: WebSocket,
@@ -54,6 +59,7 @@ async def websocket_endpoint(
     # 检查速率限制
     rate_limiter = get_ws_rate_limiter()
     allowed, ttl = await rate_limiter.check(client_ip)
+    # 已被限速：用自定义关闭码 4003 拒绝连接，并告知需等待的秒数（ttl）
     if not allowed:
         logger.warning(f"[WebSocket] IP {client_ip} blocked, TTL={ttl}s")
         try:
@@ -89,6 +95,7 @@ async def websocket_endpoint(
         if not auth_token:
             raise ValueError("No token provided")
 
+        # 用 token 解析并校验用户身份（失败会抛异常，进入下方 except 记一次失败并可能触发封禁）
         user = await get_current_user_from_websocket(auth_token)
         logger.info(f"[WebSocket] Auth successful: user_id={user.sub}")
 
@@ -99,6 +106,7 @@ async def websocket_endpoint(
         if not needs_accept:
             await websocket.accept()
 
+        # 鉴权通过后回一条 {"type":"auth:ok"} 告知客户端可以开始收发消息
         # Send auth confirmation to client
         auth_ok = await run_blocking_io(json.dumps, {"type": "auth:ok"})
         await websocket.send_text(auth_ok)
@@ -107,6 +115,7 @@ async def websocket_endpoint(
         return
     except Exception as e:
         logger.warning(f"[WebSocket] Auth failed from {client_ip}: {e}")
+        # 记录一次鉴权失败；累计过多会触发封禁，据此返回不同的关闭原因
         should_block, _ = await rate_limiter.record_failure(client_ip)
         reason = "Blocked due to too many failed attempts" if should_block else "Unauthorized"
         try:
@@ -115,6 +124,7 @@ async def websocket_endpoint(
             pass
         return
 
+    # 鉴权通过：把连接登记到连接管理器（accept=False，因为前面已 accept），以便按 user_id 定向推送通知
     manager = get_connection_manager()
     user_id = user.sub
 
@@ -134,5 +144,6 @@ async def websocket_endpoint(
     except Exception as e:
         logger.error(f"[WebSocket] Error: {e}")
     finally:
+        # 无论正常断开还是异常，最终都从连接管理器注销，释放资源
         await manager.disconnect(websocket, user_id)
         logger.info(f"[WebSocket] Cleaned up: user_id={user_id}")

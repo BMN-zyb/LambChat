@@ -1,5 +1,8 @@
 """Localized email text content for all supported languages."""
 
+# 多语言邮件文案表，三层结构：语言码 -> 邮件类型 -> 文案字段
+# 支持语言：zh/en/ja/ko/ru；邮件类型：password_reset/verify_email/welcome
+# 文案字段含占位符（如 {from_name}/{username}/{hours}），发送时用 str.format 填充
 EMAIL_TEXTS: dict[str, dict[str, dict[str, str]]] = {
     "zh": {
         "password_reset": {
@@ -134,6 +137,7 @@ EMAIL_TEXTS: dict[str, dict[str, dict[str, str]]] = {
 }
 
 # Fallback default
+# 默认回退语言：当请求的语言或邮件类型不存在时使用英文
 _DEFAULT_LANG = "en"
 
 
@@ -147,6 +151,7 @@ def get_texts(lang: str, email_type: str) -> dict[str, str]:
     Returns:
         Dict with keys: subject, heading, greeting, content, button_text, footer
     """
+    # 语言未命中回退英文；再按邮件类型取；类型仍未命中则回退英文对应类型，最终兜底为空字典
     return EMAIL_TEXTS.get(lang, EMAIL_TEXTS[_DEFAULT_LANG]).get(
         email_type, EMAIL_TEXTS[_DEFAULT_LANG].get(email_type, {})
     )

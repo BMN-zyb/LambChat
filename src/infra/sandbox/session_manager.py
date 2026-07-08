@@ -65,6 +65,7 @@ __all__ = [
 class SessionSandboxManager(_DaytonaMixin, _E2BMixin, _CubeSandboxMixin):
     """管理 User 与 Sandbox 的绑定关系（每个用户一个沙箱，跨 session 共享）"""
 
+    # 类级（进程内全局）状态：确保 MongoDB 唯一索引只创建一次，跨实例共享该标记
     _index_task: asyncio.Task[None] | None = None
     _index_ensured = False
 
@@ -73,11 +74,15 @@ class SessionSandboxManager(_DaytonaMixin, _E2BMixin, _CubeSandboxMixin):
         self._e2b_adapter: Optional[E2BSandboxAdapter] = None
         self._cube_adapter: Optional[CubeSandboxAdapter] = None
         self._collection: Any = None
+        # 三个 LRU 有界缓存：_cache 缓存 user→(sandbox_id, backend, provider)；
+        # _ready_work_dirs 记录已建好的 work_dir；_locks 存每用户锁（配 _locks_mutex 线程安全增删）。
+        # 都设上限，防止内存无界增长。
         self._cache: OrderedDict[str, tuple[str, CompositeBackend, object | None]] = OrderedDict()
         self._ready_work_dirs: OrderedDict[str, None] = OrderedDict()
         self._locks: OrderedDict[str, asyncio.Lock] = OrderedDict()
         self._locks_mutex = threading.Lock()
 
+        # 按配置选择平台并初始化对应 adapter：Daytona 用 client（延迟创建），E2B/Cube 各建一个 adapter
         platform = settings.SANDBOX_PLATFORM.lower()
         if platform == "e2b":
             self._e2b_adapter = E2BSandboxAdapter(
@@ -182,6 +187,8 @@ class SessionSandboxManager(_DaytonaMixin, _E2BMixin, _CubeSandboxMixin):
             scoped_doc["sandbox_platform"] = platform
             return scoped_doc
 
+        # 兼容旧数据：平台维度绑定（sandboxes.<platform>）出现前写入的记录没有该结构，
+        # 回退读取顶层字段；只要再次保存就会填充平台槽位。
         # Backward compatibility for records written before platform-scoped
         # bindings existed. Once saved again, the platform slot is populated.
         legacy_platform = doc.get("sandbox_platform")
@@ -204,6 +211,8 @@ class SessionSandboxManager(_DaytonaMixin, _E2BMixin, _CubeSandboxMixin):
 
     # ── Work-directory management ───────────────────────────────────
 
+    # 为每个 session 生成稳定、shell 安全的子工作目录：<base>/sessions/<清洗后的 session_id>。
+    # 这是"多 session 共享同一沙箱"下做 session 级隔离的方式（session_id 不影响沙箱绑定本身）。
     def _session_work_dir(self, base_work_dir: str, session_id: str) -> str:
         """Return a stable, shell-safe workspace directory for a session."""
         safe_session_id = re.sub(r"[^A-Za-z0-9_.-]+", "-", session_id).strip(".-")
@@ -211,6 +220,7 @@ class SessionSandboxManager(_DaytonaMixin, _E2BMixin, _CubeSandboxMixin):
             safe_session_id = "session"
         return f"{base_work_dir.rstrip('/')}/sessions/{safe_session_id[:80]}"
 
+    # 在沙箱内确保 work_dir 存在（mkdir -p）；用 _ready_work_dirs 缓存"已建目录"避免重复执行。
     async def _ensure_work_dir(self, backend: CompositeBackend, work_dir: str) -> None:
         sandbox_backend = cast(SandboxBackendProtocol, backend.default)
         sandbox_id = str(getattr(sandbox_backend, "id", "unknown"))
@@ -228,6 +238,8 @@ class SessionSandboxManager(_DaytonaMixin, _E2BMixin, _CubeSandboxMixin):
 
     # ── Backend scoping ──────────────────────────────────────────────
 
+    # 把已有沙箱后端"重新作用域"到某个 work_dir：复用底层 sandbox 连接、仅切换工作目录，
+    # 再组合出带 /skills/ 路由的 CompositeBackend。三平台各有一个对应实现。
     def _scope_daytona_backend(
         self,
         backend: CompositeBackend,
@@ -289,6 +301,8 @@ class SessionSandboxManager(_DaytonaMixin, _E2BMixin, _CubeSandboxMixin):
         """保存/更新用户的沙箱绑定"""
         now = utc_now_iso()
         platform = self._binding_platform()
+        # 双写：既写"顶层字段"又写"平台维度字段 sandboxes.<platform>.*"——前者兼容旧读取路径，
+        # 后者支持同一用户在不同平台各绑定一个沙箱。
         update = {
             "$set": {
                 "sandbox_platform": platform,
@@ -352,6 +366,7 @@ class SessionSandboxManager(_DaytonaMixin, _E2BMixin, _CubeSandboxMixin):
                 "Anonymous users cannot use sandbox features."
             )
 
+        # E2B / Cube 的取用逻辑在各自 mixin 里实现；Daytona 走本方法下面的状态机流程。
         if self._e2b_adapter:
             return await self._get_or_create_e2b(session_id, user_id)
         if self._cube_adapter:
@@ -568,6 +583,7 @@ def get_session_sandbox_manager() -> SessionSandboxManager:
     return _session_sandbox_manager
 
 
+# 关闭并释放全局单例（应用关闭时调用）：先置空引用，再 close_all 停止所有沙箱。
 async def close_session_sandbox_manager() -> None:
     global _session_sandbox_manager
     manager = _session_sandbox_manager

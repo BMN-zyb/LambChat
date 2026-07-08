@@ -37,6 +37,8 @@ QUEUE_ENTRY_MAX_BYTES = 2 * 1024 * 1024
 QUEUE_REWRITE_CHUNK_SIZE = 100
 
 
+# 队列条目的 JSON 编解码统一放到线程池执行，避免阻塞事件循环；ensure_ascii=False
+# 保留中文原文以减小体积。
 async def _queue_json_dumps(value: Any) -> str:
     return await run_blocking_io(json.dumps, value, ensure_ascii=False)
 
@@ -49,6 +51,9 @@ async def _queue_json_loads(value: Any) -> Any:
 # Executor registry — maps string keys to callables so queued tasks can be
 # dispatched by any worker without serialising function references.
 # ---------------------------------------------------------------------------
+# 执行器注册表：函数引用无法序列化进 Redis 队列，因此排队条目里只存一个稳定的
+# 字符串 key（如 "agent_stream"），出队分发时再用这个 key 从注册表反查真正的
+# 执行函数。这样任意 worker 进程都能分发排队任务，而不必共享内存中的函数对象。
 _EXECUTOR_REGISTRY: Dict[str, Callable] = {}
 
 
@@ -70,8 +75,11 @@ def get_registered_executor(key: str) -> Optional[Callable]:
 class ConcurrencyResult(str, Enum):
     """Result of concurrency check."""
 
+    # 已获得槽位、可立即开始执行
     STARTED = "started"
+    # 未获得槽位、已进入等待队列
     QUEUED = "queued"
+    # 队列也已满，直接拒绝
     REJECTED_QUEUE = "rejected_queue"
 
 
@@ -86,6 +94,9 @@ class ConcurrencyResponse:
     queue_length: int = 0
 
 
+# 出队结果的内部载体：把「从队列取出一条任务」与「实际分发该任务」解耦。
+# 之所以拆开，是为了在持有 per-user 锁时只做出队（快、临界区小），出锁之后再
+# 做耗时的分发，避免长时间占用分布式锁。
 @dataclass
 class _DequeuedTask:
     user_id: str
@@ -107,24 +118,29 @@ class UserConcurrencyLimiter:
     def __init__(self):
         self._redis = None
 
+    # 惰性获取 Redis 客户端。
     @property
     def redis(self):
         if self._redis is None:
             self._redis = get_redis_client()
         return self._redis
 
+    # 活跃集合 key：存 Sorted Set，member=run_id，score=最近心跳时间戳。
     @staticmethod
     def _active_key(user_id: str) -> str:
         return f"chat:active:{user_id}"
 
+    # 等待队列 key：存 List，每个元素是含完整任务上下文的 JSON。
     @staticmethod
     def _queue_key(user_id: str) -> str:
         return f"chat:queue:{user_id}"
 
+    # per-user 分布式互斥锁 key：保护「读活跃数 -> 决定占位/入队」这段临界区。
     @staticmethod
     def _lock_key(user_id: str) -> str:
         return f"chat:lock:{user_id}"
 
+    # 分页遍历等待队列（LRANGE 逐页拉取），避免一次性把超长队列全读进内存。
     async def _iter_queue_entries(self, queue_key: str, page_size: int = QUEUE_SCAN_PAGE_SIZE):
         start = 0
         while True:
@@ -138,6 +154,9 @@ class UserConcurrencyLimiter:
                 return
             start += page_size
 
+    # 从用户所有角色中汇总出有效并发限额，取「最宽松」的一档（多个角色时按 max
+    # 合并）。返回 (max_concurrent, max_queued)，None 表示不限。查询失败时保守
+    # 回退到默认值 5/10，避免因取不到角色而完全放行或完全拦死。
     async def get_user_limits(self, roles: list[str]) -> Tuple[Optional[int], Optional[int]]:
         """Get effective concurrency limits from user's roles (most permissive wins).
 
@@ -168,6 +187,9 @@ class UserConcurrencyLimiter:
 
         return max_concurrent, max_queued
 
+    # 统计「近期有心跳」的活跃任务数：用 ZCOUNT 只数 score >= now-HEARTBEAT_TIMEOUT
+    # 的条目。这样崩溃 worker 留下的陈旧条目（score 很老）会被自然排除在计数之外，
+    # 无需先清理即可得到正确的活跃数——这是本限流器「自愈」的关键一环。
     async def _get_active_count(self, user_id: str) -> int:
         """Count tasks with recent heartbeats (excludes crashed workers)."""
         try:
@@ -177,6 +199,8 @@ class UserConcurrencyLimiter:
             logger.warning(f"Failed to get active count: {e}")
             return 0
 
+    # 物理清除 Sorted Set 中心跳已过期的条目（ZREMRANGEBYSCORE 删除 score <= cutoff）。
+    # _get_active_count 已能忽略陈旧条目，这里进一步做真正的删除，防止集合无限膨胀。
     async def _cleanup_stale_active(self, user_id: str) -> None:
         """Remove entries with expired heartbeats from the sorted set."""
         try:
@@ -187,6 +211,9 @@ class UserConcurrencyLimiter:
         except Exception as e:
             logger.warning(f"Failed to cleanup stale active entries: {e}")
 
+    # 获取 per-user 短时互斥锁：用 SET NX EX 自旋抢锁，抢不到就短暂 sleep 重试，
+    # 直到 USER_LOCK_WAIT_SECONDS 超时抛 TimeoutError。锁带 USER_LOCK_TTL 过期，
+    # 即使持有者崩溃也能自动释放，避免死锁。返回 (lock_key, token) 供释放时校验。
     async def _acquire_user_lock(self, user_id: str) -> tuple[str, str]:
         """Acquire a short-lived per-user Redis mutex for distributed-safe slot updates."""
         lock_key = self._lock_key(user_id)
@@ -201,6 +228,8 @@ class UserConcurrencyLimiter:
 
         raise TimeoutError(f"Timed out acquiring concurrency lock for user {user_id}")
 
+    # 释放 per-user 锁：用 Lua 脚本做「比对 token 一致才删除」的原子操作，避免误删
+    # 已超时并被他人重新持有的锁（经典分布式锁释放安全问题）。
     async def _release_user_lock(self, lock_key: str, token: str) -> None:
         """Release a per-user Redis mutex if we still own it."""
         try:
@@ -215,6 +244,10 @@ class UserConcurrencyLimiter:
         except Exception as e:
             logger.warning(f"Failed to release concurrency lock {lock_key}: {e}")
 
+    # 在持有 per-user 锁的前提下把任务放入等待队列。
+    # 先按 max_queued 判断队列是否已满（满则返回 REJECTED_QUEUE）；再把包含完整
+    # 任务上下文的 JSON RPUSH 到队列尾部，并做单条体积上限校验（超限也拒绝）。
+    # 之所以把整个上下文写进队列条目，是为了让任意 worker 都能出队并分发，无需共享内存。
     async def _queue_task_locked(
         self,
         user_id: str,
@@ -274,6 +307,11 @@ class UserConcurrencyLimiter:
             queue_length=queue_length,
         )
 
+    # 抢占槽位的核心算法（在持锁临界区内执行）：
+    #   1) 取用户限额；max_concurrent 为 None 表示不限，直接放行 STARTED；
+    #   2) 清理陈旧活跃条目并统计当前活跃数；
+    #   3) 活跃数 < 上限：ZADD 占一个槽位（score=当前时间），返回 STARTED；
+    #   4) 否则转入队列（可能 QUEUED 或队满 REJECTED_QUEUE）。
     async def _acquire_locked(
         self,
         user_id: str,
@@ -312,6 +350,9 @@ class UserConcurrencyLimiter:
             max_queued=max_queued,
         )
 
+    # 对外的抢占入口：加 per-user 锁后执行 _acquire_locked，finally 里释放锁。
+    # 关键设计——「失败即放行（fail-open）」：限流器自身出错（如 Redis 抖动）时
+    # 返回 STARTED 而非拦死请求，宁可短暂超限也不因基础设施故障阻断用户对话。
     async def acquire(
         self,
         user_id: str,
@@ -337,6 +378,10 @@ class UserConcurrencyLimiter:
             logger.error(f"Concurrency limiter error (fail-open): {e}")
             return ConcurrencyResponse(result=ConcurrencyResult.STARTED)
 
+    # 释放槽位并推进队列：任务结束时调用。持锁期间只做「移除活跃条目 + 出队一条」
+    # 这类快操作，真正耗时的分发放到锁外执行，尽量缩短临界区。dequeue=False 可
+    # 只释放不推进（如服务关闭时不希望再拉起新任务）。整体 try/except 兜底，
+    # 释放失败只记日志不抛出。
     async def release(self, user_id: str, run_id: str, dequeue: bool = True) -> None:
         """Release a concurrency slot and trigger next queued task."""
         dequeued_task: _DequeuedTask | None = None
@@ -362,10 +407,14 @@ class UserConcurrencyLimiter:
         except Exception as e:
             logger.error(f"Concurrency release error: {e}")
 
+    # 从活跃 Sorted Set 移除某 run（调用方已持有 per-user 锁）。
     async def _release_active_slot_locked(self, user_id: str, run_id: str) -> None:
         """Release an active slot while the caller already holds the per-user lock."""
         await self.redis.zrem(self._active_key(user_id), run_id)
 
+    # 刷新活跃条目的心跳分数（ZADD 覆写 score=当前时间）。由心跳循环周期性调用，
+    # 让本 run 的条目一直落在「近期活跃」窗口内，不被 _get_active_count 忽略或被
+    # 清理逻辑删除；反过来，一旦心跳停止（进程崩溃），条目就会自然过期。
     async def refresh(self, user_id: str, run_id: str) -> None:
         """Refresh heartbeat timestamp for an active task.
 
@@ -380,6 +429,8 @@ class UserConcurrencyLimiter:
         except Exception as e:
             logger.warning(f"Failed to refresh concurrency entry: {e}")
 
+    # 出队并分发下一条排队任务（自带加/解锁）。与 release 同理，出队在锁内、
+    # 分发在锁外。主要用于外部主动推进队列的场景。
     async def _try_dequeue_next(self, user_id: str) -> None:
         """Try to dequeue next valid (non-expired) task from queue."""
         dequeued_task: _DequeuedTask | None = None
@@ -400,6 +451,14 @@ class UserConcurrencyLimiter:
         except Exception as e:
             logger.error(f"Dequeue error: {e}")
 
+    # 在持锁前提下尝试出队下一条有效任务。循环最多 20 次以跳过无效条目：
+    #   - LPOP 取队首；空则结束；
+    #   - JSON 解析失败 / 非对象 / 已超过 QUEUE_TIMEOUT 过期 / 缺 run_id|session_id
+    #     的条目都丢弃并继续取下一条；
+    #   - 出队后再次核对活跃数：若此刻已达上限，则把条目 LPUSH 放回队首并停止
+    #     （保持先进先出且不超限）；
+    #   - 否则 ZADD 占用槽位。dispatch=True 直接就地分发；dispatch=False 则返回
+    #     _DequeuedTask 交由调用方在锁外分发。
     async def _try_dequeue_next_locked(
         self,
         user_id: str,
@@ -455,6 +514,9 @@ class UserConcurrencyLimiter:
 
         return None
 
+    # 在没有角色信息时（如出队分发路径）获取限额：先按 user_id 查出用户角色，
+    # 再复用 get_user_limits；查不到用户则回退默认 5/10。名字里的 cache 是历史
+    # 遗留，目前并未真正做缓存。
     async def get_user_limits_from_cache(self, user_id: str) -> Tuple[Optional[int], Optional[int]]:
         """Get limits (cache not implemented, delegates to get_user_limits with empty roles).
 
@@ -470,6 +532,13 @@ class UserConcurrencyLimiter:
             logger.warning(f"Failed to load user limits for {user_id}, using defaults: {e}")
             return 5, 10
 
+    # 为「任务恢复」占用槽位：崩溃恢复时旧 run 要被新 run 顶替，不能简单再抢一个
+    # 槽位（否则会把恢复也算进并发上限、甚至超限）。策略：
+    #   - 不限并发：直接移除旧 run、加入新 run；
+    #   - 旧 run 仍在活跃集合：原地「换名」（删旧加新），不占额外名额；
+    #   - 旧 run 已不在但仍有空位：正常占用；
+    #   - 满了：走入队。
+    # 同样 fail-open：异常时返回 STARTED，保证恢复不被限流器故障卡死。
     async def claim_recovery_slot(
         self,
         user_id: str,
@@ -526,6 +595,13 @@ class UserConcurrencyLimiter:
             logger.error(f"Recovery slot claim error (fail-open): {e}")
             return ConcurrencyResponse(result=ConcurrencyResult.STARTED)
 
+    # 分发一条已出队的排队任务。上下文解析遵循「Redis 优先、内存兜底」：
+    #   - 新格式：完整上下文存在 Redis 队列条目里（task_context 带 executor_key），
+    #     多 worker 安全，用 executor_key 从注册表反查执行函数；
+    #   - 旧格式：迁移前写入的条目，上下文只在提交进程内存 _pending_tasks 里，
+    #     仅单 worker 有效。
+    # 分发目标同样分两条路：TASK_BACKEND=arq 时改投 arq 队列（submit_arq）由独立
+    # worker 执行；否则在本进程内 asyncio.create_task 就地跑（本地分发）。
     async def _dispatch_queued_task(
         self,
         user_id: str,
@@ -663,6 +739,7 @@ class UserConcurrencyLimiter:
             logger.error(f"Failed to dispatch queued task: {e}")
             await self._release_active_slot_locked(user_id, run_id)
 
+    # 向前端发一条 queue_update SSE 事件，告知「排队任务已开始处理」。失败仅告警。
     async def _send_queue_processing_event(self, session_id: str, run_id: str) -> None:
         """Send queue_update SSE event so frontend knows processing started."""
         try:
@@ -678,6 +755,7 @@ class UserConcurrencyLimiter:
         except Exception as e:
             logger.warning(f"Failed to send queue_update event: {e}")
 
+    # 查询某 run 在队列中的当前排位（从 1 开始）；不在队列中或出错返回 0。
     async def get_queue_position(self, user_id: str, run_id: str) -> int:
         """Get current queue position for a run_id. Returns 0 if not in queue."""
         try:
@@ -692,6 +770,9 @@ class UserConcurrencyLimiter:
         except Exception:
             return 0
 
+    # 从队列中移除某 session 的所有排队任务（用户取消排队中的会话时调用）。
+    # 持锁完成实际移除，随后把这些 run 对应的 session 状态更新为 CANCELLED。
+    # 返回移除条数。
     async def remove_from_queue(self, user_id: str, session_id: str) -> int:
         """Remove queued tasks matching session_id. Returns count removed."""
         try:
@@ -735,6 +816,9 @@ class UserConcurrencyLimiter:
             logger.warning(f"Failed to remove from queue: {e}")
             return 0
 
+    # 在持锁前提下移除某 session 的排队条目。采用「临时 key 重写」实现原子替换：
+    # 遍历原队列，把要保留的条目分块 RPUSH 到临时 key，再 RENAME 覆盖原 key；
+    # 若全部被移除则直接 DELETE 原 key。异常路径会清理临时 key，避免残留脏数据。
     async def _remove_from_queue_locked(
         self, user_id: str, session_id: str
     ) -> tuple[int, list[Any]]:
@@ -787,6 +871,7 @@ class UserConcurrencyLimiter:
 _limiter: Optional[UserConcurrencyLimiter] = None
 
 
+# 进程内单例：全局共享一个限流器实例（内部无状态、仅持有惰性 Redis 客户端）。
 def get_concurrency_limiter() -> UserConcurrencyLimiter:
     """Get singleton concurrency limiter."""
     global _limiter

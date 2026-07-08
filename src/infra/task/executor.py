@@ -24,9 +24,12 @@ from .state_machine import TaskStateMachine
 from .status import TaskStatus
 
 logger = get_logger(__name__)
+# 任务进入终态后，其 Redis Stream 事件流的缩短 TTL（秒）：终态后不再需要长期
+# 保留事件流，短 TTL 让它尽快过期回收，减少 Redis 占用。
 _TERMINAL_STREAM_TTL_SECONDS = 60
 
 
+# 是否为本次运行生成「追问建议」问题。读配置开关 ENABLE_RECOMMEND_QUESTIONS。
 def should_schedule_recommend_questions() -> bool:
     """Return whether this run should generate follow-up question suggestions."""
     return bool(getattr(settings, "ENABLE_RECOMMEND_QUESTIONS", True))
@@ -39,6 +42,9 @@ class TaskExecutor:
     处理任务的执行、状态更新、错误处理和通知发送。
     """
 
+    # 依赖注入：storage 用于读写 session 状态；run_info 是与 manager 共享的
+    # run_id -> 运行信息表；heartbeat_manager 负责心跳；内部自持一个状态机
+    # 用于构造要落库的状态元数据。
     def __init__(
         self,
         storage: SessionStorage,
@@ -58,6 +64,13 @@ class TaskExecutor:
         self._heartbeat = heartbeat_manager
         self._state_machine = TaskStateMachine()
 
+    # 任务执行主流程（agent 真正跑起来的地方），把各环节串在一起：
+    #   STARTING -> 启动心跳 -> 建 Presenter 并设置 TraceContext -> RUNNING ->
+    #   （必要时）发 user:message -> 迭代 executor 产出的事件逐条 save -> 完成
+    #   trace -> COMPLETED -> 发通知 -> 缩短终态事件流 TTL。
+    # 三类异常分别处理：CancelledError（asyncio 强制取消）/ TaskInterruptedError
+    #  （用户优雅中断）都落 CANCELLED 并补终态事件后重新抛出；其他异常落 FAILED。
+    # finally 里无论如何都停心跳、清中断信号、清 TraceContext，防止串味到后续任务。
     async def run_task(
         self,
         session_id: str,
@@ -214,6 +227,8 @@ class TaskExecutor:
             TraceContext.clear_request_context()
             TraceContext.clear()
 
+    # 处理 asyncio.CancelledError（被强制取消）：落 CANCELLED，先刷盘已产生的
+    # 事件，再补发取消相关终态事件，最后完成 trace（error）、发通知、缩短流 TTL。
     async def _handle_cancelled_error(
         self,
         session_id: str,
@@ -264,6 +279,9 @@ class TaskExecutor:
         )
         await self._expire_terminal_stream(session_id, run_id, dual_writer)
 
+    # 在「流结束标记 done」之前，按正确顺序补齐取消场景的终态事件：先确保有
+    # token 用量事件，把已缓冲的 done 事件挪到最后，再写 user:cancel 和 error，
+    # 最后重新发出 done。保证前端拿到的事件顺序正确、done 永远收尾。
     async def _emit_cancel_terminal_events(
         self,
         *,
@@ -300,6 +318,9 @@ class TaskExecutor:
         if presenter is not None and done_event is not None:
             await presenter.emit(done_event)
 
+    # 从写入缓冲里删掉已缓冲、但尚未落库的 done 事件，好让取消相关事件插到它前面。
+    # 同时兼容两处缓冲：内存 events 列表与 _mongo_buffer 元组列表，按 run_id/trace_id
+    # 从后往前定位并删除首个匹配项。
     @staticmethod
     def _move_recorded_done_to_end(
         dual_writer: Any,
@@ -334,6 +355,9 @@ class TaskExecutor:
                     del mongo_buffer[index]
                     return
 
+    # 处理 TaskInterruptedError（用户主动中断）：与取消处理基本一致，落 CANCELLED
+    # 并补终态事件。注意此时 dual_writer 可能仍为 None（在拿到它之前就被中断），
+    # 故先兜底获取一次再刷盘。
     async def _handle_interrupted_error(
         self,
         session_id: str,
@@ -390,6 +414,8 @@ class TaskExecutor:
         )
         await self._expire_terminal_stream(session_id, run_id, dual_writer)
 
+    # 写一条 user:cancel 事件，记录「谁在何时取消」。缺 user_id/trace_id/writer
+    # 时直接跳过。该事件也是启动恢复时判定「用户已主动取消、不应自动恢复」的依据。
     async def _record_user_cancel_event(
         self,
         *,
@@ -418,6 +444,9 @@ class TaskExecutor:
         except Exception as e:
             logger.warning("Failed to record user cancel event after terminal cleanup: %s", e)
 
+    # 处理其余所有异常：落 FAILED（记录错误信息），刷盘已产生事件，完成 trace，
+    # 写 error 事件再刷盘，发失败通知并缩短流 TTL。注意这里不重新抛出异常——
+    # 失败已被完整记录，避免异常继续向上冒泡触发 asyncio 的未处理异常告警。
     async def _handle_generic_error(
         self,
         session_id: str,
@@ -470,6 +499,8 @@ class TaskExecutor:
         )
         await self._expire_terminal_stream(session_id, run_id, dual_writer)
 
+    # 任务进入终态后缩短其 Redis 事件流的 TTL（尽快回收）。刻意用 try 兜底，
+    # 即便缩短失败也绝不影响「任务已完成」这条正常路径。
     async def _expire_terminal_stream(
         self,
         session_id: str,
@@ -491,6 +522,9 @@ class TaskExecutor:
         except Exception as e:
             logger.warning("Failed to expire terminal stream for run_id=%s: %s", run_id, e)
 
+    # 发送任务终态通知。优先走 WebSocket 推 task:complete（并附带 unread_count、
+    # 是否收藏等便于前端即时刷新侧边栏的信息）；若当前用户没有活跃 WS 连接，则
+    # 回退到 Web Push 兜底。整段 try 包裹，通知失败不影响任务本身。
     async def _send_task_notification(
         self,
         session_id: str,
@@ -593,6 +627,9 @@ class TaskExecutor:
         except Exception as e:
             logger.warning(f"Failed to send task notification: {e}")
 
+    # 更新 session 的任务状态元数据。先做「陈旧写入」保护：老 run 不得覆盖已切到
+    # 新 run 的会话状态；再用状态机构造 metadata（COMPLETED 时补 completed_at）
+    # 写库。任何异常仅告警，不打断主流程。
     async def _update_session_status(
         self,
         session_id: str,
@@ -626,6 +663,10 @@ class TaskExecutor:
         except Exception as e:
             logger.warning(f"Failed to update session status: {e}")
 
+    # 判断是否为「陈旧 run 想覆盖更新的当前 run」。多轮对话隔离的关键保护：
+    # 早期 run 的终态回写不能覆盖会话已切换到的新 run。QUEUED/PENDING/STARTING
+    # 这些前期状态本就带 current_run_id、不做拦截；其余状态若 run_id 与库里的
+    # current_run_id 不一致，则判定为陈旧，跳过写入。
     async def _is_stale_run_status_update(
         self,
         session_id: str,
@@ -652,6 +693,9 @@ class TaskExecutor:
 
         return bool(current_run_id and current_run_id != run_id)
 
+    # 确保 session 记录存在，不存在则创建。若已存在且属于他人则抛 PermissionError
+    # （防止越权访问他人会话）。创建时把 agent_id 及可选的 project_id / 自定义
+    # metadata 一并写入。
     async def ensure_session(
         self,
         session_id: str,

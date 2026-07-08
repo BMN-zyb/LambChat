@@ -9,9 +9,27 @@
 - 数据库持久化的 system_disabled / user_disabled 过滤
 """
 
+# ============================================================================
+# 与相邻模块的关系
+# ----------------------------------------------------------------------------
+# 本文件解决的是"这个工具要不要出现在 Agent 可用工具集里"（禁用/过滤），
+# 与同目录 mcp_tool_exposure.py 解决的问题不同——那个文件是在"工具已确定
+# 可用"的前提下，再决定它是立即出现在工具列表里（inline）还是延迟到
+# 搜索发现时才注入（deferred）。两者是"要不要给"和"什么时候给"的关系，
+# 过滤发生在更早的阶段：先用本文件排除掉被禁用的工具，剩下的才轮到
+# mcp_tool_exposure.py 去做 inline/deferred 分流。
+# 过滤依据分两路来源：运行时传入的禁用列表（filter_disabled_tools，
+# 通常来自请求参数/会话配置）和数据库持久化的禁用状态
+# （get_db_disabled_mcp_tool_names + filter_mcp_tools_by_db_state，
+# 来自管理员/用户在设置页面里保存的偏好）。
+# ============================================================================
+
 from typing import Any, List, Optional, Set
 
 # 不可被用户禁用的内置工具
+# 这些工具是 Agent 正常运作的基础设施（人机交互确认、沙箱产物揭示、文件中转、
+# 沙箱内 MCP 服务器管理等），一旦被随意禁用会导致相关功能整体不可用，
+# 因此排除在用户可配置的禁用范围之外
 BUILTIN_TOOLS = frozenset(
     [
         "ask_human",
@@ -50,10 +68,13 @@ def filter_disabled_tools(
        则该服务器下的所有工具都会被过滤掉
     4. MCP 工具的 server 属性匹配：如果工具有 server 属性且在禁用服务器列表中
     """
+    # 三个条件都不满足时没有任何过滤需求，直接原样返回，避免无意义的集合构造开销
     if not disabled_tools and not disabled_mcp_tools and not auto_mode:
         return tools
 
     # 自动模式下需要过滤的内置工具
+    # auto_mode（全自动无人值守运行）下不能用 ask_human 打断流程等待人工输入，
+    # 所以即使它在 BUILTIN_TOOLS 保护名单里，这里也要单独过滤掉
     auto_mode_disabled_builtin = frozenset(["ask_human"])
 
     # 合并所有禁用名称
@@ -63,12 +84,15 @@ def filter_disabled_tools(
     mcp_servers = set()
     exact_names = set()
 
+    # 禁用列表里的条目分两类：以 "mcp:" 开头的是"禁用整个 server"的粗粒度规则
+    # （去掉前缀后剩下的就是 server 名），其余当作具体工具名的精确匹配规则
     for name in disabled_set:
         if name.startswith("mcp:"):
             mcp_servers.add(name[4:])
         else:
             exact_names.add(name)
 
+    # 预先拼好 "server:" 形式的前缀元组，配合 str.startswith() 支持同时匹配多个前缀
     mcp_prefixes = tuple(f"{s}:" for s in mcp_servers) if mcp_servers else ()
 
     filtered = []
@@ -87,10 +111,13 @@ def filter_disabled_tools(
             continue
 
         # MCP 服务器前缀匹配
+        # 依赖工具名本身携带 "server:tool" 命名空间前缀
         if mcp_prefixes and tool_name.startswith(mcp_prefixes):
             continue
 
         # MCP server 属性匹配
+        # 兜底：有些 MCP 工具对象名字里不带 server 前缀，但会额外挂一个
+        # server 属性，两种约定都要覆盖到才能确保"禁用整个 server"规则生效
         if mcp_servers and hasattr(tool, "server") and tool.server in mcp_servers:
             continue
 
@@ -147,6 +174,8 @@ async def get_db_disabled_mcp_tool_names(user_id: str) -> Set[str]:
 
         return disabled
 
+    # 查询数据库失败（连接问题、存储层异常等）时不应该让整个 MCP 工具加载
+    # 流程失败——宁可这次没能应用禁用规则，也不能因此让用户完全用不了工具
     except Exception as e:
         logger.warning(
             "[tool_filter] Failed to query DB disabled tools for user %s: %s",
@@ -172,6 +201,9 @@ def filter_mcp_tools_by_db_state(
         return mcp_tools
 
     # 预计算短名集合，用于无前缀工具的兜底匹配
+    # disabled_names 里存的都是 "server:tool" 全限定名，但传入的 mcp_tools
+    # 里个别工具对象的 name 可能没带 server 前缀，因此额外维护一份去掉
+    # server 前缀后的"短名"集合，供后面兜底比对
     short_disabled: Set[str] = set()
     for dn in disabled_names:
         if ":" in dn:
@@ -195,6 +227,7 @@ def filter_mcp_tools_by_db_state(
         filtered.append(tool)
 
     removed = before_count - len(filtered)
+    # 只有实际发生了过滤才记录日志，避免每次调用都产生一条无意义的"过滤了 0 个"日志
     if removed > 0:
         from src.infra.logging import get_logger
 

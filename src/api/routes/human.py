@@ -33,6 +33,9 @@ from src.kernel.schemas.user import TokenPayload
 
 logger = get_logger(__name__)
 
+# Human-in-the-loop 路由：挂载在 /human
+# Agent 执行到需要人工确认/输入处会创建"待审批"(PendingApproval) 并阻塞等待；
+# 前端轮询 /pending 拉取、调用 /{id}/respond 提交结果，从而唤醒并驱动 Agent 继续执行
 router = APIRouter()
 
 # ============================================================================
@@ -56,6 +59,7 @@ def unregister_approval_callback(callback: Callable[[str], None]) -> None:
 
 async def _notify_approval_created(session_id: str) -> None:
     """通知所有回调有新的审批创建"""
+    # 逐个执行回调，兼容同步与异步回调；单个回调异常不影响其它回调
     for callback in _approval_created_callbacks:
         try:
             if asyncio.iscoroutinefunction(callback):
@@ -85,6 +89,7 @@ _approval_storage = get_approval_storage()
 # ============================================================================
 
 
+# 取出并"续期"本地事件（LRU：命中后移到末尾表示最近使用）；不存在返回 None
 def _touch_local_event(approval_id: str) -> tuple[asyncio.Event, float] | None:
     entry = _local_events.get(approval_id)
     if entry is None:
@@ -93,6 +98,7 @@ def _touch_local_event(approval_id: str) -> tuple[asyncio.Event, float] | None:
     return entry
 
 
+# 存入本地事件并做 LRU 淘汰：超出容量上限时丢弃最旧条目，防止遗弃审批泄漏内存
 def _store_local_event(approval_id: str, entry: tuple[asyncio.Event, float]) -> None:
     _local_events[approval_id] = entry
     _local_events.move_to_end(approval_id)
@@ -135,6 +141,7 @@ async def create_approval(
     )
 
     # 存储到 MongoDB
+    # 持久化审批记录（跨进程/重启可见，是审批状态的权威存储）
     await _approval_storage.create(approval)
     logger.info(
         "[HITL] approval_id=%s Approval created (type=%s)",
@@ -143,9 +150,11 @@ async def create_approval(
     )
 
     # 创建本地 Event（单进程优化）
+    # 在本进程内建立 asyncio.Event，供同进程内的等待者被快速唤醒
     _store_local_event(approval_id, (asyncio.Event(), time.time()))
 
     # 通知前端有新的审批请求
+    # 触发已注册回调（如 WebSocket 推送），让前端及时感知有新的待审批
     await _notify_approval_created(session_id or "")
 
     return approval
@@ -171,6 +180,7 @@ async def wait_for_response(approval_id: str, timeout: float = 300) -> Optional[
         approval_id,
         timeout,
     )
+    # 查找本进程是否持有该审批的本地事件：决定走"本地 Event + 轮询"还是"纯分布式轮询"
     local_event = _touch_local_event(approval_id)
     event = local_event[0] if local_event else None
 
@@ -178,6 +188,7 @@ async def wait_for_response(approval_id: str, timeout: float = 300) -> Optional[
         # 单进程内：同时等待本地 Event 和 MongoDB 轮询
         try:
             # 先检查是否已有响应
+            # 若响应已存在则直接返回，避免进入不必要的等待
             response = await _approval_storage.get_response(approval_id)
             if response:
                 logger.info(
@@ -187,6 +198,7 @@ async def wait_for_response(approval_id: str, timeout: float = 300) -> Optional[
                 return response
 
             # 创建两个任务：本地 Event 和 MongoDB 轮询
+            # 同时等待两路信号：本地 Event（同进程秒级唤醒）与分布式轮询（跨进程兜底），先到先返回
             local_wait = asyncio.wait_for(event.wait(), timeout=timeout)
             mongo_wait = wait_for_response_distributed(approval_id, timeout)
 
@@ -199,6 +211,7 @@ async def wait_for_response(approval_id: str, timeout: float = 300) -> Optional[
             )
 
             # 取消未完成的任务
+            # 任一路已完成，取消另一路，避免留下悬挂的等待任务
             for task in pending:
                 task.cancel()
             if pending:
@@ -215,6 +228,7 @@ async def wait_for_response(approval_id: str, timeout: float = 300) -> Optional[
                     logger.warning(f"Wait task error: {e}")
 
             # 从 MongoDB 获取最终结果
+            # 本地 Event 只表示"已被响应"，真正的响应内容统一以 MongoDB 为准
             final_response = await _approval_storage.get_response(approval_id)
             if final_response:
                 logger.info("[HITL] approval_id=%s Response received", approval_id)
@@ -223,9 +237,11 @@ async def wait_for_response(approval_id: str, timeout: float = 300) -> Optional[
             return final_response
 
         finally:
+            # 无论成功、超时还是异常，都清理本地 Event，防止内存泄漏
             _local_events.pop(approval_id, None)
     else:
         # 跨进程：直接使用 MongoDB 轮询
+        # 本进程没有本地 Event（审批可能在其它进程创建），只能靠 Redis Pub/Sub + MongoDB 轮询等待
         distributed_response = await wait_for_response_distributed(approval_id, timeout)
         if distributed_response:
             logger.info("[HITL] approval_id=%s Response received", approval_id)
@@ -253,6 +269,8 @@ def _cleanup_stale_events(max_age: float = 3600) -> int:
 # ============================================================================
 
 
+# GET /human/pending —— 前端轮询获取当前用户待处理的审批列表
+# 需要 chat:write 权限；仅返回当前用户 (user.sub) 的审批；顺带清理过期的本地事件
 @router.get("/pending")
 async def get_pending_approvals(
     limit: int = Query(100, ge=1, le=100, description="最大返回审批数量"),
@@ -268,6 +286,9 @@ async def get_pending_approvals(
     return {"approvals": [a.model_dump() for a in pending], "count": len(pending)}
 
 
+# POST /human/{approval_id}/respond —— 前端提交审批结果（HITL 恢复的关键入口）
+# 需要 chat:write 权限；查询参数 approved(bool)、response(JSON 字符串)
+# 更新审批状态后，通过 Redis Pub/Sub + 本地 Event 唤醒正在阻塞等待的 Agent，使其继续执行
 @router.post("/{approval_id}/respond", dependencies=[Depends(require_permissions("chat:write"))])
 async def respond_to_approval(
     approval_id: str,
@@ -284,6 +305,7 @@ async def respond_to_approval(
         approval_id,
         approved,
     )
+    # 校验审批存在且仍处于 pending（防止对已处理/不存在的审批重复响应）
     approval = await _approval_storage.get(approval_id)
     if not approval:
         raise HTTPException(status_code=404, detail="审批请求不存在")
@@ -297,6 +319,7 @@ async def respond_to_approval(
         raise HTTPException(status_code=400, detail="审批请求已处理")
 
     # 解析 JSON 响应数据
+    # 前端提交的表单/确认结果为 JSON 字符串；解析失败时降级为空字典
     try:
         response_data = await run_blocking_io(json.loads, response) if response else {}
     except json.JSONDecodeError:
@@ -305,6 +328,7 @@ async def respond_to_approval(
     # 记录响应并更新状态
     approval_response = ApprovalResponse(approved=approved, response=response_data)
     status = "approved" if approved else "rejected"
+    # 优先使用原子的"仅当仍为 pending 才写入"接口，避免并发下的重复响应竞态
     respond_if_pending = getattr(_approval_storage, "respond_if_pending", None)
     if callable(respond_if_pending):
         updated_approval = await respond_if_pending(approval_id, status, approval_response)
@@ -330,6 +354,8 @@ async def respond_to_approval(
     return {"status": "success", "approval_id": approval_id, "approved": approved}
 
 
+# POST /human/{approval_id}/extend —— 延长审批超时时间（用户正在交互时调用，避免等待超时）
+# 需要 chat:write 权限；查询参数 extra_seconds；达到最大延长次数时返回 max_extensions_reached
 @router.post("/{approval_id}/extend", dependencies=[Depends(require_permissions("chat:write"))])
 async def extend_approval_timeout(
     approval_id: str,
@@ -351,6 +377,8 @@ async def extend_approval_timeout(
     }
 
 
+# GET /human/{approval_id} —— 获取单个审批详情
+# 需要 chat:write 权限；不存在时返回 200 且 status=not_found（便于前端处理，无需捕获 404）
 @router.get("/{approval_id}", dependencies=[Depends(require_permissions("chat:write"))])
 async def get_approval(approval_id: str):
     """获取单个审批详情"""
@@ -363,6 +391,8 @@ async def get_approval(approval_id: str):
     return approval.model_dump()
 
 
+# DELETE /human/{approval_id} —— 取消并删除一个审批请求
+# 需要 chat:write 权限；同时删除 MongoDB 记录与内存中的本地 Event
 @router.delete("/{approval_id}", dependencies=[Depends(require_permissions("chat:write"))])
 async def cancel_approval(approval_id: str):
     """取消审批请求"""

@@ -10,12 +10,15 @@ logger = get_logger(__name__)
 
 
 async def _json_dumps_text_body(content: str) -> str:
+    # 把纯文本包成飞书文本消息体 {"text": ...}；序列化放线程池且保留中文。
     return await run_blocking_io(json.dumps, {"text": content}, ensure_ascii=False)
 
 
 class FeishuMessageSenderMixin:
     """Mixin providing message send/update and reaction operations."""
 
+    # 本 mixin 的模式：每个操作有一个 *_sync 助手（直接调用同步的 lark SDK），
+    # 再由 async 包装方法通过 run_blocking_io 放到线程池执行，避免阻塞事件循环。
     _client: Any
     _resolve_receive_id: Any
     _REPLY_FALLBACK_ERROR_CODES: set[int]
@@ -192,6 +195,8 @@ class FeishuMessageSenderMixin:
         try:
             via = "create"
             # Use ReplyMessageRequest API for replies
+            # 有 reply_to_id 时优先走"回复"接口，形成引用回复；
+            # 若回复失败且错误码可回退，则退化为普通"发送"接口。
             if reply_to_id:
                 from lark_oapi.api.im.v1 import ReplyMessageRequest, ReplyMessageRequestBody
 
@@ -376,11 +381,13 @@ class FeishuMessageSenderMixin:
             return False
 
         # Try update API first (for text messages)
+        # 先尝试 update 接口（适用于文本消息）。
         success = await run_blocking_io(self._update_text_message_sync, message_id, content)
         if success:
             return True
 
         # Fall back to patch API (for card messages only)
+        # 文本更新失败则回退到 patch 接口（仅适用于卡片消息）。
         text_body = await _json_dumps_text_body(content)
         return await run_blocking_io(self._patch_message_sync, message_id, text_body)
 

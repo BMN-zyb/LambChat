@@ -24,6 +24,7 @@ from src.infra.channel.feishu.markdown import FeishuMarkdownAdapter
 from src.infra.logging import get_logger
 
 logger = get_logger(__name__)
+# 流式更新的"哨兵信号"：入队它表示"有新内容待推送"，与 None（终止信号）区分。
 _STREAM_UPDATE_SIGNAL = object()
 
 
@@ -34,6 +35,8 @@ async def _download_storage_object_to_file(
     *,
     chunk_size: int = FEISHU_REVEAL_DOWNLOAD_CHUNK_SIZE,
 ) -> int:
+    # 薄封装：把本模块的下载上限/阻塞执行器注入 handler_helpers 后复用其实现，
+    # 使两处共享同一套限额与流式下载逻辑。
     handler_helpers.FEISHU_REVEAL_LEGACY_DOWNLOAD_MAX_BYTES = (
         FEISHU_REVEAL_LEGACY_DOWNLOAD_MAX_BYTES
     )
@@ -85,6 +88,8 @@ class FeishuResponseCollector:
         # 处理中 emoji 控制
         self._processing_message_id: str | None = None
         self._processing_reaction_id: str | None = None
+        # 流式卡片状态：卡片/消息 ID、递增序号（飞书要求单调递增以防乱序）、
+        # 失败/完成标记、并发锁，以及"单槽"更新队列 + 后台推送任务。
         self._stream_card_id: str | None = None
         self._stream_message_id: str | None = None
         self._stream_sequence = 0
@@ -95,10 +100,12 @@ class FeishuResponseCollector:
         self._stream_update_task: asyncio.Task | None = None
         self._stream_last_pushed_content = ""
         self._stream_status_text: str | None = None
+        # 审批卡片去重与消息 ID 记录：sent_ids 防重复发送，message_ids 供后续状态回写。
         self._approval_card_message_ids: dict[str, str] = {}
         self._approval_card_sent_ids: set[str] = set()
 
     def _current_stream_content(self) -> str:
+        # 当前流式内容 = 已累积文本；若处于"等待审批"等临时状态，则追加状态提示行。
         content = "".join(self.text_parts)
         if self._stream_status_text:
             return (
@@ -109,9 +116,13 @@ class FeishuResponseCollector:
         return content
 
     def _final_stream_content(self) -> str:
+        # 最终内容不含临时状态提示，只保留正式文本。
         return "".join(self.text_parts)
 
     def _queue_latest_stream_update(self) -> None:
+        # 单槽合并：队列容量为 1，这里先清空已有待处理项（保留终止信号 None），
+        # 再放入一个更新信号。多次快速追加只会保留"最新需要推送"这一个信号，
+        # 从而把高频 chunk 合并成一次卡片更新（配合 worker 的防抖）。
         while True:
             try:
                 pending = self._stream_update_queue.get_nowait()
@@ -128,15 +139,18 @@ class FeishuResponseCollector:
 
     async def append_stream_chunk(self, chunk: str) -> None:
         """Append one response chunk and push it to a Feishu streaming card when enabled."""
+        # 先累积文本；若未开启流式或流式已失败/已终结，则只累积不推送（最后走整卡发送）。
         self.append_text(chunk)
         if not self.stream_reply or self._stream_failed or self._stream_finalized:
             return
 
+        # 已建好流式卡片：确保 worker 在跑并投递一个更新信号即可。
         if self._stream_card_id:
             self._ensure_stream_update_worker()
             self._queue_latest_stream_update()
             return
 
+        # 尚未建卡：首个 chunk 时创建流式卡片并发出去（"首帧"只画很少内容以尽快触发打字机效果）。
         initialized = False
         content = self._current_stream_content()
         initial_content = self._first_paint_content(content)
@@ -148,6 +162,7 @@ class FeishuResponseCollector:
                 self._stream_failed = True
                 return
 
+            # 双重检查（可能有并发进入）：仍无卡片才创建并发送。
             if not self._stream_card_id:
                 card_id = await client.create_stream_card(initial_content)
                 if not card_id:
@@ -167,6 +182,7 @@ class FeishuResponseCollector:
                 initialized = True
 
         self._ensure_stream_update_worker()
+        # 初次建卡后：若真实内容已多于首帧，补发一次更新；非初次则正常投递更新。
         if initialized:
             if initial_content != content:
                 self._queue_latest_stream_update()
@@ -175,6 +191,7 @@ class FeishuResponseCollector:
 
     def _first_paint_content(self, content: str) -> str:
         """Return a tiny first update so Feishu starts typewriter rendering quickly."""
+        # 首帧只取前 N 个字符，让飞书尽快开始逐字渲染，避免等全量内容才显示。
         stripped = content.strip()
         if not stripped:
             return content
@@ -183,12 +200,14 @@ class FeishuResponseCollector:
         return stripped[:FEISHU_STREAM_FIRST_PAINT_CHARS]
 
     def _ensure_stream_update_worker(self) -> None:
+        # 幂等地拉起后台推送任务，并挂上完成回调以捕获其异常。
         if self._stream_update_task and not self._stream_update_task.done():
             return
         self._stream_update_task = asyncio.create_task(self._stream_update_worker())
         self._stream_update_task.add_done_callback(self._on_stream_update_task_done)
 
     def _on_stream_update_task_done(self, task: asyncio.Task) -> None:
+        # worker 任务结束回调：正常取消忽略；异常则标记流式失败并告警。
         if task.cancelled():
             return
         try:
@@ -198,12 +217,16 @@ class FeishuResponseCollector:
             logger.warning("[Feishu] Stream update worker failed: %s", e, exc_info=True)
 
     async def _stream_update_worker(self) -> None:
+        # 后台推送协程：从单槽队列取信号，做防抖后把最新内容整体更新到卡片。
         first_update = True
         while True:
             marker = await self._stream_update_queue.get()
+            # 收到 None 即终止信号，退出。
             if marker is None:
                 return
 
+            # 非首次更新前先防抖：睡一小段时间，并把这期间又累积的信号一次性吸收，
+            # 从而把连续多次 chunk 合并成一次卡片更新（降低飞书更新频率/限流风险）。
             if not first_update:
                 await asyncio.sleep(FEISHU_STREAM_UPDATE_DEBOUNCE_SECONDS)
                 while True:
@@ -216,6 +239,7 @@ class FeishuResponseCollector:
             first_update = False
             content = self._current_stream_content()
 
+            # 内容与上次推送一致则跳过，避免无谓更新。
             if content == self._stream_last_pushed_content:
                 continue
 
@@ -226,6 +250,7 @@ class FeishuResponseCollector:
                 if not client:
                     self._stream_failed = True
                     return
+                # 序号单调递增：飞书按序号判定更新新旧，防止乱序覆盖。
                 self._stream_sequence += 1
                 success = await client.update_stream_card(
                     self._stream_card_id,
@@ -238,6 +263,7 @@ class FeishuResponseCollector:
                 self._stream_last_pushed_content = content
 
     async def _cancel_stream_update_worker(self) -> None:
+        # 取消后台推送任务并等待其退出（用于终结流式前的收尾）。
         task = self._stream_update_task
         if not task or task.done():
             return
@@ -257,15 +283,18 @@ class FeishuResponseCollector:
         self.files_to_reveal.append(file_info)
 
     def set_session_link(self, session_id: str, run_id: str | None) -> None:
+        # 记录会话/运行 ID，用于在卡片末尾附上"查看会话"的深链。
         self.session_id = session_id
         self.run_id = run_id
 
     def _session_link_markdown(self) -> str | None:
+        # 生成"查看会话"链接的 Markdown；无 session_id 时返回 None。
         if not self.session_id:
             return None
         return f"[{_SESSION_LINK_TEXT}]({_build_session_run_url(self.session_id, self.run_id)})"
 
     def _append_session_link_to_text(self, text: str) -> str:
+        # 把会话链接追加到正文末尾（正文为空则只放链接）。
         link = self._session_link_markdown()
         if not link:
             return text
@@ -294,14 +323,17 @@ class FeishuResponseCollector:
             self._queue_latest_stream_update()
 
     def record_approval_card(self, approval_id: str, message_id: str | None) -> None:
+        # 记录审批卡片对应的消息 ID，供后续把卡片状态改为通过/拒绝等终态。
         if approval_id and message_id:
             self._approval_card_message_ids[approval_id] = message_id
 
     def has_sent_approval_card(self, approval_id: str) -> bool:
+        # 判断某审批卡片是否已发送过（去重用）。
         return approval_id in self._approval_card_sent_ids
 
     async def start_processing_indicator(self, message_id: str) -> None:
         """发送一次处理中 emoji 指示器。"""
+        # 幂等：已有处理中表情则不重复添加。
         if self._processing_reaction_id:
             return
         reaction_id = await self.manager.add_reaction(
@@ -375,9 +407,11 @@ class FeishuResponseCollector:
 
     async def finalize_stream_message(self) -> bool:
         """Close the streaming card. Returns True when the reply was streamed."""
+        # 无有效流式卡片（未建/已失败/已终结）则返回 False，交由整卡发送兜底。
         if not self._stream_card_id or self._stream_failed or self._stream_finalized:
             return False
 
+        # 先停掉后台推送 worker，再在锁内做"最终定稿"：附上会话链接并标记卡片完成。
         await self._cancel_stream_update_worker()
         async with self._stream_lock:
             if not self._stream_card_id or self._stream_failed or self._stream_finalized:
@@ -398,6 +432,7 @@ class FeishuResponseCollector:
 
     async def send_card_message(self) -> bool:
         """发送卡片消息（支持回复引用、图片嵌入）"""
+        # 已通过流式卡片定稿则无需再发整卡。
         if self._stream_finalized:
             return True
 
@@ -469,6 +504,7 @@ class FeishuResponseCollector:
 
     async def send_approval_card(self, approval: dict[str, Any]) -> bool:
         """Send a Feishu approval card and remember its message id for status updates."""
+        # HITL 审批卡片：同一 approval_id 只发一次，重复事件直接跳过。
         approval_id = str(approval.get("id") or "")
         if approval_id and approval_id in self._approval_card_sent_ids:
             logger.info("[HITL] approval_id=%s Skip duplicate approval card", approval_id)
@@ -477,6 +513,8 @@ class FeishuResponseCollector:
         # card while reporting failure (e.g. a non-230011 error code with no
         # fallback), and a duplicate approval_required event must not re-send;
         # better to skip a retry than to spam a second approval card.
+        # 在网络调用前就标记为已发送：飞书回复接口可能"实际送达却报失败"，
+        # 若此时又来重复的 approval_required 事件，宁可漏一次重试也不要刷出第二张审批卡。
         if approval_id:
             self._approval_card_sent_ids.add(approval_id)
         logger.info(
@@ -574,11 +612,13 @@ class FeishuResponseCollector:
                 if not file_key:
                     logger.warning(f"[Feishu] No key for file {file_name}")
                     continue
+                # 同一文件只发一次（_sent_file_keys 去重）。
                 if file_key in self._sent_file_keys:
                     continue
 
                 logger.info(f"[Feishu] Reading file {file_name} from storage, key={file_key}")
 
+                # 从 S3 流式下载到临时文件，避免大文件整块占用内存。
                 backend = storage._get_backend()
                 safe_suffix = os.path.basename(file_name) or "file"
                 with NamedTemporaryFile(prefix="lambchat-feishu-", suffix=f"-{safe_suffix}") as tmp:
@@ -594,6 +634,7 @@ class FeishuResponseCollector:
 
                     logger.info(f"[Feishu] Streamed file {file_name}, size: {size} bytes")
 
+                    # 图片类走"上传图片 + 发图片消息"，其余走"上传文件 + 发文件消息"。
                     file_type = str(file_info.get("type") or "").lower()
                     mime_type = str(file_info.get("mime_type") or "").lower()
                     if file_type == "image" or mime_type.startswith("image/"):

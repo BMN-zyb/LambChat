@@ -1,44 +1,68 @@
 """
 权限相关的 Pydantic 模型
 """
+# 本模块承担两件事：
+# 1. 定义向前端暴露"权限列表"接口所需的响应模型（PermissionInfo/PermissionGroup/PermissionsResponse）；
+# 2. 维护权限的元数据（中文名称、描述）与分组配置（PERMISSION_METADATA/PERMISSION_GROUPS_CONFIG），
+#    并通过 get_permissions_response() 把二者组装成响应对象。
+# 权限的"真值来源"是 src.kernel.types.Permission 枚举，本模块只负责展示层的包装，
+# 通常被角色管理/权限管理相关的 API 路由和管理后台前端使用。
 
 from typing import TypedDict
 
 from pydantic import BaseModel
 
+# Permission 是系统权限的枚举真值来源，定义在 src/kernel/types.py
 from src.kernel.types import Permission
 
 
+# 单个权限的展示信息，用于前端渲染权限勾选项/说明文案
 class PermissionInfo(BaseModel):
     """单个权限信息"""
 
+    # 权限的原始取值，对应 Permission 枚举的 value（如 "chat:read"）
     value: str
+    # 权限的中文展示名称（如"读取聊天"）
     label: str
+    # 权限的详细说明文案，默认空字符串
     description: str = ""
 
 
+# 一组相关权限的集合，对应权限管理页面中的一个分组（如"聊天""会话"）
 class PermissionGroup(BaseModel):
     """权限分组"""
 
+    # 分组的中文名称
     name: str
+    # 该分组下包含的权限信息列表
     permissions: list[PermissionInfo]
 
 
+# GET 权限列表接口的响应体，同时提供"按分组"和"扁平化全量列表"两种视图
 class PermissionsResponse(BaseModel):
     """权限列表响应"""
 
+    # 按分组组织的权限信息，供前端分组展示
     groups: list[PermissionGroup]
+    # 所有权限的扁平化列表（不分组），供前端做全量查找/校验
     all_permissions: list[PermissionInfo]
 
 
+# 内部使用的分组配置结构（非对外 API 模型），用于声明 PERMISSION_GROUPS_CONFIG 的每一项
 class PermissionGroupConfig(TypedDict):
     """权限分组配置"""
 
+    # 分组中文名称
     name: str
+    # 该分组包含哪些权限（存的是 Permission.xxx.value 字符串，而非枚举对象）
     permissions: list[str]
 
 
 # 权限元数据配置
+# 结构：外层 key 为 Permission 枚举的 value（权限唯一标识字符串），
+# 外层 value 是一个含 "label"（中文展示名）和 "description"（中文说明）的字典。
+# 下面按业务模块用注释分段（Chat/Session/Skill/...），顺序与 Permission 枚举定义顺序保持一致，
+# 主要供 get_permissions_response() 读取，为每个权限值组装出 PermissionInfo。
 PERMISSION_METADATA: dict[str, dict[str, str]] = {
     # Chat
     Permission.CHAT_READ.value: {
@@ -283,6 +307,9 @@ PERMISSION_METADATA: dict[str, dict[str, str]] = {
 }
 
 # 权限分组配置
+# 结构：列表中每一项是一个 PermissionGroupConfig（{"name": 分组中文名, "permissions": [权限value,...]}）。
+# 列表顺序即为前端权限管理页面中分组的展示顺序；每个分组内的权限顺序同理决定展示顺序。
+# 注意：这里只登记"分组包含哪些权限"，具体的 label/description 仍从 PERMISSION_METADATA 中查表获得。
 PERMISSION_GROUPS_CONFIG: list[PermissionGroupConfig] = [
     {
         "name": "聊天",
@@ -451,20 +478,28 @@ def get_permissions_response() -> PermissionsResponse:
     """
     # 构建权限分组
     groups: list[PermissionGroup] = []
+    # 同时维护一份不分组的扁平列表，供需要全量权限的场景使用
     all_permissions: list[PermissionInfo] = []
 
+    # 按 PERMISSION_GROUPS_CONFIG 中登记的分组顺序逐个处理
     for group_config in PERMISSION_GROUPS_CONFIG:
+        # 当前分组下的权限信息集合
         group_permissions: list[PermissionInfo] = []
+        # 遍历该分组包含的每个权限 value
         for perm_value in group_config["permissions"]:
+            # 从元数据表中查询该权限的中文标签/说明，查不到则用空字典兜底
             metadata = PERMISSION_METADATA.get(perm_value, {})
+            # 组装单个权限的展示信息；label/description 缺失时分别回退为 value 本身/空字符串
             perm_info = PermissionInfo(
                 value=perm_value,
                 label=metadata.get("label", perm_value),
                 description=metadata.get("description", ""),
             )
+            # 同时计入当前分组和全局扁平列表
             group_permissions.append(perm_info)
             all_permissions.append(perm_info)
 
+        # 当前分组处理完毕，包装为 PermissionGroup 加入结果列表
         groups.append(
             PermissionGroup(
                 name=group_config["name"],
@@ -472,6 +507,7 @@ def get_permissions_response() -> PermissionsResponse:
             )
         )
 
+    # 汇总分组视图与扁平视图，返回最终响应
     return PermissionsResponse(
         groups=groups,
         all_permissions=all_permissions,

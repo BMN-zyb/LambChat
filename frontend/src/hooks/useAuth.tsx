@@ -1,6 +1,11 @@
 /**
  * 认证上下文和 Hook
  * 提供全局认证状态管理
+ *
+ * 职责：集中管理登录态（user/token）、动态权限、以及登录/注册/OAuth/登出等操作，
+ * 并向全应用暴露权限判断方法（hasPermission / hasAny / hasAll）。
+ * 与 services/api 的分工：本文件只管「React 层状态」，token 的实际读写/刷新在 api 层；
+ * 二者通过 "auth:logout" 等 window 事件解耦联动。
  */
 
 import {
@@ -77,6 +82,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [token, setToken] = useState<string | null>(getAccessToken());
   const [isLoading, setIsLoading] = useState(true);
   // 存储从 API 获取的动态权限
+  // 后端返回的权限是字符串，写入前会用 Object.values(Permission) 过滤，
+  // 只保留前端已知的合法枚举值，避免脏数据污染权限判断。
   const [dynamicPermissions, setDynamicPermissions] = useState<Permission[]>(
     [],
   );
@@ -85,6 +92,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const permissions = dynamicPermissions;
 
   // 初始化：检查现有 token 并获取用户信息
+  // 刷新策略：access token 未过期则直接用；已过期则看 refresh token 是否可用——
+  // 可用则调 refreshToken 换新，不可用/刷新失败则登出并要求重新登录。
+  // 这是「进入应用时」的一次性校验；请求过程中的 401 自动刷新由 api 层的 authFetch 处理。
   useEffect(() => {
     const initAuth = async () => {
       const accessToken = getAccessToken();
@@ -151,6 +161,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   // 监听登出事件
+  // api 层在 refresh token 也失效时会派发 "auth:logout" 全局事件，
+  // 这里据此清空本地登录态，实现「底层鉴权失败 -> 上层 UI 登出」的联动。
   useEffect(() => {
     const handleLogout = () => {
       setToken(null);
@@ -316,6 +328,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     [permissions],
   );
 
+  // 对外暴露的上下文值。注意 isAuthenticated 要求 token 与 user 同时存在，
+  // 仅有 token 但用户信息拉取失败时不算已登录，避免半登录态。
   const value: AuthContextType = {
     user,
     token,

@@ -9,13 +9,17 @@
 3. 创建名为 "lambchat-medium" 的自定义快照
 """
 
+# 标准库：os 用于拼接路径，sys 用于在校验失败/异常时以非零退出码结束进程
 import os
 import sys
 
+# Daytona 官方 Python SDK：用于创建/管理云端开发沙箱（Sandbox）的快照（Snapshot）镜像
 import daytona
 from daytona import CreateSnapshotParams, DaytonaConfig, Image, Resources
 
 # 导入 settings
+# 本脚本以 `python scripts/xxx.py` 方式直接执行，项目根目录默认不在 sys.path 中，
+# 需要手动把上一级目录（项目根）插入 sys.path，才能正常 import src.kernel.config
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from src.kernel.config import settings
 
@@ -30,6 +34,8 @@ BASE_IMAGE = "debian_slim"
 PYTHON_VERSION = "3.12"
 
 # 要添加的额外 pip 包
+# 这些库主要供 Agent 在沙箱内执行生成的代码时使用（读写 Office 文档/PDF/图片等），
+# Daytona 官方基础镜像默认不包含，这里统一预装进自定义快照，避免每次冷启动沙箱都重新 pip install
 EXTRA_PIP_PACKAGES = [
     # ========== 数据处理 ==========
     "pandas",  # 数据分析
@@ -121,6 +127,7 @@ EXTRA_PIP_PACKAGES = [
 
 # ============== 资源配额 ==============
 # daytona-medium: 2 vCPU, 4GiB memory, 8GiB storage
+# 以下数值是使用该快照创建沙箱时默认分配的资源上限（cpu 为核数，memory/disk 单位为 GiB）
 SNAPSHOT_RESOURCES = Resources(
     cpu=2,
     memory=4,
@@ -130,6 +137,8 @@ SNAPSHOT_RESOURCES = Resources(
 
 # ============== 系统包安装 ==============
 # 安装系统依赖 (apt-get)
+# 部分 pip 包（如 cairosvg、matplotlib）以及 Playwright/Chromium 依赖系统级动态库或字体，
+# 这些无法通过 pip 安装，必须在镜像构建阶段用 apt-get 装好
 SYSTEM_PACKAGES = [
     # 常用工具
     "git",  # Git 版本控制
@@ -178,6 +187,7 @@ SYSTEM_PACKAGES = [
 
 def main():
     """创建自定义快照"""
+    # 先打印本次运行的关键配置，方便确认无误；真正的网络请求/副作用发生在函数后半段
     print(f"Creating custom snapshot: {SNAPSHOT_NAME}")
     print(f"Base image: {BASE_IMAGE} {PYTHON_VERSION}")
     if EXTRA_PIP_PACKAGES:
@@ -189,6 +199,7 @@ def main():
     daytona_api_key = settings.DAYTONA_API_KEY
     daytona_server_url = settings.DAYTONA_SERVER_URL
 
+    # 尽早校验必需的 API Key，未配置直接退出，避免走到后面发起网络请求才失败
     if not daytona_api_key:
         print("Error: DAYTONA_API_KEY is not set in settings.")
         sys.exit(1)
@@ -243,6 +254,8 @@ def main():
     print("\nCreating snapshot (this may take a few minutes)...")
     print("Use Ctrl+C to cancel if needed.\n")
 
+    # 以下为本脚本真正产生副作用的地方：调用 Daytona 云端 API 创建/构建快照，
+    # 可能耗时数分钟，并占用 Daytona 账户侧的构建资源与计费额度
     try:
         # 创建快照并监听日志
         snapshot = daytona_client.snapshot.create(
@@ -261,5 +274,6 @@ def main():
         sys.exit(1)
 
 
+# 支持直接执行：`python scripts/create_daytona_snapshot.py`
 if __name__ == "__main__":
     main()

@@ -66,12 +66,17 @@ class TraceContext:
         TraceContext.clear()
     """
 
+    # 追踪三元组(trace/span/parent_span)+ request_id,均用 contextvars 存储。
+    # contextvars 的关键特性:值绑定到当前执行上下文,能自动随 await/Task 传播,
+    # 且并发的不同请求各自隔离,因此无需手动层层传参即可在日志中带上追踪信息。
     _request_id: ContextVar[Optional[str]] = ContextVar("request_id", default=None)
     _trace_id: ContextVar[Optional[str]] = ContextVar("trace_id", default=None)
     _span_id: ContextVar[Optional[str]] = ContextVar("span_id", default=None)
     _parent_span_id: ContextVar[Optional[str]] = ContextVar("parent_span_id", default=None)
 
     # 请求上下文 - 用于工具等需要访问 session_id/run_id 的场景
+    # 这是与上面「追踪」相互独立的第二组 contextvars:承载业务维度的会话/运行/用户标识,
+    # 供 Agent 执行期间的工具读取(与日志追踪解耦)。
     _session_id: ContextVar[Optional[str]] = ContextVar("session_id", default=None)
     _run_id: ContextVar[Optional[str]] = ContextVar("run_id", default=None)
     _user_id: ContextVar[Optional[str]] = ContextVar("user_id", default=None)

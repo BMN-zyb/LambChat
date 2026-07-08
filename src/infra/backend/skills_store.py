@@ -61,11 +61,15 @@ if TYPE_CHECKING:
     pass
 
 logger = get_logger(__name__)
+# 二进制文件下载相关上限：单文件最大 50MB；SpooledTemporaryFile 内存缓冲 2MB（超出转磁盘）；
+# 单次 download_files 最多处理 100 个文件。
 SKILL_BINARY_DOWNLOAD_MAX_BYTES = 50 * 1024 * 1024
 SKILL_BINARY_SPOOL_MAX_MEMORY_BYTES = 2 * 1024 * 1024
 SKILL_DOWNLOAD_FILES_LIMIT = 100
 
 
+# 按行切片文件内容：优先用 deepagents 的 slice_read_response；旧版库无该函数时（ImportError）
+# 退回手动按行切片，offset 越界则返回带 error 的 ReadResult。
 def _slice_file_data(content: str, offset: int, limit: int):
     try:
         from deepagents.backends.utils import slice_read_response
@@ -81,6 +85,7 @@ def _slice_file_data(content: str, offset: int, limit: int):
         return sliced
 
 
+# 切片并渲染成"带行号"的文本（供 LLM 阅读）；切片若返回错误则包装成 ReadResult 透传。
 def _slice_text_read(content: str, offset: int, limit: int) -> str | ReadResult:
     if not content:
         return ""
@@ -91,6 +96,7 @@ def _slice_text_read(content: str, offset: int, limit: int) -> str | ReadResult:
     return format_content_with_line_numbers(sliced, start_line=offset + 1)  # type: ignore[arg-type]
 
 
+# 切片但返回原始内容（不加行号），用于填充 file_data.content。
 def _slice_text_content(content: str, offset: int, limit: int) -> str | ReadResult:
     if not content:
         return ""
@@ -123,6 +129,8 @@ class SkillsStoreBackend(BackendProtocol):
         disabled_skills: Optional[list[str]] = None,
         enabled_skills: Optional[list[str]] = None,
     ):
+        # user_id 决定数据归属；runtime 用于读取会话级 configurable；disabled/enabled_skills
+        # 为会话级可见性覆盖；_storage 懒加载（首次使用时再从全局缓存获取）。
         self._user_id = user_id
         self._runtime = runtime
         self._disabled_skills = disabled_skills
@@ -187,6 +195,7 @@ class SkillsStoreBackend(BackendProtocol):
 
     def _is_skill_visible(self, skill_name: str) -> bool:
         """检查 skill 是否在当前会话中可见。"""
+        # 两层判定：先过 enabled 白名单（None 表示不限制），再排除 disabled 黑名单
         enabled = self._get_enabled_skill_names()
         if enabled is not None and skill_name not in enabled:
             return False
@@ -222,6 +231,7 @@ class SkillsStoreBackend(BackendProtocol):
     # ==========================================
 
     def read(self, file_path: str, offset: int = 0, limit: int = 2000) -> ReadResult:
+        # 同步接口统一委托给异步实现（_run_async 会在无事件循环时用 asyncio.run 执行）
         return _run_async(self.aread(file_path, offset, limit))
 
     async def aread(self, file_path: str, offset: int = 0, limit: int = 2000) -> ReadResult:
@@ -250,6 +260,8 @@ class SkillsStoreBackend(BackendProtocol):
                     return ReadResult(error=f"File '{file_name}' not found in skill '{skill_name}'")
                 return ReadResult(error=f"File '{file_name}' not found in skill '{skill_name}'")
 
+            # 二进制文件在 MongoDB 里只存一个引用（binary_ref），真实字节在对象存储；
+            # read 时不返回字节，而是给 LLM 一段包含下载 URL 的文字描述。
             binary_ref = parse_binary_ref(content)
             if binary_ref:
                 file_url = f"/api/upload/file/{binary_ref.storage_key}"
@@ -316,6 +328,7 @@ class SkillsStoreBackend(BackendProtocol):
         storage = await self._get_storage()
 
         try:
+            # 无 meta 视为新 skill：写入文件后补建 meta；写文件本身即隐式创建 skill
             existing_meta = await storage.get_skill_meta(skill_name, self._user_id)
             is_new_skill = existing_meta is None
 
@@ -391,6 +404,8 @@ class SkillsStoreBackend(BackendProtocol):
                 new_content = content.replace(old_string, new_string, 1)
                 occurrences = 1
 
+            # CAS（compare-and-swap）写回：以读到的旧内容做条件更新，若期间被并发修改则
+            # 返回 False，提示重新读取，避免覆盖他人改动。
             success = await storage.update_skill_file_cas(
                 skill_name, file_name, content, new_content, user_id=self._user_id
             )
@@ -507,6 +522,8 @@ class SkillsStoreBackend(BackendProtocol):
 
         storage = await self._get_storage()
 
+        # 先按 skill_name 分组，稍后一次性 batch_get_skill_files，避免逐文件查库；
+        # 非法路径归到 "__invalid__" 组，统一返回 invalid_path。
         groups: dict[str, list[tuple[str, str]]] = {}
         for path in paths:
             normalized_path = normalize_path(path)
@@ -559,6 +576,8 @@ class SkillsStoreBackend(BackendProtocol):
 
                 content = files[file_name]
 
+                # 二进制引用 → 从对象存储真正下载字节：先看声明大小，再用 SpooledTemporaryFile
+                # 边下边缓冲（超内存阈值转磁盘），下载后再校验实际大小，任一超限即报 file_too_large。
                 binary_ref = parse_binary_ref(content)
                 if binary_ref:
                     if binary_ref.size > SKILL_BINARY_DOWNLOAD_MAX_BYTES:
@@ -623,6 +642,7 @@ class SkillsStoreBackend(BackendProtocol):
         """批量写入文件（异步，支持二进制）"""
         results = []
         for path, content in files:
+            # 二进制文件走对象存储（set_skill_binary_file）；文本文件直接复用 awrite 写 MongoDB
             if isinstance(content, bytes) and is_binary_file(path, content):
                 normalized_path = normalize_path(path)
                 parsed = parse_skill_path(normalized_path)
@@ -697,6 +717,7 @@ class SkillsStoreBackend(BackendProtocol):
                     name for name in sorted(all_skill_names) if self._is_skill_visible(name)
                 ]
                 matches: list[GrepMatch] = []
+                # 跨全部可见 skill 搜索：每个 skill 的配额 = 全局上限 - 已累计数，凑满即停止
                 for skill_name in skill_names:
                     skill_matches = await grep_single_skill(
                         pattern,
@@ -743,6 +764,7 @@ class SkillsStoreBackend(BackendProtocol):
             logger.error(f"Failed to grep {path}: {e}", exc_info=True)
             return GrepResult(error=str(e))
 
+    # grep 的"裸"变体：直接返回匹配列表，出错则返回带 "Error:" 前缀的字符串（供工具层展示）。
     def grep_raw(
         self,
         pattern: str,

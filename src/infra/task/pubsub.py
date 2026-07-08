@@ -18,6 +18,7 @@ from .constants import CANCEL_CHANNEL
 logger = get_logger(__name__)
 
 
+# JSON 反序列化放到线程池执行，避免阻塞事件循环。
 async def _cancel_message_json_loads(raw_value: Any) -> Any:
     return await run_blocking_io(json.loads, raw_value)
 
@@ -25,6 +26,8 @@ async def _cancel_message_json_loads(raw_value: Any) -> Any:
 _AGENT_CLOSE_CANCEL_TIMEOUT = 2.0
 
 
+# 带超时地调用 agent.close(run_id)：收到取消广播后用于中止底层 graph 执行，
+# 超时返回 False 而不抛错，避免个别 agent 卡死阻塞消息处理。
 async def _close_agent_safely(agent: Any, run_id: str) -> bool:
     try:
         await asyncio.wait_for(agent.close(run_id), timeout=_AGENT_CLOSE_CANCEL_TIMEOUT)
@@ -45,6 +48,8 @@ class TaskPubSub:
     处理任务取消信号的发布和订阅。
     """
 
+    # lock/tasks 由 manager 传入并与之共享：收到取消广播后要就地 cancel 本进程
+    # 里对应的 asyncio 任务，因此需要访问同一份任务表和保护它的锁。
     def __init__(self, lock: asyncio.Lock, tasks: Dict[str, asyncio.Task]):
         """
         初始化 Pub/Sub 管理器
@@ -59,6 +64,8 @@ class TaskPubSub:
         self._on_message: Optional[Callable[[Dict[str, Any]], None]] = None
         self._running = False
 
+    # 启动取消信号监听：向共享的 pubsub hub 订阅 CANCEL_CHANNEL 频道。应在应用
+    # 启动时调用一次；幂等（已在运行则直接返回）。
     async def start_listener(
         self,
         on_message: Optional[Callable[[Dict[str, Any]], None]] = None,
@@ -84,9 +91,16 @@ class TaskPubSub:
         self._running = True
         logger.info(f"Started listening on Redis channel: {CANCEL_CHANNEL}")
 
+    # hub 消息回调的薄封装：转交给真正的处理逻辑。
     async def _handle_hub_message(self, message: Dict[str, Any]) -> None:
         await self._handle_cancel_message(message, self._on_message)
 
+    # 处理一条取消广播消息（取消信号的「接收侧」核心）。按以下顺序尽力取消：
+    #   1) 执行可选的自定义回调 on_message；
+    #   2) 调用 agent.close(run_id) 中止底层 graph；
+    #   3) 若该任务恰在本进程，就地 cancel 对应 asyncio 任务；
+    #   4) 否则若带 trace_id，则直接把 trace 落为 error 终态（因为本进程管不到
+    #      那个任务，只能保证持久化状态一致）。
     async def _handle_cancel_message(
         self,
         message: Dict[str, Any],
@@ -162,6 +176,7 @@ class TaskPubSub:
         except Exception as e:
             logger.error(f"Error processing cancel message: {e}")
 
+    # 停止监听并退订频道；若 hub 已无其他订阅则顺带停掉。应在应用关闭时调用。
     async def stop_listener(self) -> None:
         """
         停止 Redis pub/sub 监听器

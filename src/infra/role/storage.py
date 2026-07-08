@@ -22,17 +22,24 @@ from src.kernel.types import Permission
 logger = get_logger(__name__)
 
 # 角色对象缓存 key 前缀和 TTL（按角色名缓存，所有调用方共享）
+# 缓存设计：obj 前缀存角色内容，obj_ver 前缀存版本号；key 中拼入版本号，
+# 写操作只需递增版本号即可让旧缓存自然失效（无需删除，避免并发删除竞态）
 _ROLE_OBJ_CACHE_PREFIX = "role:obj:"
 _ROLE_OBJ_VERSION_PREFIX = "role:obj_ver:"
 _ROLE_OBJ_CACHE_TTL = 300  # 5 分钟
+# 单个角色可绑定的 agent 数量上限
 ROLE_ALLOWED_AGENTS_LIMIT = 100
+# 列表接口单次返回上限
 ROLE_LIST_LIMIT_MAX = 200
+# 批量按 id/name 查询的数量上限
 ROLE_BATCH_LOOKUP_LIMIT = 100
+# 角色缓存专用的 Redis 客户端（独立连接池，与主业务隔离）
 _role_cache_redis = None
 
 
 async def _get_redis():
     """Get a dedicated Redis client for role cache operations."""
+    # 懒加载专用 Redis 客户端；isolated_pool 保证角色缓存不与主池争用连接
     global _role_cache_redis
     if _role_cache_redis is None:
         _role_cache_redis = create_redis_client(isolated_pool=True)
@@ -41,6 +48,7 @@ async def _get_redis():
 
 async def close_role_cache_redis() -> None:
     """Close the dedicated Redis client used by the role object cache."""
+    # 应用关停时释放该专用客户端；先置空再关闭，避免关停期间被再次创建
     global _role_cache_redis
     redis = _role_cache_redis
     _role_cache_redis = None
@@ -54,10 +62,12 @@ async def close_role_cache_redis() -> None:
 
 def _role_to_cache_dict(role: Role) -> dict:
     """将 Role 对象序列化为 JSON 可存储的 dict。"""
+    # Redis 只能存字符串，故将枚举取 value、datetime 转 ISO 字符串
     return {
         "id": role.id,
         "name": role.name,
         "description": role.description,
+        # 权限可能是字符串或枚举，统一落成字符串
         "permissions": [p if isinstance(p, str) else p.value for p in role.permissions],
         "allowed_agents": _bounded_allowed_agents(role.allowed_agents),
         "limits": role.limits.model_dump() if role.limits else None,
@@ -73,32 +83,39 @@ def _role_to_cache_dict(role: Role) -> dict:
 
 def _cache_dict_to_role(data: dict | None) -> Role | None:
     """将缓存 dict 反序列化为 Role 对象。"""
+    # None 表示缓存的是“该角色不存在”这一事实
     if data is None:
         return None
+    # 反序列化时需把字符串还原为枚举/datetime，与 DB 路径保持一致
     _normalize_role_dict(data)
     return Role(**data)
 
 
 def _bounded_allowed_agents(allowed_agents: list[str] | None) -> list[str]:
+    # 去重并截断到上限，防止 allowed_agents 无限膨胀
     if not allowed_agents:
         return []
     bounded = []
     seen = set()
     for agent_id in allowed_agents:
+        # 跳过重复项
         if agent_id in seen:
             continue
         seen.add(agent_id)
         bounded.append(agent_id)
+        # 达到上限即停止
         if len(bounded) >= ROLE_ALLOWED_AGENTS_LIMIT:
             break
     return bounded
 
 
 def _bounded_list_limit(limit: int) -> int:
+    # 将 limit 夹逼到 [1, ROLE_LIST_LIMIT_MAX]
     return min(max(int(limit), 1), ROLE_LIST_LIMIT_MAX)
 
 
 def _bounded_unique_strings(values: list[str], limit: int) -> list[str]:
+    # 通用工具：对字符串列表去重、过滤空值并截断到 limit
     bounded: list[str] = []
     seen: set[str] = set()
     for value in values:
@@ -112,8 +129,10 @@ def _bounded_unique_strings(values: list[str], limit: int) -> list[str]:
 
 
 def _normalize_role_dict(data: dict) -> dict:
+    # 将来自 DB/缓存的原始 dict 归一化为可构造 Role 的形式
     if data.get("limits"):
         data["limits"] = RoleLimits(**data["limits"])
+    # ISO 字符串还原为 datetime（缓存路径需要）
     if isinstance(data.get("created_at"), str):
         data["created_at"] = datetime.fromisoformat(data["created_at"])
     if isinstance(data.get("updated_at"), str):
@@ -127,6 +146,7 @@ def _normalize_role_dict(data: dict) -> dict:
 
 def _parse_permissions_static(permissions: list[str]) -> list[Permission]:
     """模块级版本的权限解析（供 _cache_dict_to_role 使用）。"""
+    # 逐个转枚举，跳过无法识别的历史/非法权限字符串（向前兼容）
     valid = []
     for p in permissions:
         try:
@@ -144,11 +164,13 @@ class RoleStorage:
     """
 
     def __init__(self):
+        # 集合延迟初始化
         self._collection = None
 
     @property
     def collection(self):
         """延迟加载 MongoDB 集合"""
+        # 惰性获取 roles 集合
         if self._collection is None:
             from src.infra.storage.mongodb import get_mongo_client
 
@@ -171,16 +193,19 @@ class RoleStorage:
             ValidationError: 角色名已存在
         """
         # 检查角色名是否存在
+        # 角色名需唯一，创建前先查重
         existing = await self.get_by_name(role_data.name)
         if existing:
             raise ValidationError(f"角色 '{role_data.name}' 已存在")
 
         now = utc_now()
+        # 入库时权限存为字符串（枚举 value）
         role_dict: dict[str, Any] = {
             "name": role_data.name,
             "description": role_data.description,
             "permissions": [p.value for p in role_data.permissions],
             "limits": role_data.limits.model_dump() if role_data.limits else None,
+            # 用户创建的角色一律非系统角色，可被修改/删除
             "is_system": False,
             "created_at": now,
             "updated_at": now,
@@ -202,6 +227,7 @@ class RoleStorage:
         Returns:
             有效的 Permission 枚举列表
         """
+        # 实例方法版本；跳过无效权限，保证不会因脏数据导致构造失败
         valid_permissions = []
         for p in permissions:
             try:
@@ -223,9 +249,11 @@ class RoleStorage:
         """
         from bson import ObjectId
 
+        # 按 ID 查询不走缓存（缓存以角色名为 key）
         try:
             role_dict = await self.collection.find_one({"_id": ObjectId(role_id)})
         except Exception:
+            # 非法 ObjectId 等情况直接视为未找到
             return None
 
         if not role_dict:
@@ -244,8 +272,10 @@ class RoleStorage:
         Returns:
             角色对象或 None
         """
+        # 默认版本号 0（尚未有过写操作时）
         version: str = "0"
 
+        # 第一步：尝试读缓存。缓存 key 包含当前版本号，天然规避读到已失效数据
         try:
             redis = await _get_redis()
             raw = await redis.get(f"{_ROLE_OBJ_VERSION_PREFIX}{name}")
@@ -255,9 +285,11 @@ class RoleStorage:
             cached = await redis.get(cache_key)
             if cached is not None:
                 logger.debug(f"[Role Cache] Hit for role {name}")
+                # JSON 解析放线程池，避免大对象阻塞事件循环
                 cached_data = await run_blocking_io(json.loads, cached)
                 return _cache_dict_to_role(cached_data)
         except Exception as e:
+            # Redis 异常降级为直接查库，不影响功能
             logger.warning(f"[Role Cache] Redis get failed for role {name}: {e}")
 
         # 缓存未命中，查询数据库
@@ -265,12 +297,14 @@ class RoleStorage:
         role_dict = await self.collection.find_one({"name": name})
 
         if not role_dict:
+            # 未找到时也会缓存 None，防止穿透
             result = None
         else:
             role_dict["id"] = str(role_dict.pop("_id"))
             result = Role(**_normalize_role_dict(role_dict))
 
         # 写入缓存（CAS: 写入前重新检查版本号，避免 TOCTOU）
+        # 若读库期间发生了写操作（版本号变化），则本次结果可能已过期，放弃写缓存
         try:
             redis = await _get_redis()
             current_version = await redis.get(f"{_ROLE_OBJ_VERSION_PREFIX}{name}")
@@ -309,6 +343,7 @@ class RoleStorage:
         if not existing:
             raise NotFoundError(f"角色 '{role_id}' 不存在")
 
+        # 系统角色（admin/user/guest）受保护，禁止修改
         if existing.is_system:
             raise ValidationError("系统角色不可修改")
 
@@ -316,6 +351,7 @@ class RoleStorage:
 
         if role_data.name is not None:
             # 检查新名称是否已存在
+            # 改名需保证不与其他角色重名（排除自身）
             name_check = await self.get_by_name(role_data.name)
             if name_check and name_check.id != role_id:
                 raise ValidationError(f"角色名 '{role_data.name}' 已存在")
@@ -345,9 +381,11 @@ class RoleStorage:
         role = Role(**_normalize_role_dict(result))
 
         # 写操作后自动失效缓存
+        # 递增旧名缓存版本；若改了名还需同时失效新名的缓存
         await self.invalidate_cache(existing.name)
         if role_data.name and role_data.name != existing.name:
             await self.invalidate_cache(role_data.name)
+        # 权限变化需清理鉴权缓存，使新权限立即生效
         try:
             from src.api.deps import clear_auth_cache
 
@@ -371,6 +409,7 @@ class RoleStorage:
             ValidationError: 系统角色不可删除
         """
         # 检查是否为系统角色
+        # 系统角色受保护，禁止删除
         existing = await self.get_by_id(role_id)
         if existing and existing.is_system:
             raise ValidationError("系统角色不可删除")
@@ -407,15 +446,18 @@ class RoleStorage:
         Returns:
             角色列表
         """
+        # 列表查询不走缓存；limit 收敛上限
         limit = _bounded_list_limit(limit)
         query: dict[str, Any] = {}
         if q:
+            # 名称/描述模糊搜索；re.escape 防注入
             escaped_q = re.escape(q)
             query["$or"] = [
                 {"name": {"$regex": escaped_q, "$options": "i"}},
                 {"description": {"$regex": escaped_q, "$options": "i"}},
             ]
 
+        # 按名称升序分页
         cursor = self.collection.find(query).sort("name", 1).skip(skip).limit(limit)
         roles = []
 
@@ -427,6 +469,7 @@ class RoleStorage:
 
     async def count_roles(self, q: str | None = None) -> int:
         """Count roles matching an optional search query."""
+        # 与 list_roles 相同的过滤条件，仅计数（用于分页）
         query: dict[str, Any] = {}
         if q:
             escaped_q = re.escape(q)
@@ -448,6 +491,7 @@ class RoleStorage:
         """
         from bson import ObjectId
 
+        # 去重截断后逐个转 ObjectId，非法 id 跳过
         object_ids: list[ObjectId] = []
         for role_id in _bounded_unique_strings(role_ids, ROLE_BATCH_LOOKUP_LIMIT):
             try:
@@ -456,6 +500,7 @@ class RoleStorage:
                 continue
         if not object_ids:
             return []
+        # 用 $in 一次性批量查询
         cursor = self.collection.find({"_id": {"$in": object_ids}})
         roles = []
 
@@ -475,14 +520,17 @@ class RoleStorage:
         Returns:
             角色列表
         """
+        # 与 get_by_ids 不同：逐名调用 get_by_name 以复用其 Redis 缓存
         names = _bounded_unique_strings(names, ROLE_BATCH_LOOKUP_LIMIT)
         if not names:
             return []
+        # 并发查询各角色，过滤掉不存在的
         results = await asyncio.gather(*(self.get_by_name(name) for name in names))
         return [role for role in results if role]
 
     async def invalidate_cache(self, role_name: str) -> None:
         """使指定角色的缓存失效（递增版本号）"""
+        # 递增版本号即可让旧 key 失效：新读取会用新版本号拼 key 而落空
         try:
             redis = await _get_redis()
             await redis.incr(f"{_ROLE_OBJ_VERSION_PREFIX}{role_name}")
@@ -496,6 +544,7 @@ class RoleStorage:
 
         对于系统角色（is_system=True），如果已存在则更新其权限列表。
         """
+        # 从 RBAC 管理器取内置角色定义（admin/user/guest）
         from src.infra.auth.rbac import RBACManager
 
         rbac_manager = RBACManager()
@@ -505,6 +554,7 @@ class RoleStorage:
             existing = await self.get_by_name(role_data["name"])
             if not existing:
                 # 创建新角色
+                # 角色不存在则直接插入
                 now = utc_now()
                 await self.collection.insert_one(
                     {
@@ -516,6 +566,8 @@ class RoleStorage:
                 # 清除 get_by_name 可能缓存的 None，避免新建角色后查询命中空缓存
                 await self.invalidate_cache(role_data["name"])
             elif role_data["name"] == "user":
+                # user 角色的一次性数据迁移：为老库补齐“定时任务”相关权限
+                # 用 migrations.<key> 标记幂等，确保只执行一次
                 migration_key = "scheduled_task_permissions_v1"
                 raw_role = await self.collection.find_one(
                     {"name": role_data["name"]},
@@ -529,6 +581,7 @@ class RoleStorage:
                         Permission.SCHEDULED_TASK_WRITE.value,
                         Permission.SCHEDULED_TASK_DELETE.value,
                     ]
+                    # $addToSet 追加权限（不重复），并打上迁移完成标记
                     await self.collection.update_one(
                         {"name": role_data["name"]},
                         {
@@ -550,6 +603,7 @@ class RoleStorage:
                         pass
             elif role_data.get("is_system", False):
                 # 系统角色：更新权限列表、描述、限制和is_system标记
+                # 系统角色（如 admin）以代码定义为准，每次启动同步覆盖，保证权限最新
                 now = utc_now()
                 await self.collection.update_one(
                     {"name": role_data["name"]},

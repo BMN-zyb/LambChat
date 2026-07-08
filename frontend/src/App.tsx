@@ -1,3 +1,8 @@
+// 应用根组件与路由表：集中定义全部页面路由、鉴权/权限守卫、全局 Toast、
+// PWA 更新提示与自动更新弹窗。
+// 核心范式：所有受保护的业务页面都复用同一个 <AppContent activeTab="xxx">，
+// 由 activeTab 决定当前展示哪个功能页，因此下面每个 XxxPage 都只是设置 SEO 后
+// 渲染带不同 activeTab 的 AppContent。
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import {
   Routes,
@@ -28,6 +33,8 @@ import { appNotificationService } from "./services/notifications/appNotification
 import { UpdateDialog } from "./components/update/UpdateDialog";
 import { useAutoUpdate } from "./hooks/useAutoUpdate";
 
+// 以下页面组件全部用 React.lazy 懒加载：配合 Suspense 做路由级代码分割，
+// 首屏只加载必要 chunk，其余页面在导航到时按需拉取，减小初始包体积。
 const SharedPage = lazy(() =>
   import("./components/share/SharedPage").then((m) => ({
     default: m.SharedPage,
@@ -77,12 +84,17 @@ const NotFoundPage = lazy(() =>
   })),
 );
 
+// 聊天页 SEO 组件：不渲染任何 UI（返回 null），仅负责根据当前会话动态
+// 设置页面标题/描述。标题优先取会话名，取不到则用默认文案。
+// 之所以拆成独立组件，是为了把「按 sessionId 拉取会话名」的副作用与聊天主体解耦。
 function ChatPageSEO() {
   const { sessionId } = useParams<{ sessionId?: string }>();
   const [sessionName, setSessionName] = useState<string | null>(null);
   const prevSessionIdRef = useRef<string | null>(null);
 
   // Fetch session name when sessionId changes
+  // 副作用一：sessionId 变化时拉取会话名。用 prevSessionIdRef 判断是否真的
+  // 切换到了「不同」会话，避免同一会话重复清空标题造成闪烁。
   useEffect(() => {
     if (!sessionId) {
       setSessionName(null);
@@ -111,6 +123,8 @@ function ChatPageSEO() {
   }, [sessionId]);
 
   // React immediately when generateTitle finishes in the active chat session.
+  // 副作用二：先读本地缓存的标题即时展示，再订阅「会话标题已更新」事件，
+  // 使后端自动生成标题（generateTitle）完成后能立刻反映到页面标题，无需刷新。
   useEffect(() => {
     if (!sessionId) return;
 
@@ -127,6 +141,8 @@ function ChatPageSEO() {
   }, [sessionId]);
 
   // Poll for session name after initial load (handles race with generate-title)
+  // 副作用三：兜底轮询。若首屏加载后仍拿不到会话名（与后端异步生成标题存在
+  // 竞态），延迟 3 秒再查一次，成功则更新。
   useEffect(() => {
     if (!sessionId || sessionName) return;
 
@@ -153,6 +169,8 @@ function ChatPageSEO() {
 }
 
 // Chat Page Component
+// 聊天页：渲染 SEO 组件 + AppContent。key="chat" 保证从其它 tab 切回时
+// AppContent 以聊天态重新挂载。
 function ChatPage() {
   return (
     <>
@@ -163,6 +181,9 @@ function ChatPage() {
 }
 
 // Simple page components that set the page title and render AppContent
+// 下面这一组页面组件是同一套模板：设置各自 SEO，再渲染携带不同 activeTab 的
+// AppContent。activeTab 就是 AppContent 内部切换功能视图（技能/市场/用户/设置…）
+// 的开关，key 用于强制不同 tab 之间重新挂载、隔离状态。
 function SkillsPage() {
   useSEO({
     title: "seo.skills.title",
@@ -323,6 +344,9 @@ function GitHubPage() {
 }
 
 // Auth page wrapper - redirects to /chat after successful login/register
+// 登录/注册页包装：登录成功后跳转。若鉴权守卫携带了原始目标路径
+// （redirectPath），登录后回跳到该路径，否则默认进入 /chat；replace 避免
+// 用户点返回又回到登录页。
 function AuthPageWrapper({
   initialMode,
 }: {
@@ -350,6 +374,7 @@ function App() {
   const navigate = useNavigate();
 
   // Auto-update for desktop and mobile
+  // 桌面端(Tauri)与移动端(Capacitor)的自动更新：获取更新状态与操作方法。
   const {
     state: updateState,
     showDialog: showUpdateDialog,
@@ -357,6 +382,8 @@ function App() {
     startUpdate,
     skipUpdate,
   } = useAutoUpdate();
+  // 运行时探测宿主平台：优先识别 Tauri（桌面壳），再识别 Capacitor（iOS/Android），
+  // 都不是则视为普通 Web。用于给更新弹窗提供正确的平台文案与升级方式。
   const updatePlatform = (() => {
     if (typeof window === "undefined") return "web";
     const win = window as unknown as Record<string, unknown>;
@@ -370,6 +397,9 @@ function App() {
     return "web";
   })();
 
+  // 把「点击通知后要跳转到哪个路由」的能力注入通知服务：通知服务本身在 React
+  // 树之外，无法直接用 useNavigate，故在此把 navigate 注册进去，并初始化原生端
+  // 通知点击处理；卸载时解绑，避免内存泄漏。
   useEffect(() => {
     appNotificationService.setNavigator((route) => {
       navigate(route, { replace: false });
@@ -452,6 +482,10 @@ function App() {
           />
         )}
         <SelectionActionPopover />
+        {/* 路由表：公开路由（落地页/登录/OAuth 回调/找回密码/分享页）可直接访问；
+            业务路由统一用 <ProtectedRoute> 包裹做登录校验，部分再通过 permissions
+            做细粒度权限守卫——无权限时按 redirectTo 跳转并可弹 toast 提示。
+            外层 Suspense 承接懒加载页面的加载态。 */}
         <Suspense fallback={<ChatPageSkeleton />}>
           <Routes>
             <Route path="/" element={<LandingPage />} />
@@ -475,6 +509,9 @@ function App() {
                 </ProtectedRoute>
               }
             />
+            {/* 带权限的受保护路由示例：除登录外还要求 permissions 指定的权限，
+                校验不通过则重定向到 redirectTo 并弹出 toastMessage 提示。
+                下方 marketplace/mcp/users/roles/settings 等均沿用此模式。 */}
             <Route
               path="/skills"
               element={
@@ -593,6 +630,7 @@ function App() {
                 </ProtectedRoute>
               }
             />
+            {/* 旧路径 /models 已并入 /agents，永久重定向以兼容历史链接 */}
             <Route path="/models" element={<Navigate to="/agents" replace />} />
             <Route
               path="/team"

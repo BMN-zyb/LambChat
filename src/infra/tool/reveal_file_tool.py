@@ -53,18 +53,24 @@ logger = get_logger(__name__)
 
 
 async def _json_dumps_result(data: dict[str, Any]) -> str:
+    # JSON 序列化放到线程池，避免阻塞事件循环
     return await run_blocking_io(json.dumps, data, ensure_ascii=False)
 
 
+# 上传临时文件的内存阈值：小于则内存中处理，超过才落盘
 _UPLOAD_SPOOL_MEMORY_LIMIT = 2 * 1024 * 1024
+# 本地引用替换时，仅对不超过该大小的小文本文件做解析（避免读大文件）
 _LOCAL_REF_RESOLUTION_MAX_BYTES = 2 * 1024 * 1024
+# 单个文件内最多上传的本地资源引用数，防止一个文件引发过多上传
 _LOCAL_REF_UPLOAD_LIMIT = 20
+# reveal 文件上传的默认大小上限（可被 S3_INTERNAL_UPLOAD_MAX_SIZE 覆盖）
 _DEFAULT_REVEAL_FILE_UPLOAD_MAX_BYTES = 50 * 1024 * 1024
 
 # 文件类型分类
 FileCategory = Literal["image", "video", "audio", "document"]
 
 # MIME 类型到文件类别的映射
+# 显式映射常见类型，未命中时再按前缀兜底（见 get_file_category）
 MIME_TYPE_CATEGORIES: dict[str, FileCategory] = {
     # 图片
     "image/jpeg": "image",
@@ -93,9 +99,11 @@ MIME_TYPE_CATEGORIES: dict[str, FileCategory] = {
 
 def get_file_category(mime_type: str) -> FileCategory:
     """根据 MIME 类型获取文件类别"""
+    # 先查精确映射表
     if mime_type in MIME_TYPE_CATEGORIES:
         return MIME_TYPE_CATEGORIES[mime_type]
 
+    # 未命中则按 MIME 大类前缀归类
     if mime_type.startswith("image/"):
         return "image"
     if mime_type.startswith("video/"):
@@ -103,27 +111,32 @@ def get_file_category(mime_type: str) -> FileCategory:
     if mime_type.startswith("audio/"):
         return "audio"
 
+    # 其余一律视为文档
     return "document"
 
 
 def get_mime_type(filename: str) -> str:
     """根据文件名获取 MIME 类型"""
+    # 猜不到类型时回退为通用二进制流
     mime_type, _ = mimetypes.guess_type(filename)
     return mime_type or "application/octet-stream"
 
 
 def _is_sandbox_backend(backend: Any) -> bool:
     """判断 backend 是否为沙箱类型（支持 shell 命令执行）"""
+    # 具备 execute/aexecute 能力的即视为沙箱后端；据此决定是否允许本地文件系统兜底
     return hasattr(backend, "execute") or hasattr(backend, "aexecute")
 
 
 def _local_filesystem_fallback_enabled() -> bool:
     """Whether non-sandbox reveal flows may read from the process filesystem."""
+    # 是否允许非沙箱模式下回退读取本机文件系统（受配置开关控制）
     return bool(getattr(settings, "ENABLE_LOCAL_FILESYSTEM_FALLBACK", True))
 
 
 def _can_resolve_local_filesystem_refs(file_path: str) -> bool:
     """Only materialize small local text files for best-effort reference rewriting."""
+    # 仅对小文件做本地引用解析；取大小失败（不存在等）视为不可解析
     try:
         return os.path.getsize(file_path) <= _LOCAL_REF_RESOLUTION_MAX_BYTES
     except OSError:
@@ -131,10 +144,12 @@ def _can_resolve_local_filesystem_refs(file_path: str) -> bool:
 
 
 def _get_local_ref_upload_limit() -> int:
+    # 本地引用上传上限，至少为 1
     return max(int(_LOCAL_REF_UPLOAD_LIMIT), 1)
 
 
 def _get_reveal_file_upload_max_bytes() -> int:
+    # 解析 reveal 上传大小上限：优先配置项，回退默认，至少 1
     configured = getattr(
         settings,
         "S3_INTERNAL_UPLOAD_MAX_SIZE",
@@ -144,6 +159,7 @@ def _get_reveal_file_upload_max_bytes() -> int:
 
 
 def _coerce_file_size(value: Any) -> int | None:
+    # 把后端返回的大小值安全转为非负 int；bool/None/非法值一律返回 None
     if isinstance(value, bool) or value is None:
         return None
     try:
@@ -154,6 +170,7 @@ def _coerce_file_size(value: Any) -> int | None:
 
 
 async def _lookup_session_project_id(session_id: str | None) -> str | None:
+    # 由 session_id 查出其所属 project_id（用于 revealed 文件索引归属）；失败静默返回 None
     if not session_id:
         return None
     try:
@@ -162,6 +179,7 @@ async def _lookup_session_project_id(session_id: str | None) -> str | None:
 
         mongo_client = get_mongo_client()
         db = mongo_client[settings.MONGODB_DB]
+        # 只投影 metadata.project_id 字段，减少数据传输
         session_doc = await db[settings.MONGODB_SESSIONS_COLLECTION].find_one(
             {"session_id": session_id}, {"metadata.project_id": 1}
         )
@@ -184,7 +202,9 @@ async def _index_revealed_file(
     description: str,
     original_path: str,
 ) -> None:
+    # 把本次 reveal 的文件登记到"已展示文件"索引，供后续按用户/会话检索；失败不影响主流程
     try:
+        # 优先用请求上下文中的用户/会话/trace 信息，缺失时回退到 runtime 注入值
         req_ctx = TraceContext.get_request_context()
         user_id = req_ctx.user_id or get_user_id_from_runtime(runtime)
         if not user_id:
@@ -213,6 +233,7 @@ async def _index_revealed_file(
         if delivery_source:
             data["delivery_source"] = delivery_source
 
+        # 以 (user_id, file_name) 维度 upsert，避免同名文件重复入库
         storage_index = get_revealed_file_storage()
         await storage_index.upsert_by_name(
             user_id=user_id,
@@ -227,6 +248,8 @@ async def _index_revealed_file(
 
 
 async def _get_backend_file_size(backend: Any, file_path: str) -> int | None:
+    # 逐一尝试后端可能提供的取大小方法：异步 aget_file_size -> 同步 get_file_size -> 私有 _file_size
+    # 用于在下载前就拦截超大文件
     async_method = getattr(backend, "aget_file_size", None)
     if callable(async_method):
         try:
@@ -270,6 +293,7 @@ async def _download_file_from_backend(backend: Any, file_path: str) -> Optional[
     """
     logger.info(f"[reveal_file] Attempting to download: {file_path}")
 
+    # 优先异步下载接口
     if hasattr(backend, "adownload_files"):
         try:
             responses = await backend.adownload_files([file_path])
@@ -285,6 +309,7 @@ async def _download_file_from_backend(backend: Any, file_path: str) -> Optional[
         except Exception as e:
             logger.warning(f"[reveal_file] adownload_files failed for {file_path}: {e}")
 
+    # 回退同步下载接口（放到线程池执行）
     if hasattr(backend, "download_files"):
         try:
             responses = await run_blocking_io(backend.download_files, [file_path])
@@ -307,6 +332,7 @@ async def _read_file_from_filesystem(file_path: str) -> Optional[bytes]:
     """非沙箱模式下的兜底：直接从本地文件系统读取文件内容"""
     try:
 
+        # 仅读取存在且不超限的小文件
         def _read_small_file() -> Optional[bytes]:
             if not os.path.isfile(file_path):
                 return None
@@ -319,6 +345,7 @@ async def _read_file_from_filesystem(file_path: str) -> Optional[bytes]:
             with open(file_path, "rb") as file:
                 return file.read()
 
+        # 阻塞读放到线程池
         content = await run_blocking_io(_read_small_file)
         if content is not None:
             return content
@@ -329,6 +356,7 @@ async def _read_file_from_filesystem(file_path: str) -> Optional[bytes]:
 
 
 def _is_file_path(file_path: str) -> bool:
+    # 判断路径是否为本机存在的普通文件
     return os.path.isfile(file_path)
 
 
@@ -340,6 +368,7 @@ async def _upload_filesystem_file(
 ):
     """Upload a local file handle directly without materializing it as bytes."""
 
+    # 直接以文件句柄流式上传，避免把整个文件读进内存
     def _open_file():
         return open(file_path, "rb")
 
@@ -350,14 +379,18 @@ async def _upload_filesystem_file(
             folder="revealed_files",
             filename=filename,
             content_type=mime_type,
+            # skip_size_limit：此处已在上游做过大小校验，跳过存储层的二次限制
             skip_size_limit=True,
         )
     finally:
+        # 确保文件句柄关闭
         await run_blocking_io(file.close)
 
 
 # ---------------------------------------------------------------------------
 # 本地资源引用检测与替换
+# 背景：Markdown/HTML/SVG 等文件可能引用本地图片/音视频；直接展示会因用户无法访问
+# 隔离环境而失效。此处作为兜底，把这些本地引用上传到 S3 并替换为可访问 URL。
 # ---------------------------------------------------------------------------
 
 # 需要处理的文件扩展名（这些文件类型可能引用本地资源）
@@ -394,6 +427,7 @@ _UPLOADABLE_EXTENSIONS = {
 }
 
 # 正则模式
+# 分别匹配 Markdown 图片、HTML 媒体标签、CSS url()、SVG <image> 中的资源路径
 _RE_MD_LINK = re.compile(r"!\[([^\]]*)\]\(([^)]+)\)")  # ![alt](path)
 _RE_HTML_SRC = re.compile(
     r'<(img|video|audio|source|iframe)\b[^>]*(?:src|href)=["\']([^"\']+)["\']',
@@ -405,6 +439,7 @@ _RE_SVG_IMAGE = re.compile(r'<image\b[^>]*href=["\']([^"\']+)["\']', re.IGNORECA
 
 def _is_local_path(path: str) -> bool:
     """判断路径是否为本地文件路径（非 http/https/data URL）"""
+    # 排除各种远程/内联/锚点协议，剩下的才需要上传替换
     stripped = path.strip()
     return (
         not stripped.startswith("http://")
@@ -418,18 +453,21 @@ def _is_local_path(path: str) -> bool:
 
 def _is_remote_url(path: str) -> bool:
     """判断路径是否为可直接返回的远程 URL"""
+    # 需同时具备 http/https scheme 与主机名
     parsed = urlparse(path.strip())
     return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
 
 
 def _get_filename_from_path(path: str) -> str:
     """从本地路径或 URL 中提取文件名。"""
+    # 远程 URL：取其路径末段（解码 % 编码）
     if _is_remote_url(path):
         parsed = urlparse(path.strip())
         candidate = os.path.basename(unquote(parsed.path))
         if candidate:
             return candidate
 
+    # 本地路径：取末段；兜底返回原始路径
     candidate = os.path.basename(path.rstrip("/"))
     return candidate or path
 
@@ -444,6 +482,7 @@ def _is_uploadable_resource(path: str) -> bool:
 
 def _needs_local_ref_resolution(filename: str, mime_type: str) -> bool:
     """判断文件是否需要做本地引用替换"""
+    # 依据扩展名或 MIME 判断该文件是否可能内嵌本地资源引用
     ext = os.path.splitext(filename)[1].lower()
     if ext in _RESOLVABLE_EXTENSIONS:
         return True
@@ -464,12 +503,14 @@ async def _upload_local_resource(
     失败时返回 None。
     """
     try:
+        # 相对路径以宿主文件所在目录为基准解析为绝对路径
         if os.path.isabs(local_path):
             abs_path = local_path
         else:
             abs_path = os.path.normpath(os.path.join(file_dir, local_path))
 
         content = await _download_file_from_backend(backend, abs_path)
+        # 非沙箱且允许本地兜底：后端下载失败时直接以文件句柄流式上传
         if (
             content is None
             and not _is_sandbox_backend(backend)
@@ -491,6 +532,7 @@ async def _upload_local_resource(
         if content is None:
             return None
 
+        # 已拿到字节：写入 spooled 临时文件后上传
         res_filename = os.path.basename(abs_path)
         res_mime = get_mime_type(res_filename)
         with SpooledTemporaryFile(
@@ -498,6 +540,7 @@ async def _upload_local_resource(
             mode="w+b",
         ) as spooled:
             await run_blocking_io(spooled.write, content)
+            # 及时释放大 bytes 引用，降低内存占用
             del content
             await run_blocking_io(spooled.seek, 0)
             upload_result = await storage.upload_file(
@@ -511,6 +554,7 @@ async def _upload_local_resource(
         logger.info(f"[reveal_file] Uploaded local resource {local_path} -> {url}")
         return url
     except Exception as e:
+        # 单个资源失败不影响其余资源，返回 None 让调用方保留原始引用
         logger.warning(f"[reveal_file] Failed to upload local resource {local_path}: {e}")
         return None
 
@@ -529,23 +573,27 @@ async def _resolve_local_references(
     作为兜底机制：agent 提示词已要求它主动上传资源并使用 URL，
     此函数用于捕获遗漏的本地引用。
     """
+    # 非 UTF-8 文本无法解析，直接原样返回
     try:
         text = content.decode("utf-8")
     except UnicodeDecodeError:
         return content
 
     # 收集所有需要上传的本地资源路径（保持原始大小写用于替换，但去重时不区分）
+    # seen_normalized 以规范化路径去重，unique_paths 保留原始写法用于精确替换
     seen_normalized = set()
     unique_paths: list[str] = []
 
     for pattern in (_RE_MD_LINK, _RE_HTML_SRC, _RE_SVG_IMAGE, _RE_CSS_URL):
         for match in pattern.finditer(text):
             # 不同 pattern 的路径在不同 group
+            # 有第 2 组的（MD/HTML）取第 2 组，否则（CSS/SVG）取第 1 组
             path = (
                 match.group(2).strip()
                 if match.lastindex and match.lastindex >= 2
                 else match.group(1).strip()
             )
+            # 仅处理"本地路径 + 可上传资源"的引用
             if _is_local_path(path) and _is_uploadable_resource(path):
                 normalized = os.path.normpath(path)
                 if normalized not in seen_normalized:
@@ -554,6 +602,7 @@ async def _resolve_local_references(
 
     if not unique_paths:
         return content
+    # 数量上限保护：超出只处理前 N 个
     upload_limit = _get_local_ref_upload_limit()
     if len(unique_paths) > upload_limit:
         logger.warning(
@@ -569,6 +618,7 @@ async def _resolve_local_references(
     )
 
     # 批量上传
+    # 先建立"原始路径 -> S3 URL"映射，再统一替换文本
     path_to_url: dict[str, str] = {}
     for ref_path in unique_paths:
         url = await _upload_local_resource(ref_path, file_dir, backend, storage, base_url)
@@ -579,6 +629,7 @@ async def _resolve_local_references(
         return content
 
     # 替换所有匹配到的本地路径
+    # 只替换匹配串内的路径部分，尽量不破坏其余语法结构
     def _replacer(match: re.Match) -> str:
         original = match.group(0)
         for group_idx in (1, 2):
@@ -625,6 +676,7 @@ async def reveal_file(
     Returns:
         JSON 格式的结果，包含文件信息
     """
+    # 情形一：本身就是可直接访问的远程 URL，无需下载/上传，直接登记并返回
     if _is_remote_url(file_path):
         filename = _get_filename_from_path(file_path)
         mime_type = get_mime_type(filename)
@@ -657,9 +709,11 @@ async def reveal_file(
 
     storage = await _get_storage()
 
+    # 从运行时注入获取后端；跨进程安全，不依赖 ContextVar
     backend = get_backend_from_runtime(runtime)
 
     if backend is None:
+        # 无后端可用：降级为只回传原始路径（前端无法真正打开文件）
         logger.warning("Backend not available from runtime, returning raw path")
         backend_unavailable_result: dict[str, Any] = {
             "type": "file_reveal",
@@ -671,6 +725,7 @@ async def reveal_file(
         return await _json_dumps_result(backend_unavailable_result)
 
     try:
+        # 下载前先按已知大小拦截超大文件，省去无谓下载
         known_size = await _get_backend_file_size(backend, file_path)
         max_upload_bytes = _get_reveal_file_upload_max_bytes()
         if known_size is not None and known_size > max_upload_bytes:
@@ -694,6 +749,7 @@ async def reveal_file(
 
         file_content = await _download_file_from_backend(backend, file_path)
         use_filesystem_stream = False
+        # 下载后二次校验：无 Content-Length 场景下按实际字节数再拦一次
         if file_content is not None and len(file_content) > max_upload_bytes:
             content_size = len(file_content)
             del file_content
@@ -716,6 +772,7 @@ async def reveal_file(
             return await _json_dumps_result(too_large_result)
 
         # 非沙箱模式兜底：backend 下载失败时尝试直接读取本地文件系统
+        # 标记 use_filesystem_stream，后续以文件句柄流式上传（避免读入内存）
         if (
             file_content is None
             and not _is_sandbox_backend(backend)
@@ -726,6 +783,7 @@ async def reveal_file(
             )
             use_filesystem_stream = await run_blocking_io(_is_file_path, file_path)
 
+        # 既拿不到内容也无法走文件系统流：判定文件缺失
         if file_content is None and not use_filesystem_stream:
             logger.error(f"Failed to read file {file_path} from backend")
             missing_file_result = {
@@ -746,6 +804,7 @@ async def reveal_file(
         if not base_url:
             logger.warning("[reveal_file] base_url is empty, URL may be incomplete")
 
+        # 需要引用替换时：若此前走的是文件系统流，则在大小允许时读入内容再替换
         if _needs_local_ref_resolution(filename, mime_type) and (
             file_content is not None
             or not use_filesystem_stream
@@ -759,8 +818,10 @@ async def reveal_file(
             file_content = await _resolve_local_references(
                 file_content, file_dir, backend, storage, base_url
             )
+            # 已读入并可能改写内容，改走内存上传分支
             use_filesystem_stream = False
 
+        # 上传：文件系统流式上传 或 内存 spooled 上传
         if use_filesystem_stream:
             upload_result = await _upload_filesystem_file(file_path, storage, filename, mime_type)
         else:
@@ -769,6 +830,7 @@ async def reveal_file(
                 mode="w+b",
             ) as spooled:
                 await run_blocking_io(spooled.write, file_content)
+                # 及时释放大 bytes 引用
                 del file_content
                 await run_blocking_io(spooled.seek, 0)
                 upload_result = await storage.upload_file(
@@ -779,10 +841,13 @@ async def reveal_file(
                     skip_size_limit=True,
                 )
 
+        # 以上传返回的实际 content_type 归类（更准确）
         file_category = get_file_category(upload_result.content_type or mime_type)
 
+        # 生成经后端代理的可访问 URL
         proxy_url = f"{base_url}/api/upload/file/{upload_result.key}"
 
+        # 组装与前端 UploadResult 一致的结果结构
         reveal_result = {
             "key": upload_result.key,
             "url": proxy_url,
@@ -797,6 +862,7 @@ async def reveal_file(
         }
         logger.info(f"Successfully uploaded {file_path} to S3: {upload_result.url}")
 
+        # 登记到已展示文件索引
         await _index_revealed_file(
             runtime=runtime,
             file_name=filename,
@@ -812,6 +878,7 @@ async def reveal_file(
         return await _json_dumps_result(reveal_result)
 
     except Exception as e:
+        # 兜底：任何异常都返回结构化错误结果，不抛出以免中断 Agent
         logger.error(f"Error processing file {file_path}: {e}")
         error_result = {
             "type": "file_reveal",

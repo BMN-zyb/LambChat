@@ -80,9 +80,12 @@ class S3Config(BaseModel):
 
     def get_endpoint_url(self) -> Optional[str]:
         """Get endpoint URL based on provider"""
+        # 显式配置的 endpoint_url 优先级最高（可覆盖任何厂商推断值，用于自定义/测试环境）。
         if self.endpoint_url:
             return self.endpoint_url
 
+        # 未显式配置时，按厂商推断默认 endpoint：AWS 交给 boto3 使用其内置默认端点（返回 None），
+        # 阿里云/腾讯云按 region 拼出官方域名规则，MinIO 必须由用户显式提供 endpoint_url。
         if self.provider == S3Provider.AWS:
             return None  # boto3 will use default AWS endpoints
         elif self.provider == S3Provider.ALIYUN:
@@ -97,14 +100,17 @@ class S3Config(BaseModel):
 
     def get_public_url(self, key: str) -> str:
         """Generate public URL for an object"""
+        # 优先使用自定义 CDN 域名（最常见的生产环境形态：走自己的域名而不暴露云厂商域名）。
         if self.custom_domain:
             return f"https://{self.custom_domain}/{key}"
 
         if self.path_style or self.provider == S3Provider.MINIO:
+            # Path-style：bucket 名字放在路径里（多数私有部署的 MinIO 要求这种风格）。
             endpoint = self.get_endpoint_url() or f"https://s3.{self.region}.amazonaws.com"
             return f"{endpoint}/{self.bucket_name}/{key}"
         else:
             # Virtual-hosted style
+            # bucket 名字作为子域名前缀，是各云厂商的标准/推荐风格。
             if self.provider == S3Provider.ALIYUN:
                 return f"https://{self.bucket_name}.oss-{self.region}.aliyuncs.com/{key}"
             elif self.provider == S3Provider.TENCENT:

@@ -1,4 +1,10 @@
 """LLM-callable tools for searching personas and creating reusable teams."""
+# 中文说明：本模块提供两个可供 LLM 调用的工具，用于"组建多智能体团队"：
+#   1）search_persona_presets —— 检索可用的人设预设（persona preset），
+#      LLM 需要先搜索，拿到合法的 persona_preset_id 后才能组建团队；
+#   2）create_agent_team —— 用搜索到的人设 id 创建/更新一个可复用的 Team。
+# 两个工具都需要在运行时从 ToolRuntime 中解析出当前用户身份与权限，
+# 因为工具调用发生在 agent 执行过程中，没有原始 HTTP 请求的鉴权上下文。
 
 from __future__ import annotations
 
@@ -23,6 +29,7 @@ else:
     try:
         from langchain.tools import ToolRuntime  # type: ignore[assignment]
     except ImportError:  # pragma: no cover
+        # 兼容旧版本 langchain：找不到 ToolRuntime 时动态构造占位模块
         _mod = type(sys)("langchain.tools")  # type: ignore[assignment]
         _mod.ToolRuntime = Any  # type: ignore[assignment]
         sys.modules.setdefault("langchain.tools", _mod)
@@ -32,10 +39,14 @@ from langchain.tools import tool  # noqa: E402
 
 
 async def _json_dumps_result(data: dict[str, Any]) -> str:
+    # 统一的工具结果序列化：用 default=str 兜底处理不可直接 JSON 序列化的对象（如枚举、日期）
     return await run_blocking_io(json.dumps, data, ensure_ascii=False, default=str)
 
 
 async def _resolve_user(user_id: str) -> TokenPayload | None:
+    # 中文：工具调用时手上只有 user_id，没有原始请求鉴权后生成的 TokenPayload，
+    # 因此这里重新查库拼出一份等价的 TokenPayload（角色 + 汇总后的权限集合），
+    # 用于后续 _is_admin/_can_read_personas/_can_create_team 等权限判断
     user = await UserStorage().get_by_id(user_id)
     if not user:
         return None
@@ -61,6 +72,7 @@ def _is_admin(user: TokenPayload) -> bool:
 
 
 def _can_read_personas(user: TokenPayload) -> bool:
+    # 中文：拥有人设读权限、团队读权限，或者具备基础对话写权限的用户都可以搜索人设
     permissions = set(user.permissions or [])
     return bool(
         permissions.intersection(
@@ -74,6 +86,7 @@ def _can_read_personas(user: TokenPayload) -> bool:
 
 
 def _can_create_team(user: TokenPayload) -> bool:
+    # 中文：团队写权限或对话写权限（即普通聊天用户）均可创建/更新团队
     permissions = set(user.permissions or [])
     return "team:write" in permissions or "chat:write" in permissions
 
@@ -89,12 +102,18 @@ _PLACEHOLDER_PERSONA_IDS = {
 
 
 def _invalid_persona_preset_id(persona_preset_id: str) -> str | None:
+    # 中文：LLM 有时会"编造"一个占位 id（如 'general-purpose'）而不是使用
+    # search_persona_presets 真实返回的 id，这里做兜底校验拦截这类无效输入；
+    # 返回 None 表示合法，返回非 None（该无效值本身）用于错误提示
     value = str(persona_preset_id or "").strip()
     if not value or value.lower() in _PLACEHOLDER_PERSONA_IDS:
         return value or persona_preset_id
     return None
 
 
+# 中文：组建团队的第一步工具——检索可用人设预设。
+# @tool 装饰器把函数注册为 LangChain 工具；runtime 通过 InjectedToolArg 注入，
+# 对 LLM 不可见，仅用于在工具内部取出当前用户身份。
 @tool
 async def search_persona_presets(
     query: Annotated[
@@ -124,6 +143,8 @@ async def search_persona_presets(
     Search several times with different capability words if the first result set does
     not cover all roles needed by the user's task.
     """
+    # 从 runtime 中取出当前会话对应的 user_id；工具运行在 agent 上下文中，
+    # 没有原始 HTTP 请求的身份信息，必须依赖 runtime 注入
     user_id = get_user_id_from_runtime(runtime)
     if not user_id:
         return await _json_dumps_result({"error": "No user context available"})
@@ -135,6 +156,7 @@ async def search_persona_presets(
         )
 
     try:
+        # 管理员可以看到所有人设（包括未公开的），普通用户只能看到对自己可见的人设
         presets = await PersonaPresetManager().list_presets(
             user_id=user_id,
             is_admin=_is_admin(user),
@@ -145,6 +167,8 @@ async def search_persona_presets(
     except Exception as e:
         return await _json_dumps_result({"error": f"Failed to search persona presets: {e}"})
 
+    # 只回传创建团队所需的关键字段，避免把人设完整内部结构（如系统提示词全文）
+    # 也塞进 LLM 上下文浪费 token
     return await _json_dumps_result(
         {
             "success": True,
@@ -165,6 +189,8 @@ async def search_persona_presets(
     )
 
 
+# 中文：组建团队的第二步工具——用 search_persona_presets 返回的合法 persona_preset_id
+# 创建或更新一个可复用 Team。team_id 为空时创建新团队，否则更新已有团队。
 @tool
 async def create_agent_team(
     name: Annotated[
@@ -261,6 +287,8 @@ async def create_agent_team(
     if not members:
         return await _json_dumps_result({"error": "At least one team member is required"})
 
+    # 逐个成员校验 persona_preset_id 合法性，拦截 LLM 编造的占位 id，
+    # 提前给出明确的纠错提示（而不是让后续 Pydantic 校验报出难懂的错误）
     for item in members:
         invalid_id = _invalid_persona_preset_id(str(item.get("persona_preset_id") or ""))
         if invalid_id is not None:
@@ -275,6 +303,8 @@ async def create_agent_team(
             )
 
     try:
+        # 将 LLM 传入的原始 dict 列表转换为强类型的 TeamMemberCreate 列表；
+        # member_id/position 缺省时按枚举序号（index）自动生成，保证顺序稳定
         team_members = [
             TeamMemberCreate(
                 member_id=item.get("member_id") or f"m-{index}",
@@ -296,6 +326,8 @@ async def create_agent_team(
 
     try:
         manager = TeamManager()
+        # 中文：create 和 update 共用同一份 payload 字段，
+        # 仅在下面依据 team_id 是否存在选择调用 create_team 还是 update_team
         payload = {
             "name": name,
             "description": description,
@@ -307,6 +339,7 @@ async def create_agent_team(
             "starter_prompts": starter_prompts or [],
         }
         if team_id:
+            # 传入了 team_id：更新已有团队（需校验 owner_user_id 与权限，防止改到别人的团队）
             team = await manager.update_team(
                 team_id,
                 TeamUpdate(**payload),
@@ -315,6 +348,7 @@ async def create_agent_team(
             )
             action = "updated"
         else:
+            # 未传 team_id：创建新团队
             team = await manager.create_team(
                 TeamCreate(
                     **payload,
@@ -327,6 +361,7 @@ async def create_agent_team(
         operation = "update" if team_id else "create"
         return await _json_dumps_result({"error": f"Failed to {operation} team: {e}"})
 
+    # 返回完整的团队结构（含成员），便于前端/后续对话直接展示或引用 team_id
     return await _json_dumps_result(
         {
             "success": True,
@@ -343,4 +378,6 @@ async def create_agent_team(
 
 def get_team_tools() -> list[BaseTool]:
     """Return team-building tools for the current user."""
+    # 中文：供 agent 构建工具集时调用，按固定顺序返回两个工具
+    # （先搜索人设，再创建/更新团队）
     return [search_persona_presets, create_agent_team]

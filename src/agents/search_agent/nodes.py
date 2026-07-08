@@ -9,11 +9,16 @@ import time
 import uuid
 from typing import Any, Dict
 
+# deepagents.create_deep_agent：装配"内层 ReAct graph"的工厂，是本文件的核心。
+# 外层 graph（core/base.py）只是薄壳，真正的"推理-行动"循环由它提供。
 from deepagents import create_deep_agent
+# 子 agent 类型：SubAgent 为声明式配置，CompiledSubAgent 为已编译好的子图
 from deepagents.middleware.subagents import CompiledSubAgent, SubAgent
 from langchain_core.runnables import RunnableConfig
 
 from src.agents.core.base import get_presenter
+# 节点共享工具：消息构建、嵌套 graph 配置、附件内联（含 SSRF 防护）、
+# 模型能力（vision / fallback / image_url_to_base64）解析等
 from src.agents.core.node_utils import (
     build_human_message,
     build_nested_graph_configurable,
@@ -36,6 +41,7 @@ from src.agents.core.subagent_prompts import (
     VERIFICATION_RUNNER_PROMPT,
     get_memory_guide,
 )
+# 把 enable_thinking 选项解析成模型可用的思考（thinking）配置
 from src.agents.core.thinking import build_thinking_config
 from src.agents.search_agent.context import SearchAgentContext
 from src.agents.search_agent.prompt import (
@@ -44,6 +50,8 @@ from src.agents.search_agent.prompt import (
     SANDBOX_SYSTEM_PROMPT,
 )
 from src.infra.agent import AgentEventProcessor
+# 内层 graph 的中间件集合：重试、MCP 配额、二进制结果、附件投递、提示分段注入、
+# 沙箱 / 环境变量提示、提示缓存、子 agent 活动与结果交接、工具搜索、代码解释器等
 from src.infra.agent.middleware import (
     ArtifactDeliveryMiddleware,
     EnvVarPromptMiddleware,
@@ -59,10 +67,12 @@ from src.infra.agent.middleware import (
     create_code_interpreter_middleware,
     create_retry_middleware,
 )
+# Backend 工厂：持久化后端（PostgreSQL / MongoDB）与沙箱后端
 from src.infra.backend import (
     create_persistent_backend_factory,
     create_sandbox_backend_factory,
 )
+# Goal（目标）相关：目标输入构建、目标提示分段、目标评分（rubric）中间件
 from src.infra.goal import (
     build_goal_input,
     build_goal_prompt_section,
@@ -72,6 +82,7 @@ from src.infra.llm.client import LLMClient
 from src.infra.logging import get_logger
 from src.infra.sandbox.session_manager import get_session_sandbox_manager
 from src.infra.skill.loader import build_skills_prompt
+# 内层 graph 的异步 checkpointer（用 MongoDB 持久化多轮消息历史）
 from src.infra.storage.checkpoint import get_async_checkpointer
 from src.infra.storage.mongodb_store import acreate_store
 from src.infra.writer.present import Presenter
@@ -94,6 +105,7 @@ async def agent_node(state: Dict[str, Any], config: RunnableConfig) -> Dict[str,
     """
     start_time = time.time()
 
+    # 从 config.configurable 取出 presenter（事件输出器）、上下文与本轮请求参数
     presenter = get_presenter(config)
     configurable = config.get("configurable", {})
     context: SearchAgentContext = configurable.get("context", SearchAgentContext())
@@ -103,6 +115,7 @@ async def agent_node(state: Dict[str, Any], config: RunnableConfig) -> Dict[str,
     selected_model = agent_options.get("model")  # Per-request model override
     model_id = agent_options.get("model_id")  # Model config ID for specific channel/provider
     resolved_model_config = agent_options.get("_resolved_model_config")
+    # 解析思考模式：把 enable_thinking 选项转成模型的 thinking 配置
     thinking_config = build_thinking_config(agent_options)
     logger.info(f"agent_options: {agent_options}")
 
@@ -111,6 +124,7 @@ async def agent_node(state: Dict[str, Any], config: RunnableConfig) -> Dict[str,
 
     # 创建 LLM
     llm_start = time.time()
+    # 按选定模型 / 渠道创建 LLM 客户端，并带上思考配置
     llm = await LLMClient.get_model(
         model=selected_model,
         model_id=model_id,
@@ -122,16 +136,19 @@ async def agent_node(state: Dict[str, Any], config: RunnableConfig) -> Dict[str,
 
     # 查询 fallback_model 配置
     fallback_model_value = agent_options.get("_resolved_fallback_model")
+    # 优先复用上游预解析的 fallback 值；键不存在时才回退到查库解析
     if "_resolved_fallback_model" not in agent_options:
         fallback_model_value = await resolve_fallback_model(
             model_id, selected_model, log_prefix="[Agent]"
         )
+    # 模型能力：是否支持图片输入（vision）。优先用上游预解析值，缺失才查模型库
     supports_vision = agent_options.get("_resolved_supports_vision")
     if supports_vision is None:
         supports_vision = await resolve_model_supports_vision(
             model_id, selected_model, log_prefix="[Agent]"
         )
     supports_vision = bool(supports_vision)
+    # 模型能力：是否需把 image_url 转成 base64 data URL（部分渠道不接受外链图片）
     image_url_to_base64 = agent_options.get("_resolved_image_url_to_base64")
     if image_url_to_base64 is None:
         image_url_to_base64 = await resolve_model_image_url_to_base64(
@@ -141,6 +158,7 @@ async def agent_node(state: Dict[str, Any], config: RunnableConfig) -> Dict[str,
 
     # 多租户隔离
     tenant_id = context.user_id or "default"
+    # 用 user_id 拼出 assistant_id，作为持久化 backend 的命名空间，隔离不同用户的文件
     assistant_id = f"assistant-{tenant_id}"
     logger.info(f"tenant_id: {tenant_id}")
 
@@ -160,6 +178,7 @@ async def agent_node(state: Dict[str, Any], config: RunnableConfig) -> Dict[str,
     )
     backend_init_time = time.time() - backend_start
     logger.debug(f"[Agent] Backend init: {backend_init_time * 1000:.3f}ms")
+    # backend_factory 可能是"工厂函数"或直接的 backend 实例，这里统一成实例
     backend = backend_factory(None) if callable(backend_factory) else backend_factory
 
     # 构建 persona + skills 提示（使用预加载的 skills，避免重复数据库查询）
@@ -178,6 +197,7 @@ async def agent_node(state: Dict[str, Any], config: RunnableConfig) -> Dict[str,
     # 过滤工具（懒加载 MCP 工具）
     filtered_tools = None
     if settings.ENABLE_MCP:
+        # 触发 MCP 工具懒加载，再按黑名单 / auto_mode 过滤出最终工具集
         await context.get_tools()
         filtered_tools = context.filter_tools() or None
 
@@ -195,6 +215,7 @@ async def agent_node(state: Dict[str, Any], config: RunnableConfig) -> Dict[str,
 
     # 创建内层 graph (deep agent)
     checkpointer_start = time.time()
+    # 内层 graph 的 checkpointer：以 session_id 为 thread_id，把多轮消息历史持久化到 MongoDB
     inner_checkpointer = await get_async_checkpointer(thread_id=state.get("session_id"))
     checkpointer_init_time = time.time() - checkpointer_start
     logger.debug(f"[Agent] Checkpointer init: {checkpointer_init_time * 1000:.3f}ms")
@@ -204,11 +225,15 @@ async def agent_node(state: Dict[str, Any], config: RunnableConfig) -> Dict[str,
 
     # 自定义子代理配置 - 强制将所有中间信息保存到文件
     search_base_url = configurable.get("base_url", "")
+    # 子 agent 复用主 agent 的 persona / skills / memory 提示片段（过滤掉空串）
     subagent_prompt_sections = [s for s in (*persona_sections, skills_prompt, memory_guide) if s]
     if sandbox_backend and sandbox_work_dir:
         subagent_prompt_sections.append(SANDBOX_RUNTIME_SECTION.format(work_dir=sandbox_work_dir))
 
     def _build_subagent_middleware(subagent_type: str) -> list:
+        # 为每个子 agent 单独构建一套中间件栈，顺序与主 agent 大体一致：
+        # 稳定块在前、动态块在后，最后用 PromptCachingMiddleware 打缓存断点。
+        # retry 打头以包住后续中间件；子 agent 独享 fork 出的工具作用域，避免互相污染。
         mw = [
             *create_retry_middleware(fallback_model=fallback_model_value, thinking=thinking_config),
             MCPQuotaMiddleware(user_id=context.user_id),
@@ -216,12 +241,16 @@ async def agent_node(state: Dict[str, Any], config: RunnableConfig) -> Dict[str,
             ArtifactDeliveryMiddleware(workspace_path=sandbox_work_dir),
             SubagentActivityMiddleware(backend=backend),
         ]
+        # 渠道不接受外链图片时，加入把 image_url 转 base64 的中间件
         if image_url_to_base64:
             mw.append(ImageUrlToBase64Middleware())
+        # 有提示片段才注入（同类中间件只能有一个实例）
         if subagent_prompt_sections:
             mw.append(SectionPromptMiddleware(sections=subagent_prompt_sections))
+        # 沙箱模式追加环境变量提示
         if sandbox_backend:
             mw.append(EnvVarPromptMiddleware(user_id=context.user_id or "default"))
+        # 延迟工具加载：子 agent 用 fork 出的独立作用域，接入工具搜索中间件
         if context.deferred_manager is not None:
             from src.infra.agent.middleware import ToolSearchMiddleware
 
@@ -234,9 +263,12 @@ async def agent_node(state: Dict[str, Any], config: RunnableConfig) -> Dict[str,
                     search_limit=settings.DEFERRED_TOOL_SEARCH_LIMIT,
                 )
             )
+        # 缓存断点放最后：所有注入完成后才标记可缓存前缀
         mw.append(PromptCachingMiddleware())
         return mw
 
+    # 声明可供主 agent 委派的子 agent：通用型 + 若干专精型（代码调查 / 实现 / 验证 / 研究）。
+    # 主 agent 通过 task 工具把子任务交给它们推进，各自带独立中间件与系统提示。
     custom_subagents: list[SubAgent | CompiledSubAgent] = [
         {
             "name": "general-purpose",
@@ -272,6 +304,9 @@ async def agent_node(state: Dict[str, Any], config: RunnableConfig) -> Dict[str,
 
     # 构建中间件栈：retry → binary → skills+memory → sandbox runtime/tools → memory_index → tool search → cache tag
     # Order: stable → semi-stable → dynamic → cache breakpoint
+    # 中间件顺序的核心原则：把"内容稳定"的放前面、"每轮变化"的放后面，最后再打 KV 缓存断点——
+    # 这样系统提示前缀尽量不变，最大化命中提示缓存、降低成本。
+    # retry 打头：它包住后续所有中间件，模型失败时可切 fallback_model 重试。
     user_middleware = create_retry_middleware(
         fallback_model=fallback_model_value, thinking=thinking_config
     )
@@ -295,11 +330,13 @@ async def agent_node(state: Dict[str, Any], config: RunnableConfig) -> Dict[str,
     goal_section = build_goal_prompt_section(active_goal)
     if goal_section:
         _prompt_sections.append(goal_section)
+    # 自动模式下追加 AUTO_MODE 提示，指导 agent 更自主地连续行动
     if configurable.get("auto_mode"):
         _prompt_sections.append(AUTO_MODE_PROMPT_SECTION)
     if _prompt_sections:
         user_middleware.append(SectionPromptMiddleware(sections=_prompt_sections))
     # Sandbox tool/env prompts are user/session-specific and are appended after static sections.
+    # 沙箱工具 / 环境变量提示是"随用户 / 会话变化"的动态内容，放在静态分段之后追加
     if sandbox_backend:
         user_middleware.append(
             SandboxMCPMiddleware(backend=sandbox_backend, user_id=context.user_id or "default")
@@ -311,6 +348,7 @@ async def agent_node(state: Dict[str, Any], config: RunnableConfig) -> Dict[str,
         user_middleware.append(MemoryIndexMiddleware(user_id=context.user_id))
 
     # Tool search: per-turn dynamic content
+    # 工具搜索属于"每轮动态内容"，安排在静态分段之后接入
     if context.deferred_manager is not None:
         from src.infra.agent.middleware import ToolSearchMiddleware
 
@@ -322,7 +360,9 @@ async def agent_node(state: Dict[str, Any], config: RunnableConfig) -> Dict[str,
         )
         logger.info("[SearchAgent] Tool search middleware enabled (deferred MCP loading)")
 
+    # 按选项决定是否接入代码解释器中间件（对应 enable_code_interpreter）
     user_middleware.extend(create_code_interpreter_middleware(agent_options))
+    # 目标评分中间件：设置了 active_goal 时按 rubric 对产出打分（无目标时返回 None）
     rubric_middleware = create_goal_rubric_middleware(
         model=llm,
         goal=active_goal,
@@ -332,12 +372,17 @@ async def agent_node(state: Dict[str, Any], config: RunnableConfig) -> Dict[str,
     if rubric_middleware is not None:
         user_middleware.append(rubric_middleware)
 
+    # 主 agent 专属：注入主 agent 上下文，并负责把子 agent 的结果交接回主流程
     user_middleware.append(MainAgentContextMiddleware(backend=backend))
     user_middleware.append(SubagentResultHandoffMiddleware(backend=backend))
 
     # KV cache: tag final system block + last tool AFTER all dynamic injection
+    # 缓存断点必须放最后：所有动态注入完成后，才标记最终系统块与最后一个工具为可缓存前缀
     user_middleware.append(PromptCachingMiddleware())
 
+    # 用 deepagents 装配"内层 ReAct graph"：这是整个 agent 的推理-行动主体。
+    # 依次传入模型、系统提示、backend（文件系统）、工具集、checkpointer（历史持久化）、
+    # store（长期记忆）、自定义子 agent，以及上面按顺序拼好的中间件栈。
     inner_graph = create_deep_agent(
         model=llm,
         system_prompt=system_prompt,
@@ -352,6 +397,8 @@ async def agent_node(state: Dict[str, Any], config: RunnableConfig) -> Dict[str,
     graph_compile_time = time.time() - graph_compile_start
     logger.debug(f"[Agent] Graph compile: {graph_compile_time * 1000:.3f}ms")
 
+    # 为"手动嵌套调用"的内层 graph 构建 config：注入 checkpointer / backend / presenter 等，
+    # 并用同一个 session_id 作为 thread_id，让内层历史与本会话对齐
     inner_config: RunnableConfig = {
         "configurable": build_nested_graph_configurable(
             thread_id=state.get("session_id", str(uuid.uuid4())),
@@ -374,6 +421,8 @@ async def agent_node(state: Dict[str, Any], config: RunnableConfig) -> Dict[str,
     # 只需传入新消息，避免与 checkpoint 中的历史消息重复。
     user_input = state.get("input", "")
     recommendation_input = configurable.get("recommendation_input") or user_input
+    # 仅当模型支持视觉时才内联图片附件：把图片转成 data URL / 直链；
+    # 底层下载器会拒绝私网 / 内网地址（SSRF 防护，见 node_utils._is_private_url）
     if supports_vision:
         attachments = await inline_image_attachments_as_data_urls(
             attachments,
@@ -384,8 +433,10 @@ async def agent_node(state: Dict[str, Any], config: RunnableConfig) -> Dict[str,
 
     # 创建事件处理器（使用 AgentEventProcessor 处理 astream_events）
     logger.info("[SearchAgent] Creating AgentEventProcessor")
+    # 事件处理器：把内层 graph 的 astream_events 原始事件转换成前端 SSE 事件，再经 presenter 发出
     event_processor = AgentEventProcessor(presenter, base_url=configurable.get("base_url", ""))
 
+    # 可选：基于本轮输入异步生成"推荐追问"，不阻塞主流程
     if recommendation_input and settings.ENABLE_RECOMMEND_QUESTIONS:
         from src.agents.core.recommendations import schedule_recommend_questions_from_state
 
@@ -399,7 +450,11 @@ async def agent_node(state: Dict[str, Any], config: RunnableConfig) -> Dict[str,
     logger.info("[SearchAgent] Starting astream_events")
     # 流式处理事件（不重试，直接调用）
     try:
+        # isolated_nested_graph_run：切断父 graph 的运行时 config，避免手动嵌套调用时
+        # 继承到外层的任务配置而相互干扰
         async with isolated_nested_graph_run():
+            # 事件驱动的流式：逐个消费内层 graph 的 astream_events(v2) 事件交给 event_processor
+            # 转成前端事件；build_goal_input 会在设置了目标时包装输入
             async for event in inner_graph.astream_events(  # type: ignore[call-overload]
                 build_goal_input(new_message, active_goal, rubric_middleware=rubric_middleware),
                 inner_config,
@@ -407,6 +462,7 @@ async def agent_node(state: Dict[str, Any], config: RunnableConfig) -> Dict[str,
             ):
                 await event_processor.process_event(event)
     finally:
+        # 无论正常结束还是异常，都要 flush 残留事件并汇报 token 用量
         await event_processor.flush()
         await emit_token_usage(
             event_processor,
@@ -417,6 +473,7 @@ async def agent_node(state: Dict[str, Any], config: RunnableConfig) -> Dict[str,
         )
     logger.info("[SearchAgent] astream_events completed")
 
+    # 可选：异步抓取本轮记忆（写入长期记忆），不阻塞返回
     if settings.ENABLE_MEMORY and context.user_id:
         from src.infra.memory.tools import schedule_auto_memory_capture
 
@@ -435,6 +492,7 @@ async def agent_node(state: Dict[str, Any], config: RunnableConfig) -> Dict[str,
         except Exception:
             pass  # 非关键路径，失败静默
 
+    # 取出本轮聚合的输出文本，清理处理器内存后写回外层 State 的 output
     output_text = event_processor.output_text
     event_processor.clear()
 
@@ -478,9 +536,11 @@ async def _create_backend_and_prompt(
             session_id=state.get("session_id", str(uuid.uuid4())),
         )
         prompt = DEFAULT_SYSTEM_PROMPT
+        # 非沙箱：返回值里 sandbox_backend / sandbox_work_dir 均为 None
         return backend_factory, prompt, store, None, None
 
     # 沙箱模式
+    # 沙箱模式必须有已登录用户（沙箱按 user_id + session_id 隔离）
     if not context.user_id:
         raise ValueError("Sandbox requires authenticated user (user_id is required)")
 
@@ -493,6 +553,7 @@ async def _create_backend_and_prompt(
         logger.warning(f"Failed to emit sandbox:starting event: {e}")
 
     try:
+        # 按会话获取或创建沙箱，返回复合 backend 与其绝对工作目录
         sandbox_backend, work_dir = await sandbox_manager.get_or_create(
             session_id=state.get("session_id", str(uuid.uuid4())),
             user_id=context.user_id,
@@ -512,6 +573,7 @@ async def _create_backend_and_prompt(
 
         logger.info(f"Sandbox enabled, using sandbox backend for assistant: {assistant_id}")
 
+        # 沙箱模式返回：沙箱 backend 工厂 + 沙箱系统提示 + store + 复合 backend + 工作目录
         return (
             create_sandbox_backend_factory(sandbox_backend.default, assistant_id, user_id=user_id),
             SANDBOX_SYSTEM_PROMPT,

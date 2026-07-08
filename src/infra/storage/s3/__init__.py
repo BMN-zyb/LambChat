@@ -10,6 +10,8 @@ Supports multiple S3-compatible providers:
 - Local filesystem storage
 """
 
+# 对象存储抽象层的包导出入口：把类型定义（types）、后端协议（base）、具体后端实现（backends）、
+# 以及对外统一封装的高层服务（service）汇集到一起，方便上层代码统一从 src.infra.storage.s3 导入。
 from src.infra.storage.s3.backends import (
     AliyunOssBackend,
     LocalStorageBackend,

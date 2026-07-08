@@ -1,14 +1,20 @@
 /**
  * Session management hooks
  */
+// 【会话管理相关 hooks】提供三类能力：
+// 1) 分页/无限滚动的会话列表（按项目或收藏过滤）及其增删改与刷新；
+// 2) 单个会话的加载/删除/切换；3) 消息历史加载。
+// 其中 reconcileSessionList 负责把「最新拉取结果」与「本地已有列表」智能合并，兼顾软刷新体验。
 
 import { useState, useCallback, useEffect, useRef } from "react";
 import { useInView } from "react-intersection-observer";
 import i18n from "i18next";
 import { sessionApi, type BackendSession } from "../services/api";
 
+// 每页拉取的会话数量
 const PAGE_SIZE = 20;
 
+// 按会话 ID 去重，保留首次出现的顺序。
 function dedup(sessions: BackendSession[]): BackendSession[] {
   const seen = new Set<string>();
   return sessions.filter((s) => {
@@ -18,6 +24,10 @@ function dedup(sessions: BackendSession[]): BackendSession[] {
   });
 }
 
+// 合并会话列表（软刷新时使用）：
+// - removeMissing=true：以最新结果为准（过滤掉被排除项后直接返回，用于按项目/收藏的严格视图）；
+// - removeMissing=false：保留最新结果，并把本地存在、但最新结果里没有的会话补回（避免误删本地新建项）。
+// excludedSessionIds 用于跳过已被本地删除但服务端可能仍返回的会话。
 export function reconcileSessionList(input: {
   previous: BackendSession[];
   latest: BackendSession[];
@@ -46,6 +56,7 @@ export function reconcileSessionList(input: {
 
 // ─── Per-project paginated session list ─────────────────────────────
 
+// 会话列表 hook 的返回：列表数据、各类加载态、无限滚动哨兵 ref，以及刷新/软刷新与本地增删改方法。
 interface UseProjectSessionListReturn {
   sessions: BackendSession[];
   isLoading: boolean;
@@ -60,11 +71,13 @@ interface UseProjectSessionListReturn {
   updateSession: (session: BackendSession) => void;
 }
 
+// 列表过滤条件：按项目 ID，或仅看收藏。
 interface SessionListFilter {
   projectId?: string;
   favoritesOnly?: boolean;
 }
 
+// 带分页与无限滚动的会话列表 hook。scrollRoot 指定滚动容器（用于交叉观察哨兵元素）。
 export function useFilteredSessionList(
   filter: SessionListFilter,
   scrollRoot?: Element | null,
@@ -83,6 +96,7 @@ export function useFilteredSessionList(
     root: scrollRoot ?? undefined,
   });
 
+  // 拉取会话：reset=true 从头加载（重置分页），否则加载下一页并追加。
   const fetchSessions = async (reset = false) => {
     const targetSkip = reset ? 0 : skip;
     if (!reset && (isLoadingMore || !hasMore)) return;
@@ -141,6 +155,7 @@ export function useFilteredSessionList(
   };
 
   // Infinite scroll
+  // 无限滚动：哨兵进入视口且还有更多、且当前不在加载中时，加载下一页
   useEffect(() => {
     if (inView && hasMore && !isLoadingMore && !isLoading) {
       fetchSessions(false);
@@ -149,6 +164,7 @@ export function useFilteredSessionList(
   }, [inView, hasMore, isLoadingMore, isLoading]);
 
   // Re-fetch when projectId changes
+  // 过滤条件（项目/收藏）变化时清空并重新从头加载
   useEffect(() => {
     setSessions([]);
     setSkip(0);
@@ -158,11 +174,14 @@ export function useFilteredSessionList(
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filter.favoritesOnly, filter.projectId]);
 
+  // 硬刷新：从头重新加载列表
   const refresh = useCallback(async () => {
     await fetchSessions(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filter.favoritesOnly, filter.projectId]);
 
+  // 软刷新（尽力而为）：一次性拉取已加载数量的会话并与本地列表智能合并，失败时静默忽略，
+  // 用于后台更新列表（如收到通知）而不打断用户滚动位置
   const softRefresh = useCallback(async () => {
     try {
       const requestLimit = Math.min(
@@ -198,6 +217,7 @@ export function useFilteredSessionList(
     }
   }, [filter.favoritesOnly, filter.projectId]);
 
+  // 本地插入到列表顶部（如新建会话）：解除排除标记并避免重复
   const prependSession = useCallback((session: BackendSession) => {
     excludedSessionIdsRef.current.delete(session.id);
     setSessions((prev) => {
@@ -206,11 +226,13 @@ export function useFilteredSessionList(
     });
   }, []);
 
+  // 本地移除会话：加入排除集合（防止软刷新把它带回）并从列表删除
   const removeSession = useCallback((sessionId: string) => {
     excludedSessionIdsRef.current.add(sessionId);
     setSessions((prev) => prev.filter((s) => s.id !== sessionId));
   }, []);
 
+  // 本地更新会话（如改名/收藏）：解除排除标记并就地替换
   const updateSession = useCallback((session: BackendSession) => {
     excludedSessionIdsRef.current.delete(session.id);
     setSessions((prev) => prev.map((s) => (s.id === session.id ? session : s)));
@@ -231,6 +253,7 @@ export function useFilteredSessionList(
   };
 }
 
+// 便捷封装：按项目 ID 获取会话列表。
 export function useProjectSessionList(
   projectId: string,
   scrollRoot?: Element | null,
@@ -238,6 +261,7 @@ export function useProjectSessionList(
   return useFilteredSessionList({ projectId }, scrollRoot);
 }
 
+// 便捷封装：获取收藏的会话列表。
 export function useFavoriteSessionList(
   scrollRoot?: Element | null,
 ): UseProjectSessionListReturn {
@@ -246,6 +270,7 @@ export function useFavoriteSessionList(
 
 // ─── Single session operations ──────────────────────────────────────
 
+// 单会话操作 hook 的返回：当前会话、加载态、错误，以及加载/删除/切换/清错方法。
 interface UseSessionReturn {
   currentSession: BackendSession | null;
   isLoading: boolean;
@@ -256,6 +281,7 @@ interface UseSessionReturn {
   clearError: () => void;
 }
 
+// 管理「当前选中会话」的加载与生命周期。
 export function useSession(): UseSessionReturn {
   const [currentSession, setCurrentSession] = useState<BackendSession | null>(
     null,
@@ -263,6 +289,7 @@ export function useSession(): UseSessionReturn {
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // 按 ID 加载会话详情并设为当前会话；返回会话对象或 null。
   const loadSession = useCallback(
     async (sessionId: string): Promise<BackendSession | null> => {
       setIsLoading(true);
@@ -288,6 +315,7 @@ export function useSession(): UseSessionReturn {
     [],
   );
 
+  // 删除会话；若删除的是当前会话则清空当前会话。
   const deleteSession = useCallback(
     async (sessionId: string) => {
       try {
@@ -306,6 +334,7 @@ export function useSession(): UseSessionReturn {
     [currentSession],
   );
 
+  // 切换会话：传入 ID 则加载，传入 null 则清空当前会话。
   const switchSession = useCallback(
     (sessionId: string | null) => {
       if (sessionId) {
@@ -334,12 +363,14 @@ export function useSession(): UseSessionReturn {
 
 // ─── Message history loader ─────────────────────────────────────────
 
+// 历史加载 hook 的返回：加载函数、加载态与错误。
 interface UseMessageHistoryReturn {
   loadHistory: (sessionId: string) => Promise<void>;
   isLoading: boolean;
   error: string | null;
 }
 
+// 加载指定会话详情并通过 onHistoryLoaded 回调交给外层（用于恢复历史消息/配置）。
 export function useMessageHistory(
   onHistoryLoaded: (session: BackendSession) => void,
 ): UseMessageHistoryReturn {

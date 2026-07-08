@@ -1,3 +1,7 @@
+// 全局设置 Context：在 useSettings（基础设置读写）之上，额外聚合「可用模型列表」
+// 与「置顶模型」等需要跨页面共享的状态，统一通过 Provider 下发。
+// 消费方用 useSettingsContext（强制在 Provider 内）或 useOptionalSettingsContext
+// （可选，返回 undefined 而不抛错）获取。
 import {
   createContext,
   useContext,
@@ -68,13 +72,17 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
 
   const { isAuthenticated } = useAuth();
 
+  // 可用模型列表：管理员在后端配置的模型清单，供全局选择器使用
   // 从 DB 的 model_configs 读取可用模型
   const [dbModels, setDbModels] = useState<AvailableModel[] | null>(null);
+  // 管理员设定的默认模型 ID（用于推导 defaultModel）
   const [adminDefaultModelId, setAdminDefaultModelId] = useState<string>("");
 
+  // 用户置顶的模型（置顶后在选择器中优先展示）
   // 置顶模型 ID
   const [pinnedModelIds, setPinnedModelIds] = useState<string[]>([]);
 
+  // 拉取可用模型：把后端返回结构映射为前端 AvailableModel；无数据或出错时置空。
   const fetchModels = useCallback(() => {
     modelApi
       .listAvailable()
@@ -109,6 +117,7 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
       .catch(() => {});
   }, []);
 
+  // 仅在已登录时拉取模型与置顶列表（这些接口需要鉴权）
   useEffect(() => {
     if (isAuthenticated) {
       fetchModels();
@@ -116,6 +125,7 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
     }
   }, [isAuthenticated, fetchModels, fetchPinnedModels]);
 
+  // 切换置顶：本地乐观更新（有则移除、无则加入），并异步同步到后端；失败静默。
   const togglePinnedModel = useCallback((modelId: string) => {
     setPinnedModelIds((prev) => {
       const next = prev.includes(modelId)
@@ -127,6 +137,7 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
   }, []);
 
   // Auto-clean orphaned pinned IDs (models that were deleted)
+  // 自动清理失效的置顶 ID：过滤掉已被删除、不在当前可用模型中的置顶项。
   const cleanedPinnedIds = useMemo(() => {
     if (!dbModels || pinnedModelIds.length === 0) return pinnedModelIds;
     const validIds = new Set(dbModels.map((m) => m.id));
@@ -134,6 +145,7 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
     return cleaned;
   }, [dbModels, pinnedModelIds]);
 
+  // 当清理后数量发生变化，回写清理结果到 state 与后端，保持一致。
   useEffect(() => {
     if (cleanedPinnedIds.length === pinnedModelIds.length) return;
     setPinnedModelIds(cleanedPinnedIds);
@@ -145,6 +157,7 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
     return dbModels;
   }, [dbModels]);
 
+  // 推导默认模型的 value：优先用管理员默认模型 ID 对应项，否则取列表首个。
   const defaultModel = useMemo(() => {
     if (!availableModels || availableModels.length === 0) {
       return "";
@@ -184,6 +197,7 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
 // Fast refresh only works when a file only exports components.
 // Use a new file to share constants or functions between components
 // eslint-disable-next-line react-refresh/only-export-components
+// 消费 Hook：必须在 SettingsProvider 内使用，否则抛错以尽早暴露用法错误。
 export function useSettingsContext() {
   const context = useContext(SettingsContext);
   if (context === undefined) {
@@ -195,6 +209,7 @@ export function useSettingsContext() {
 }
 
 // eslint-disable-next-line react-refresh/only-export-components
+// 可选消费 Hook：不在 Provider 内时返回 undefined 而非抛错，供「可有可无设置」的组件使用。
 export function useOptionalSettingsContext() {
   return useContext(SettingsContext);
 }

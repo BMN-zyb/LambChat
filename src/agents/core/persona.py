@@ -18,20 +18,28 @@ from typing import Any
 
 from src.kernel.config.base import settings
 
+# 以"可选依赖"的方式加载 deepagents 包（真正驱动 ReAct 循环的内层 graph 引擎）。
+# 用 importlib 动态导入并吞掉 ImportError，是为了兼容缺少该依赖或版本较旧的环境：
+# 缺失时下面的 _HarnessProfile / _register_harness_profile 会退化为 None，本模块仍可正常导入。
 _deepagents: Any = None
 try:
     _deepagents = importlib.import_module("deepagents")
 except ImportError:  # pragma: no cover - compatibility with older deepagents builds
     pass
 
+# 从 deepagents 中取出 HarnessProfile 类型与 register_harness_profile 注册函数；
+# 若包不可用或旧版本未提供这些符号，则取 None，后续的注册步骤会被相应跳过。
 _HarnessProfile = getattr(_deepagents, "HarnessProfile", None) if _deepagents is not None else None
 _register_harness_profile = (
     getattr(_deepagents, "register_harness_profile", None) if _deepagents is not None else None
 )
 
 
+# 默认角色身份：当调用方未提供自定义 persona（system_prompt 为空）时，
+# persona 块回退使用这句通用身份声明，保证最终 system prompt 里始终存在明确的角色设定。
 DEFAULT_ROLE = "You are an intelligent assistant with tools and skills."
 
+# persona 块在最终 system message 中的 Markdown 小标题（对应模块 docstring 里的 [Block 4]）。
 _PERSONA_HEADING = "## Persona"
 
 
@@ -51,6 +59,8 @@ _PERSONA_HEADING = "## Persona"
 def _build_behavior_guide() -> str:
     """Build the base behavior guide, conditionally including scheduled task instructions."""
     scheduled_task_section = ""
+    # 仅当配置启用了定时任务能力时，才把"可主动定时给用户发消息"的说明拼进行为指南，
+    # 避免在未开启该功能的部署里向模型宣称并不存在的能力。
     if settings.ENABLE_SCHEDULED_TASK:
         scheduled_task_section = """
 
@@ -100,8 +110,12 @@ Keep working until the task is fully complete. Don't stop partway and explain wh
 For longer tasks, provide brief progress updates at reasonable intervals — a concise sentence recapping what you've done and what's next."""
 
 
+# 在模块导入时构建一次行为指南字符串；其内容依赖 settings，构建完成后即固定不再变化。
 _BEHAVIOR_GUIDE = _build_behavior_guide()
 
+# 若 deepagents 可用，则以 "anthropic" 作为 provider key 注册一个 HarnessProfile，
+# 把上面的行为指南作为该 provider 下所有 Anthropic 模型的基础 system prompt 注入内层 graph。
+# 如此：角色身份交由 persona 系统掌控、通用行为准则由此处统一下发，二者解耦、互不冲突。
 if _HarnessProfile is not None and _register_harness_profile is not None:
     # Register on import — this is idempotent (additive merge).
     _register_harness_profile("anthropic", _HarnessProfile(base_system_prompt=_BEHAVIOR_GUIDE))

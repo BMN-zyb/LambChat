@@ -172,6 +172,7 @@ class DaytonaBackend(BaseSandbox):
                 truncated=False,
             )
 
+    # 内容搜索用比通用 execute() 更短的默认超时（grep 应快速返回，避免长时间占用沙箱）。
     def grep_raw(
         self,
         pattern: str,
@@ -183,6 +184,7 @@ class DaytonaBackend(BaseSandbox):
         result = self.execute(build_grep_command(pattern, path, glob), timeout=timeout)
         return parse_grep_response(result, timeout)
 
+    # grep 的异步变体：在上面基础上额外带客户端侧超时保护（见 aexecute）。
     async def agrep_raw(
         self,
         pattern: str,
@@ -194,6 +196,9 @@ class DaytonaBackend(BaseSandbox):
         result = await self.aexecute(build_grep_command(pattern, path, glob), timeout=timeout)
         return parse_grep_response(result, timeout)
 
+    # 在沙箱内做 glob：优先用 rg（ripgrep）列文件，没有 rg 则退回 find；输出首行会打印
+    # __LAMBCHAT_GLOB_MODE__:<mode> 标记用的是哪种工具。rg 已按 glob 过滤，find 只是列出
+    # 全部文件、再由本地把 glob 翻译成正则逐一匹配。返回 None 表示命令失败，交上层回退父类实现。
     def _glob_info_via_command(self, pattern: str, search_path: str) -> list[FileInfo] | None:
         quoted_path = shlex.quote(search_path)
         quoted_pattern = shlex.quote(pattern)
@@ -216,6 +221,7 @@ class DaytonaBackend(BaseSandbox):
         import re
 
         # glob.translate() is Python 3.13+; this is the 3.12-compatible equivalent.
+        # 手写 glob→正则：** 跨目录（.* 或 (?:|.*/)），* 匹配非 / 段（[^/]*），? 匹配单个非 / 字符
         parts = pattern.split("**")
         segments: list[str] = []
         for idx, part in enumerate(parts):
@@ -259,6 +265,7 @@ class DaytonaBackend(BaseSandbox):
         return matches
 
     def glob_info(self, pattern: str, path: str = "/") -> list[FileInfo]:
+        # path 为 "/" 时用沙箱工作目录；优先走命令式 glob，失败（返回 None）再回退父类默认实现
         search_path = self.work_dir if path == "/" else path
         command_matches = self._glob_info_via_command(pattern, search_path)
         if command_matches is not None:
@@ -395,6 +402,7 @@ class DaytonaBackend(BaseSandbox):
         return responses
 
     def _file_size(self, path: str) -> int | None:
+        # 用 stat 取文件字节数（失败或非数字返回 None），下载前据此跳过超大文件
         result = self.execute(f"stat -c %s {shlex.quote(path)}", timeout=30)
         if result.exit_code != 0:
             return None

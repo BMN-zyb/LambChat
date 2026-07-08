@@ -76,6 +76,8 @@ class CubeSandboxConfig(SandboxConfig):
 # =============================================================================
 
 
+# 沙箱工厂：三平台（daytona/e2b/cubesandbox）的统一创建入口，并用类级 registry 跟踪
+# 已创建的沙箱，支持按 sandbox_id / run_id / 全部 关闭，实现集中式生命周期管理。
 class SandboxFactory:
     """
     Sandbox 工厂类
@@ -213,11 +215,13 @@ class SandboxFactory:
         backend, provider_obj = cls._sandbox_registry[sandbox_id]
 
         last_error = None
+        # 关闭可能因沙箱"状态切换中"而失败：对这类错误用指数退避重试，其余错误直接退出循环。
         for attempt in range(max_retries):
             try:
 
                 def _sync_close_provider() -> None:
                     # 根据模块名判断类型并关闭
+                    # （用模块名而非 isinstance，避免仅为类型检查就 import 各家 provider SDK）
                     module_name = type(provider_obj).__module__
 
                     if "daytona" in module_name:

@@ -24,9 +24,11 @@ from src.kernel.schemas.channel import (
 logger = get_logger(__name__)
 
 # Fields that should be encrypted
+# 需落库前加密、展示时脱敏的敏感字段名集合（app_secret/token/密码等）。
 SENSITIVE_FIELDS = frozenset(
     {"app_secret", "secret", "token", "password", "api_key", "access_token"}
 )
+# 列表类查询的最大返回条数上限，防止单用户配置过多时一次性拉全表。
 CHANNEL_CONFIG_LIST_LIMIT = 200
 
 
@@ -38,16 +40,21 @@ class ChannelStorage:
     Each user can have multiple configurations per channel type (multi-instance support).
     """
 
+    # 以下三个类级变量共同实现"每进程仅建一次索引"：
+    # _indexes_done 标记是否已成功建立；_indexes_task 缓存正在执行的建索引协程，
+    # 使并发调用共享同一个任务；_indexes_lock 保护上述状态避免竞态。
     _indexes_done = False
     _indexes_task: asyncio.Task | None = None
     _indexes_lock: asyncio.Lock | None = None
 
     def __init__(self):
+        # MongoDB 客户端与集合句柄均惰性初始化（见 _get_collection）。
         self._client = None
         self._collection = None
 
     def _get_collection(self):
         """Get channel config collection lazily"""
+        # 首次访问时才建立连接并选择集合，之后复用同一句柄。
         if self._collection is None:
             self._client = get_mongo_client()
             db = self._client[settings.MONGODB_DB]
@@ -56,25 +63,31 @@ class ChannelStorage:
 
     async def ensure_indexes_if_needed(self) -> None:
         """Ensure channel indexes exist once per process."""
+        # 双重检查加锁：先无锁快速判断，已完成则直接返回。
         cls = type(self)
         if cls._indexes_done:
             return
 
+        # 惰性创建类级锁（避免在模块导入期就绑定事件循环）。
         if cls._indexes_lock is None:
             cls._indexes_lock = asyncio.Lock()
 
         async with cls._indexes_lock:
+            # 进入临界区后二次确认，防止等锁期间别的协程已建好。
             if cls._indexes_done:
                 return
+            # 复用同一个建索引任务：并发调用者都 await 这同一个 task，避免重复建索引。
             if cls._indexes_task is None or cls._indexes_task.cancelled():
                 cls._indexes_task = asyncio.create_task(self._ensure_indexes())
             task = cls._indexes_task
 
+        # 在锁外等待任务完成，成功才置位 _indexes_done。
         succeeded = await task
         if succeeded:
             cls._indexes_done = True
             return
 
+        # 失败则清理任务引用，使后续调用可重试建索引。
         async with cls._indexes_lock:
             if cls._indexes_task is task:
                 cls._indexes_task = None
@@ -82,12 +95,14 @@ class ChannelStorage:
     async def _ensure_indexes(self) -> bool:
         try:
             collection = self._get_collection()
+            # 唯一索引：保证同一用户+渠道类型+实例只有一条配置（多实例的唯一键）。
             await collection.create_index(
                 [("user_id", 1), ("channel_type", 1), ("instance_id", 1)],
                 name="user_channel_instance_idx",
                 unique=True,
                 background=True,
             )
+            # 辅助索引：加速渠道管理器按"类型+是否启用"批量拉取待启动配置。
             await collection.create_index(
                 [("channel_type", 1), ("enabled", 1)],
                 name="channel_enabled_idx",
@@ -95,6 +110,7 @@ class ChannelStorage:
             )
             return True
         except Exception as e:
+            # 建索引失败不抛出（不阻断主流程），仅告警并由上层决定是否重试。
             logger.warning(f"Failed to create channel indexes: {e}")
             return False
 
@@ -135,6 +151,7 @@ class ChannelStorage:
         collection = self._get_collection()
 
         # Generate unique instance_id
+        # 生成唯一实例 ID，作为该配置在"多实例"场景下的稳定标识。
         instance_id = str(uuid.uuid4())
 
         now = utc_now_iso()
@@ -143,6 +160,7 @@ class ChannelStorage:
             "channel_type": channel_type.value,
             "instance_id": instance_id,
             "name": name,
+            # 敏感字段在写入前加密（见 _encrypt_config）。
             "config": await self._encrypt_config(config),
             "enabled": enabled,
             "agent_id": agent_id,
@@ -194,6 +212,8 @@ class ChannelStorage:
             update_data["enabled"] = enabled
         if name is not None:
             update_data["name"] = name
+        # 这里用 Ellipsis(...) 作为"未传参"哨兵，从而把"显式传 None（清空）"
+        # 与"根本没传该参数（保持不变）"区分开：只有传了才写入 update_data。
         if agent_id is not ...:
             update_data["agent_id"] = agent_id
         if model_id is not ...:
@@ -293,12 +313,15 @@ class ChannelStorage:
         """Build a response from an already loaded config."""
 
         # Get sensitive field names from metadata
+        # 敏感字段 = 通用集合 SENSITIVE_FIELDS 叠加该渠道元数据中标注 sensitive 的字段，
+        # 二者合并后统一做脱敏处理。
         sensitive_fields = set(SENSITIVE_FIELDS)
         if metadata:
             for field in metadata.get("config_fields", []):
                 if field.get("sensitive"):
                     sensitive_fields.add(field["name"])
 
+        # 生成脱敏后的配置（敏感值替换为 ***），避免明文回传前端。
         masked_config = self._mask_config(config, sensitive_fields)
 
         return ChannelConfigResponse(
@@ -349,6 +372,7 @@ class ChannelStorage:
         await self.ensure_indexes_if_needed()
         collection = self._get_collection()
         configs = []
+        # 限制返回条数（CHANNEL_CONFIG_LIST_LIMIT）防止极端情况下拉取过多文档。
         async for doc in collection.find({"user_id": user_id}).limit(CHANNEL_CONFIG_LIST_LIMIT):
             configs.append(await self._doc_to_config(doc))
         return configs
@@ -393,6 +417,7 @@ class ChannelStorage:
         """Iterate enabled configurations for a channel type without materializing all rows."""
         await self.ensure_indexes_if_needed()
         collection = self._get_collection()
+        # 用游标逐条产出，避免一次性把所有启用配置读进内存（供渠道管理器启动时遍历）。
         cursor = collection.find({"channel_type": channel_type.value, "enabled": True}).limit(
             CHANNEL_CONFIG_LIST_LIMIT
         )
@@ -403,6 +428,8 @@ class ChannelStorage:
         """Encrypt sensitive fields in config"""
         encrypted = {}
         for key, value in config.items():
+            # 仅对敏感且为非空字符串的字段加密；加密是阻塞型 CPU 操作，
+            # 放到线程池（run_blocking_io）执行以免阻塞事件循环。
             if key in SENSITIVE_FIELDS and isinstance(value, str) and value:
                 encrypted[key] = await run_blocking_io(encrypt_value, {"value": value})
             else:
@@ -418,6 +445,7 @@ class ChannelStorage:
             if key in SENSITIVE_FIELDS and value:
                 if isinstance(value, dict):
                     # Encrypted value
+                    # 密文以 dict 形式存储；解密同样是阻塞操作，交给线程池执行。
                     try:
                         dec = await run_blocking_io(decrypt_value, value)
                         if isinstance(dec, dict):
@@ -425,6 +453,8 @@ class ChannelStorage:
                         else:
                             decrypted[key] = dec
                     except DecryptionError as e:
+                        # 解密失败通常意味着加密密钥已更换：不报错中断，
+                        # 而是置 None 标记需重新填写，并提示用户重新保存配置。
                         logger.warning(
                             f"Failed to decrypt field '{key}': {e}. "
                             "Config may have been encrypted with a different key. "
@@ -432,6 +462,7 @@ class ChannelStorage:
                         )
                         decrypted[key] = None  # Mark as needing re-entry
                 else:
+                    # 非 dict 说明是历史明文数据，原样保留。
                     decrypted[key] = value
             else:
                 decrypted[key] = value
@@ -441,6 +472,7 @@ class ChannelStorage:
         """Mask sensitive fields in config for display"""
         masked = {}
         for key, value in config.items():
+            # 敏感字段：有值统一显示为 ***，无值显示空串；非敏感字段原样透出。
             if key in sensitive_fields:
                 if value:
                     masked[key] = "***"
@@ -452,6 +484,8 @@ class ChannelStorage:
 
     async def _doc_to_config(self, doc: dict) -> dict[str, Any]:
         """Convert MongoDB document to config dict"""
+        # 将存储文档转为扁平配置字典：先解密 config 子文档，
+        # 再把解密结果与顶层元字段（名称/绑定的 agent、model、project 等）合并展开。
         config = doc.get("config", {})
         decrypted_config = await self._decrypt_config(config)
 
@@ -473,4 +507,5 @@ class ChannelStorage:
 
     async def close(self):
         """Close MongoDB connection (only clears local refs, does not close global client)"""
+        # 只置空本地句柄；全局 Mongo 客户端由外部统一管理，不在此关闭。
         self._collection = None

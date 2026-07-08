@@ -28,9 +28,12 @@ async def _process_events(
     show_tools: bool,
 ) -> None:
     """处理事件流并收集响应"""
+    # 从会话的双写器读取 agent 运行事件流（经 Redis 转发），逐条驱动收集器：
+    # 文本 chunk 走流式卡片、工具事件记录、审批事件走 HITL 卡片、文件事件上传发送。
     from src.infra.session.dual_writer import get_dual_writer
 
     dual_writer = get_dual_writer()
+    # 缓存本轮已出现的待审批项，便于收到工具结果时回填审批上下文以更新卡片。
     pending_approvals: dict[str, dict[str, Any]] = {}
 
     try:
@@ -38,16 +41,19 @@ async def _process_events(
             event_type = event.get("event_type", "")
             data = event.get("data", {})
 
+            # 文本增量：追加到流式卡片（打字机效果）。
             if event_type == EVENT_MESSAGE_CHUNK:
                 chunk = data.get("content", "")
                 if chunk:
                     await collector.append_stream_chunk(chunk)
 
+            # 工具开始：仅在需要展示工具时记录工具名。
             elif event_type == EVENT_TOOL_START and show_tools:
                 tool_name = data.get("tool", "")
                 if tool_name:
                     collector.add_tool(tool_name)
 
+            # 需要人工审批：去重后暂存审批数据，先在卡片上显示"等待确认"，再发出审批卡片。
             elif event_type == EVENT_APPROVAL_REQUIRED:
                 approval_id = str(data.get("id") or "")
                 logger.info(
@@ -55,6 +61,7 @@ async def _process_events(
                     approval_id,
                 )
                 if approval_id:
+                    # 同一审批已发过卡片则跳过（可能收到重复事件）。
                     if collector.has_sent_approval_card(approval_id):
                         logger.info(
                             "[HITL] approval_id=%s Skip duplicate approval_required event",
@@ -71,6 +78,7 @@ async def _process_events(
                         "[HITL] approval_id=%s Failed to send approval card", approval_id
                     )
 
+            # 工具结果：可能携带审批终态，也可能是 reveal_file/媒体文件需要发送。
             elif event_type == EVENT_TOOL_RESULT:
                 tool_name = data.get("tool", "")
                 logger.debug(f"[Feishu] tool:result event: tool={tool_name}")
@@ -82,6 +90,9 @@ async def _process_events(
                     # "pending" here means the tool forgot to carry its outcome.
                     # Never revert an already-handled card to pending — refresh
                     # the authoritative status from the approval record instead.
+                    # 工具结果一定在审批被处理之后才产生，因此这里若还是 pending，
+                    # 说明结果里漏带了终态；此时改为从审批记录读取权威状态，
+                    # 绝不把已处理的卡片回退成 pending。
                     if approval_status == "pending":
                         approval_status = await _get_existing_approval_status(result_approval_id)
                     logger.info(
@@ -89,6 +100,7 @@ async def _process_events(
                         result_approval_id,
                         approval_status,
                     )
+                    # 清除"等待确认"提示，并把审批卡片刷新为终态（通过/拒绝等）。
                     await collector.clear_waiting_for_approval()
                     approval = pending_approvals.get(result_approval_id) or {
                         "id": result_approval_id,
@@ -101,6 +113,7 @@ async def _process_events(
                         status=approval_status,
                     )
 
+                # reveal_file 工具：结果里带 key/name 的文件，加入待发送并立即上传发送。
                 if tool_name == "reveal_file":
                     logger.info(f"[Feishu] reveal_file result type={type(result).__name__}")
                     if isinstance(result, str) and result:
@@ -126,6 +139,7 @@ async def _process_events(
                                 f"[Feishu] Added file to reveal (dict): {result.get('name')}"
                             )
 
+                # 其它工具产出的媒体文件（图片/附件等）也一并抽取并发送。
                 for file_info in _extract_tool_media_files(result):
                     collector.add_file_to_reveal(file_info)
                     await collector.upload_and_send_files()
@@ -134,6 +148,7 @@ async def _process_events(
                         file_info.get("name"),
                     )
 
+            # 运行结束/完成/出错：跳出事件循环。
             elif event_type in ("done", "complete", "error"):
                 break
 

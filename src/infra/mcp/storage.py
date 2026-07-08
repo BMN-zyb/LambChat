@@ -3,6 +3,20 @@ MCP server storage using MongoDB
 
 Supports both system-level and user-level MCP server configurations.
 """
+# 中文补充说明：MCP 配置存储是全仓库结构最复杂的存储层之一，横跨五个 MongoDB 集合：
+#   1）system_mcp_servers      —— 管理员配置的系统级 MCP 服务器（对所有用户可见，
+#                                  可按角色 allowed_roles / role_quotas 限制访问）；
+#   2）user_mcp_servers        —— 用户自己配置的私有 MCP 服务器（如沙箱内 stdio 服务）；
+#   3）user_mcp_preferences    —— 用户对"系统服务器"的个人开关偏好
+#                                  （允许用户在不动系统配置的前提下为自己关闭某个系统服务器）；
+#   4）user_mcp_tool_preferences —— 用户对具体某个工具（server:tool 粒度）的开关偏好；
+#   5）mcp_tool_policies       —— 管理员对具体某个工具的策略（是否禁用/允许角色/配额/
+#                                  是否内联展示），粒度比系统服务器级别更细。
+# 一个工具最终是否可用，是系统服务器开关 + 系统级工具禁用 + 管理员工具策略 + 用户
+# 服务器开关 + 用户工具偏好共同叠加的结果，详见 discover_server_tools 中的分层判断。
+# 另一个贯穿全文件的难点是"缓存失效范围"：系统级配置变更影响所有用户，必须调用
+# _invalidate_all_cache；用户级配置变更只影响该用户自己，调用 _invalidate_user_cache
+# 即可——调错范围会导致其它用户看到过期的 MCP 工具列表，或者产生不必要的全量失效。
 
 import copy
 import inspect
@@ -55,6 +69,7 @@ class MCPStorage(StorageOperations):
 
     def __init__(self):
         self._client: Optional["AsyncIOMotorClient"] = None
+        # 五个集合的懒加载引用，分别对应模块文档中列出的五个集合
         self._system_collection: Optional["AsyncIOMotorCollection"] = None
         self._user_collection: Optional["AsyncIOMotorCollection"] = None
         self._preferences_collection: Optional["AsyncIOMotorCollection"] = None
@@ -63,6 +78,8 @@ class MCPStorage(StorageOperations):
 
     async def _invalidate_user_cache(self, user_id: str) -> None:
         """Invalidate MCP tools cache for a specific user"""
+        # 中文：用户级配置变更（如新增/修改自己的 MCP 服务器、调整个人偏好）
+        # 只需要失效该用户自己的工具缓存
         from src.infra.tool.mcp_global import invalidate_global_cache
 
         await invalidate_global_cache(user_id)
@@ -70,12 +87,16 @@ class MCPStorage(StorageOperations):
 
     async def _invalidate_all_cache(self) -> None:
         """Invalidate MCP tools cache for all users (system config changed)"""
+        # 中文：系统级配置变更（管理员增删改系统服务器/工具策略）会影响所有用户
+        # 看到的工具集合，必须做全量缓存失效
         from src.infra.tool.mcp_global import invalidate_all_global_cache
 
         count = await invalidate_all_global_cache()
         logger.info(f"[MCP Storage] Invalidated all global cache, {count} entries")
 
     async def _call_optional_async(self, value: Any) -> Any:
+        # 中文：兼容调用方传入的值本身就是协程/awaitable，或者已经是同步计算好的结果——
+        # 统一 await 处理，避免上层代码要对两种情况分别写判断
         if inspect.isawaitable(value):
             return await value
         return value
@@ -190,6 +211,8 @@ class MCPStorage(StorageOperations):
             "updated_by": admin_user_id,
         }
 
+        # 中文：只更新调用方显式传入（非 None）的字段，实现部分更新；
+        # headers 若非空需要重新加密（因为可能包含 Authorization 等敏感头）
         if updates.transport is not None:
             update_data["transport"] = updates.transport.value
         if updates.enabled is not None:
@@ -235,6 +258,9 @@ class MCPStorage(StorageOperations):
     # ==========================================
     # User MCP Servers
     # ==========================================
+    # 中文：与上面 System MCP Servers 的 CRUD 结构基本对称，
+    # 区别在于：查询/更新条件都要带上 user_id 做数据隔离，
+    # 且缓存失效范围只需 _invalidate_user_cache（只影响该用户自己）
 
     async def list_user_servers(self, user_id: str) -> list[UserMCPServer]:
         """List all MCP servers for a specific user"""
@@ -330,6 +356,9 @@ class MCPStorage(StorageOperations):
     # ==========================================
     # User Preferences (for system servers)
     # ==========================================
+    # 中文：这是"用户对系统服务器的个人开关"——系统服务器默认对所有有权限的用户可见，
+    # 但用户可以在不影响他人的情况下为自己关闭某个系统服务器；
+    # 未显式设置过偏好的服务器视为默认启用（enabled=True）
 
     async def _get_user_preferences(self, user_id: str) -> dict[str, bool]:
         """Get user's enabled preferences for system servers"""
@@ -343,6 +372,7 @@ class MCPStorage(StorageOperations):
     async def _set_user_preference(self, server_name: str, user_id: str, enabled: bool) -> None:
         """Set user's preference for a system server"""
         collection = self._get_preferences_collection()
+        # upsert=True：用户第一次设置某服务器偏好时自动创建记录，无需预先初始化
         await collection.update_one(
             {"server_name": server_name, "user_id": user_id},
             {
@@ -363,6 +393,12 @@ class MCPStorage(StorageOperations):
     # ==========================================
     # Tool Discovery & Tool-level Preferences
     # ==========================================
+    # 中文：本节是"分层权限判断"的核心——一个 MCP 工具最终是否可调用，
+    # 由系统服务器级禁用（server_disabled_tools）、管理员工具策略
+    # （tool_policies，可指定 disabled/allowed_roles/role_quotas）、
+    # 用户个人工具偏好（user_disabled_tool_names）共同叠加决定，
+    # discover_server_tools 会把这几层信息汇总标注在返回的工具信息里，
+    # 供前端管理界面/调用方判断某个工具当前处于什么状态。
 
     async def discover_server_tools(
         self,
@@ -380,6 +416,8 @@ class MCPStorage(StorageOperations):
         manager = None
         try:
             # Find the server config (user or system)
+            # 中文：优先查用户自己名下的同名服务器，找不到再查系统服务器；
+            # 系统服务器还需要额外做角色访问校验（allowed_roles）
             server: UserMCPServer | SystemMCPServer | None = await self.get_user_server(
                 server_name, user_id
             )
@@ -407,6 +445,10 @@ class MCPStorage(StorageOperations):
             user_disabled_tool_names = await self.get_disabled_tool_names(user_id)
             tool_policies = await self.list_tool_policies(server_name)
 
+            # 中文：这里绕开正常的 MCPClientManager.initialize()（会从文件/数据库
+            # 加载全部已配置服务器），改用 use_database=False + 直接调用内部方法
+            # _initialize_with_config，只连接这一个服务器，避免为了"探测工具列表"
+            # 这一次性操作而拉起全量的 MCP 连接池
             from src.infra.tool.mcp_client import MCPClientManager
 
             manager = MCPClientManager(use_database=False)
@@ -438,6 +480,8 @@ class MCPStorage(StorageOperations):
                 is_user_disabled = qualified in user_disabled_tool_names
                 policy = tool_policies.get(tool_name)
 
+                # 中文：如果管理员为该工具配置了显式策略（policy），policy.disabled
+                # 优先于服务器级 disabled_tools 集合；否则退回到 is_system_disabled
                 tool_info: dict[str, Any] = {
                     "name": tool_name,
                     "description": getattr(tool, "description", ""),
@@ -450,6 +494,9 @@ class MCPStorage(StorageOperations):
                     "inline_exposure": bool(policy.inline_exposure) if policy else False,
                 }
                 # Extract parameters if possible
+                # 中文：不同 MCP 服务器返回的 args_schema 形态不完全统一
+                # （可能是 dict，也可能是 Pydantic 模型），这里尽力而为地解析，
+                # 解析失败也不影响工具本身被发现，只是参数列表留空
                 try:
                     if hasattr(tool, "args_schema") and tool.args_schema:
                         if isinstance(tool.args_schema, dict):
@@ -481,11 +528,14 @@ class MCPStorage(StorageOperations):
             logger.error(f"[MCP] Failed to discover tools for server '{server_name}': {e}")
             return [], str(e)
         finally:
+            # 中文：无论成功与否都要关闭本次为了探测而临时创建的连接，避免连接泄漏
             if manager:
                 await manager.close()
 
     def _server_to_config_dict_static(self, server) -> dict[str, Any]:
         """Convert a server object to config dict (static method style)"""
+        # 中文：只挑选连接一个 MCP 服务器所需的字段，拼成
+        # langchain-mcp-adapters 期望的 config 结构（见 discover_server_tools 用法）
         result = {"transport": server.transport.value}
         if server.url:
             result["url"] = server.url
@@ -504,6 +554,8 @@ class MCPStorage(StorageOperations):
         Returns a dict mapping fully qualified tool name (server_name:tool_name or tool_name)
         to enabled status. Only disabled tools are stored, so missing keys mean enabled.
         """
+        # 中文：这是一种"稀疏存储"设计——数据库里只保存被用户关闭过的工具记录，
+        # 没有记录的工具默认视为启用，节省存储且省去了"新工具默认要不要写一条记录"的麻烦
         collection = self._get_tool_preferences_collection()
         preferences: dict[str, bool] = {}
         async for doc in collection.find({"user_id": user_id}).limit(MCP_PREFERENCE_LIST_LIMIT):
@@ -527,6 +579,7 @@ class MCPStorage(StorageOperations):
         """
         collection = self._get_tool_preferences_collection()
         # Use a composite key: server_name:tool_name for uniqueness
+        # 中文：同名工具可能出现在不同服务器下，必须用 "server:tool" 复合键才能唯一定位
         qualified_name = f"{server_name}:{tool_name}"
         await collection.update_one(
             {"tool_name": qualified_name, "user_id": user_id},
@@ -561,6 +614,8 @@ class MCPStorage(StorageOperations):
         updated_by: str | None = None,
     ) -> MCPToolPolicy:
         """Create or update an admin-managed policy for one MCP tool."""
+        # 中文：与 set_tool_preference（用户个人偏好）不同，这里是管理员维度的策略，
+        # 影响该工具对所有用户的可用性/角色限制/配额，因此变更后要做全量缓存失效
         collection = self._get_tool_policies_collection()
         existing = await collection.find_one({"server_name": server_name, "tool_name": tool_name})
         now = utc_now_iso()
@@ -624,6 +679,8 @@ class MCPStorage(StorageOperations):
         if not server_names:
             return {}
 
+        # 中文：用一次 $in 查询批量取多个服务器的策略，避免对每个服务器单独查一次
+        # （典型的 N+1 查询优化）
         collection = self._get_tool_policies_collection()
         policies_by_server: dict[str, dict[str, MCPToolPolicy]] = {}
         async for doc in collection.find({"server_name": {"$in": server_names}}).limit(
@@ -646,6 +703,8 @@ class MCPStorage(StorageOperations):
             tool_name: The tool name (without server prefix)
             disabled: Whether the tool is disabled at system level
         """
+        # 中文：这是比"整台服务器启停"更细粒度的控制——只禁用系统服务器下的
+        # 某一个具体工具，禁用列表直接存在该服务器文档的 disabled_tools 字段里
         collection = self._get_system_collection()
         server_doc = await collection.find_one({"name": server_name})
         if not server_doc:
@@ -699,6 +758,8 @@ class MCPStorage(StorageOperations):
             user_id: The server owner's user ID
             disabled: Whether the tool is disabled
         """
+        # 中文：与 set_system_tool_disabled 逻辑对称，但作用在用户自己的服务器上，
+        # 因此只需失效该用户的缓存
         collection = self._get_user_collection()
         server_doc = await collection.find_one({"name": server_name, "user_id": user_id})
         if not server_doc:
@@ -742,6 +803,12 @@ class MCPStorage(StorageOperations):
     # ==========================================
     # Document Conversion
     # ==========================================
+    # 中文：本节负责 MongoDB 文档 <-> Pydantic 模型 之间的双向转换，
+    # 并统一处理两个横切关切：
+    #   1）敏感字段加解密（headers/env 中可能包含密钥，落库前加密、读出后解密）；
+    #   2）datetime 归一化（MongoDB 驱动返回的是 datetime 对象，对外统一转成 ISO 字符串）。
+    # 加解密函数本身是同步/CPU 密集型的，这里通过 run_blocking_io 包一层异步接口，
+    # 避免阻塞事件循环。
 
     async def _decrypt_server_secrets_async(self, doc: dict[str, Any]) -> dict[str, Any]:
         return await run_blocking_io(decrypt_server_secrets, doc)
@@ -879,10 +946,14 @@ class MCPStorage(StorageOperations):
 
         if hide_sensitive:
             # Non-admin viewing a system server: strip all connection details
+            # 中文：普通用户查看系统服务器时，连"脱敏后的"字段也不展示，
+            # 直接整体移除这些字段——因为普通用户本来就不需要、也不应该看到连接细节
             for field in ("url", "headers", "command", "env_keys", "env"):
                 doc_copy.pop(field, None)
         else:
             # Mask sensitive fields (after decrypt, mask for display)
+            # 中文：管理员/服务器所有者可以看到"部分信息"，但仍要对 Authorization
+            # 等敏感 header/env 做打码，避免明文密钥出现在响应里
             doc_copy = self._mask_sensitive_fields(doc_copy)
 
         # Convert datetime to ISO string if needed
@@ -921,6 +992,8 @@ class MCPStorage(StorageOperations):
     ) -> dict[str, Any]:
         """Convert MongoDB document to config dict format (for langchain-mcp-adapters)"""
         # 先解密敏感字段
+        # 中文：这个转换结果是要直接喂给 langchain-mcp-adapters 用来真正建立连接的，
+        # 所以必须是解密后的明文（不同于 _doc_to_response 给前端展示时需要脱敏）
         if not already_decrypted:
             doc = decrypt_server_secrets(doc)
 
@@ -944,6 +1017,7 @@ class MCPStorage(StorageOperations):
     def _mask_sensitive_fields(self, doc: dict[str, Any]) -> dict[str, Any]:
         """Remove sensitive fields from document (not shown in edit UI)"""
         # Remove sensitive headers
+        # 中文：按已知的敏感 header 名称精确匹配移除（大小写不敏感）
         headers = doc.get("headers")
         if headers and isinstance(headers, dict):
             keys_to_remove = [
@@ -955,6 +1029,8 @@ class MCPStorage(StorageOperations):
                 del headers[key]
 
         # Remove sensitive env variables
+        # 中文：env 变量名无法枚举穷尽，改用 SENSITIVE_ENV_PATTERNS 关键词做
+        # 子串匹配（如包含 "SECRET"/"KEY"/"TOKEN" 等），尽力而为地过滤潜在敏感值
         env = doc.get("env")
         if env and isinstance(env, dict):
             keys_to_remove = []
@@ -971,5 +1047,8 @@ class MCPStorage(StorageOperations):
 
     async def close(self):
         """Close MongoDB connection (only clears local refs, does not close global client)"""
+        # 中文：MongoDB 客户端本身是进程级共享的连接池单例（get_mongo_client），
+        # 这里只清空本实例缓存的集合引用，不会真正断开底层连接，
+        # 下次访问 collection 属性时会重新从全局 client 里取
         self._system_collection = None
         self._user_collection = None

@@ -19,6 +19,13 @@ Transfer File / Transfer Path 工具
 - 文件大小限制（单文件 1MB，批量 10MB）
 - 目录深度/文件数限制（深度 5 层，1000 文件）
 """
+# 中文补充说明：本模块的核心难点在于"跨 backend 抽象"——沙箱 backend、
+# 技能存储 backend、记忆存储 backend 的底层实现完全不同（有的是文件系统，
+# 有的是 MongoDB），却要用同一套 transfer_file/transfer_path 逻辑操作，
+# 因此大量使用 hasattr() 探测 + 多种方法名回退（aupload_files/upload_files、
+# aget_file_size/get_file_size/_file_size 等）来兼容不同 backend 的接口形态。
+# 具体的源/目标 backend 由 CompositeBackend 依据路径前缀自动路由决定，
+# 本模块不关心具体路由到了哪个 backend，只通过统一接口读写。
 
 import inspect
 import json
@@ -33,6 +40,9 @@ from src.infra.logging import get_logger
 from src.infra.tool.backend_utils import get_backend_from_runtime
 
 # 二进制文件扩展名黑名单
+# 中文：采用黑名单而非白名单——本工具面向"任意文本文件"（代码、配置、文档等
+# 扩展名多种多样，无法枚举），因此改为枚举明确的二进制类型加以排除，
+# 配合 _is_text_content 的 null 字节检测做双重兜底
 BINARY_EXTENSIONS = frozenset(
     {
         # 图片
@@ -115,6 +125,7 @@ logger = get_logger(__name__)
 
 
 async def _json_dumps_result(data: dict[str, Any]) -> str:
+    # 统一以 JSON 字符串形式返回工具结果给 LLM
     return await run_blocking_io(json.dumps, data, ensure_ascii=False)
 
 
@@ -204,6 +215,9 @@ def _append_transfer_result(
     result: dict[str, Any],
     omitted_count: int,
 ) -> int:
+    # 中文：批量传输时逐文件明细可能非常多，超过 TRANSFER_PATH_RESULT_FILE_LIMIT
+    # 后不再追加进 results（避免把 LLM 消息体撑爆），只累加 omitted_count 计数，
+    # 让调用方能在汇总里看到"还省略了多少条明细"
     if len(results) < TRANSFER_PATH_RESULT_FILE_LIMIT:
         results.append(result)
         return omitted_count
@@ -211,6 +225,8 @@ def _append_transfer_result(
 
 
 def _entry_path(entry: Any) -> str | None:
+    # 中文：ls 返回的 entry 可能是 dict，也可能是某个 SDK 的对象实例，
+    # 这里统一按两种形态尝试取 path 字段，兼容不同 backend 的返回类型
     if isinstance(entry, dict):
         path = entry.get("path")
     else:
@@ -219,12 +235,14 @@ def _entry_path(entry: Any) -> str | None:
 
 
 def _entry_is_dir(entry: Any) -> bool:
+    # 同 _entry_path，兼容 dict / 对象两种 entry 形态
     if isinstance(entry, dict):
         return bool(entry.get("is_dir"))
     return bool(getattr(entry, "is_dir", False))
 
 
 def _entry_size(entry: Any) -> int | None:
+    # 同上，且对无法转换为 int 的脏数据做兜底，返回 None 表示"大小未知"
     value = entry.get("size") if isinstance(entry, dict) else getattr(entry, "size", None)
     if value is None:
         return None
@@ -236,6 +254,10 @@ def _entry_size(entry: Any) -> int | None:
 
 async def _get_backend_file_size(backend: Any, file_path: str) -> int | None:
     """Best-effort size preflight across sandbox/store backends."""
+    # 中文：不同 backend 暴露的"取文件大小"接口名称不统一，
+    # 依次尝试 aget_file_size（异步）、get_file_size（同步，需线程池执行）、
+    # _file_size（内部方法兜底）；任意一种失败都只记录 debug 日志、继续尝试下一种，
+    # 全部失败则返回 None（调用方会按"大小未知"处理，不会因此中断传输）
     async_method = getattr(backend, "aget_file_size", None)
     if callable(async_method):
         try:
@@ -267,6 +289,9 @@ async def _get_backend_file_size(backend: Any, file_path: str) -> int | None:
 
 async def _download_from_backend(backend: Any, file_path: str) -> Optional[bytes]:
     """从 backend 下载文件内容"""
+    # 中文：优先尝试异步接口 adownload_files，不存在或调用失败再尝试同步接口
+    # download_files（通过线程池执行，避免阻塞事件循环）；两者都失败/都没有
+    # 则返回 None，交由调用方判定为"文件不存在或为空"
     if hasattr(backend, "adownload_files"):
         try:
             responses = await backend.adownload_files([file_path])
@@ -296,6 +321,9 @@ async def _download_from_backend(backend: Any, file_path: str) -> Optional[bytes
 
 async def _upload_to_backend(backend: Any, target_path: str, content: bytes) -> Optional[str]:
     """上传文件到 backend，返回错误信息或 None"""
+    # 中文：与下载逻辑对称，优先异步 aupload_files，回退同步 upload_files；
+    # 返回值语义是"错误信息字符串"或 None（表示成功），而不是布尔值，
+    # 便于调用方直接把具体错误原因回传给 LLM
     if hasattr(backend, "aupload_files"):
         try:
             responses = await backend.aupload_files([(target_path, content)])
@@ -365,6 +393,8 @@ async def transfer_file(
 
     # 2. 下载
     filename = source_path.split("/")[-1]
+    # 先做一次"预检查"：如果 backend 能提前告知文件大小，就在真正下载前拦截超大文件，
+    # 避免浪费带宽/内存去下载一个注定会被拒绝的文件
     known_size = await _get_backend_file_size(backend, source_path)
     size_err = _check_known_file_size(known_size, filename)
     if size_err:
@@ -387,6 +417,8 @@ async def transfer_file(
         )
 
     # 3. 文件类型 + 大小校验
+    # 拿到真实内容后再做一次完整校验（二进制扩展名/null 字节/真实大小），
+    # 因为预检查阶段的 known_size 可能不可用或不准确
     validation_err = _validate_text_file(filename, content)
     if validation_err:
         return await _json_dumps_result(
@@ -452,11 +484,14 @@ async def _list_dir_files(
             return
         if depth > MAX_RECURSION_DEPTH:
             return
+        # 中文：用 visited_dirs 记录已访问过的目录，防止软链接等造成的循环引用
+        # 导致无限递归
         if current_dir in visited_dirs:
             return
         visited_dirs.add(current_dir)
 
         try:
+            # 同样兼容异步/同步两种 ls 接口
             if hasattr(backend, "als"):
                 result = await backend.als(current_dir)
                 entries = result.entries or []
@@ -476,6 +511,7 @@ async def _list_dir_files(
             if path is None:
                 continue
             if _entry_is_dir(entry):
+                # 子目录递归遍历，深度 +1
                 await _recurse(path, depth + 1)
             else:
                 all_files.append((path, _entry_size(entry)))
@@ -540,6 +576,9 @@ async def transfer_path(
         target_prefix += "/"
 
     # 防止同源传输（不能从 skills 传到 skills）
+    # 中文：/skills/ 和 /memories/ 各自路由到同一个 backend 实例，
+    # 若源和目标都落在同一个前缀下，等价于"从同一个存储读出再写回自己"，
+    # 没有实际意义且容易误操作覆盖数据，因此直接拒绝
     if source_dir.startswith("/skills/") and target_prefix.startswith("/skills/"):
         return await _json_dumps_result(
             {
@@ -559,6 +598,9 @@ async def transfer_path(
     dir_name = source_dir.rstrip("/").rsplit("/", 1)[-1]
 
     # 清洗 skill name（当目标是 /skills/ 时）
+    # 中文：目标是技能存储时，目录名会被当作 skill 名称，需要用统一的
+    # sanitize_skill_name 规则清洗（去除非法字符等），保证与其它创建 skill
+    # 的入口（如技能编辑器）遵循同一套命名规范
     if target_prefix == "/skills/":
         from src.infra.skill.parser import sanitize_skill_name
 
@@ -604,6 +646,8 @@ async def transfer_path(
         filename = file_path.rsplit("/", 1)[-1]
 
         # 计算相对路径，映射到目标
+        # 中文：把 source_dir 前缀从完整路径中剥离，只保留相对于源目录的部分，
+        # 再拼到 target_base 下，这样可以保留原有的多级子目录结构
         rel_path = file_path
         source_dir_stripped = source_dir.rstrip("/")
         if file_path.startswith(source_dir_stripped):
@@ -620,6 +664,8 @@ async def transfer_path(
             skipped += 1
             continue
         if known_size is not None and total_size + known_size > MAX_BATCH_SIZE:
+            # 中文：这里用"预知大小"提前拦截，避免为了判断而白白下载一个必然会超限的文件；
+            # 下面下载完成后还会用真实字节数再做一次兜底检查（known_size 可能拿不到或不准）
             files_omitted = _append_transfer_result(
                 results,
                 {

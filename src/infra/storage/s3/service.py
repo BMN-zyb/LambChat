@@ -44,9 +44,12 @@ class S3StorageService:
     Supports multiple providers through configuration.
     """
 
+    # 进程级单例句柄，通过 get_instance() 访问；与模块级的 _storage_service 单例配合使用
+    # （get_instance 保证"只有一个类级别实例"，模块级函数则负责该实例的配置初始化/替换/关闭）。
     _instance: Optional["S3StorageService"] = None
 
     def __init__(self, config: Optional[S3Config] = None):
+        # 具体后端延迟创建（首次调用 _get_backend 时才实例化），避免构造阶段就发起网络/文件系统操作。
         self._backend: Optional[S3StorageBackend] = None
         if config:
             self._config = config
@@ -62,6 +65,7 @@ class S3StorageService:
 
     def configure(self, config: S3Config) -> None:
         """Configure the storage service"""
+        # 切换配置后必须清空已缓存的后端实例，下次访问时会按新配置重新选择/创建后端。
         self._config = config
         self._backend = None
 
@@ -81,11 +85,15 @@ class S3StorageService:
 
         Retries on network/timeout errors; does NOT retry on validation errors.
         """
+        # 这是本文件的一个难点：需要区分"瞬时性错误"（网络抖动、超时、对象存储 SDK 报出的
+        # 5xx/连接类错误）与"非瞬时性错误"（鉴权失败、参数校验错误等），只对前者做指数退避重试，
+        # 后者应立即向上抛出，避免无意义的重试拖慢失败反馈。
         last_exc: Exception | None = None
         for attempt in range(1, max_retries + 1):
             try:
                 return await func()
             except (ConnectionError, TimeoutError, OSError) as e:
+                # 标准库层面的网络异常，直接判定为可重试。
                 last_exc = e
                 if attempt < max_retries:
                     backoff = UPLOAD_RETRY_BACKOFF_BASE**attempt + random.uniform(
@@ -100,6 +108,8 @@ class S3StorageService:
                     logger.error(f"Upload {label} failed after {max_retries} attempts: {e}")
             except Exception as e:
                 # Non-transient errors (e.g. auth, validation) — raise immediately
+                # 对于第三方 SDK（阿里云 oss2 / MinIO）抛出的异常，无法直接按异常类型判断是否瞬时，
+                # 只能通过检查异常所属模块 + 错误信息中的关键字（连接、超时、5xx 等）来启发式判断。
                 if "oss2" in type(e).__module__ or "minio" in type(e).__module__:
                     # Check if it's a server/network error from the SDK
                     err_lower = str(e).lower()
@@ -130,12 +140,14 @@ class S3StorageService:
                             await asyncio.sleep(backoff)
                             continue
                         logger.error(f"Upload {label} failed after {max_retries} attempts: {e}")
+                # 命中不了"疑似瞬时错误"特征的异常（包括鉴权/校验错误），直接重新抛出，不再重试。
                 raise
 
         raise last_exc  # type: ignore[misc]
 
     def _get_backend(self) -> S3StorageBackend:
         """Get or create the storage backend"""
+        # 按配置中的 provider 惰性选择并创建具体后端实现；创建后缓存复用，直到 configure() 重新配置。
         if self._backend is None:
             if self._config.provider == S3Provider.LOCAL:
                 self._backend = LocalStorageBackend(self._config)
@@ -145,12 +157,15 @@ class S3StorageService:
                         raise ImportError
                     self._backend = AliyunOssBackend(self._config)
                 except ImportError:
+                    # 阿里云 SDK（oss2）未安装时优雅降级：用兼容 S3 协议的 MinIO 客户端连接 OSS
+                    # （阿里云 OSS 对 S3 协议有一定兼容性，但可能存在细节差异，因此仅作为兜底方案）。
                     logger.warning(
                         "Aliyun OSS SDK not available, falling back to minio "
                         "(may have compatibility issues)"
                     )
                     self._backend = MinioS3Backend(self._config)
             else:
+                # AWS/腾讯云/MinIO/自定义兼容存储统一走 MinIO 客户端（标准 S3 协议实现）。
                 self._backend = MinioS3Backend(self._config)
 
         return self._backend
@@ -167,6 +182,8 @@ class S3StorageService:
     ) -> UploadResult:
         """Upload a file to storage with retry on transient failures."""
         # Check file size via current position
+        # 通过 seek 到文件末尾再计算与起始位置的差值来获取文件大小，避免依赖调用方额外传入 size 参数；
+        # 检查完毕后立即把指针复原到起始位置，保证后续真正上传时能从正确位置开始读取。
         start_pos = await run_blocking_io(file.tell)
         if not skip_size_limit:
             await run_blocking_io(file.seek, 0, 2)
@@ -179,6 +196,7 @@ class S3StorageService:
                     f"internal upload limit ({max_mb:.0f}MB)"
                 )
 
+        # 生成带时间戳 + 随机后缀的唯一存储路径，既能按时间排序浏览，又能避免同名文件互相覆盖。
         timestamp = utc_now().strftime("%Y%m%d_%H%M%S")
         safe_filename = self._sanitize_filename(filename)
         unique_suffix = uuid.uuid4().hex[:8]
@@ -187,6 +205,7 @@ class S3StorageService:
         backend = self._get_backend()
 
         async def _upload_attempt() -> UploadResult:
+            # 每次重试前都要把文件指针重新定位到起始位置，否则重试时会从上次读到的位置继续读，导致数据缺失。
             await run_blocking_io(file.seek, start_pos)
             return await backend.upload(file, key, content_type, metadata)
 
@@ -218,6 +237,8 @@ class S3StorageService:
         unique_suffix = uuid.uuid4().hex[:8]
         key = f"{folder}/{timestamp}_{unique_suffix}_{safe_filename}"
 
+        # 统一委托给 upload_stream_to_key：把 bytes 包装成内存流对象，复用同一套上传 + 重试 + 签名逻辑，
+        # skip_size_limit=True 是因为上面已经检查过一次，避免重复校验。
         return await self.upload_stream_to_key(
             io.BytesIO(data),
             key,
@@ -236,6 +257,8 @@ class S3StorageService:
         skip_size_limit: bool = False,
     ) -> UploadResult:
         """Upload bytes to a specific key (caller controls the full key)."""
+        # 与 upload_bytes 的区别：这里 key 完全由调用方指定（不做时间戳/随机后缀拼接），
+        # 适用于需要精确控制存储路径的场景（如按固定规则覆盖写入）。
         if not skip_size_limit and len(data) > self._config.internal_max_upload_size:
             max_mb = self._config.internal_max_upload_size / (1024 * 1024)
             raise ValueError(
@@ -261,6 +284,8 @@ class S3StorageService:
         skip_size_limit: bool = False,
     ) -> UploadResult:
         """Upload a file-like object to a specific key without materializing it as bytes."""
+        # 本方法是各种 upload_* 便捷方法的最终落地实现：直接操作文件流而不强制转成 bytes，
+        # 对大文件更省内存。
         start_pos = await run_blocking_io(file.tell)
         if not skip_size_limit:
             await run_blocking_io(file.seek, 0, 2)
@@ -284,6 +309,8 @@ class S3StorageService:
             label=f"stream://{key}",
         )
 
+        # 私有 bucket 场景下后端返回的 URL 可能不带签名参数，这里统一补签一个预签名 URL，
+        # 且预签名有效期不超过 7 天（多数云厂商预签名 URL 的硬性上限），取配置值与该上限的较小者。
         if not self._config.public_bucket and "?" not in result.url:
             max_expires = 7 * 24 * 3600
             expires = min(self._config.presigned_url_expires, max_expires)
@@ -308,6 +335,8 @@ class S3StorageService:
         deleted_count = 0
         backend = self._get_backend()
 
+        # 优先尝试走底层客户端的批量删除接口（若后端暴露了 _client），比逐个调用 delete_file 更高效；
+        # 分页处理：list_files 每次只取一批，删完再查下一批，直到某个前缀下没有剩余对象。
         if hasattr(backend, "_client"):
             try:
                 client = backend._client
@@ -331,6 +360,8 @@ class S3StorageService:
                 logger.warning(f"Batch delete failed, falling back to individual deletes: {e}")
 
         # Fallback: individual deletes
+        # 批量删除不可用或失败时，退化为逐个删除；额外加入"本轮未删除任何对象则停止"的保护，
+        # 避免因某些对象反复删除失败而导致死循环。
         for prefix in (f"avatars/{user_id}", user_id):
             while True:
                 objects = await self.list_files(prefix)
@@ -357,6 +388,8 @@ class S3StorageService:
 
     async def download_file(self, key: str) -> bytes:
         """Download a file and return its content as bytes"""
+        # 下载前先探测大小并校验上限，避免一次性把超大对象整体读入内存导致 OOM；
+        # 真正需要处理大文件时应使用 download_stream / download_to_file 等流式接口。
         backend = self._get_backend()
         file_size = await backend.get_size(key)
         if file_size > self._config.internal_max_upload_size:
@@ -388,6 +421,7 @@ class S3StorageService:
 
     def get_file_path(self, key: str):
         """Get local filesystem path for a key (local backend only)."""
+        # 仅本地存储后端才有真实文件系统路径的概念；其他后端（对象存储）没有本地路径,调用会直接报错。
         backend = self._get_backend()
         if not isinstance(backend, LocalStorageBackend):
             raise RuntimeError("get_file_path is only available for local storage")
@@ -413,6 +447,8 @@ class S3StorageService:
 
     def _sanitize_filename(self, filename: str) -> str:
         """Sanitize filename for safe storage"""
+        # 把除字母数字、下划线、短横线、点以外的字符全部替换为下划线，避免路径注入/特殊字符问题；
+        # 过长文件名做截断，同时尽量保留扩展名，避免影响内容类型识别。
         safe = re.sub(r"[^\w\-_\.]", "_", filename)
         if len(safe) > 200:
             name, ext = safe.rsplit(".", 1) if "." in safe else (safe, "")
@@ -441,6 +477,8 @@ class S3StorageService:
         allowed_extensions: Optional[list[str]] = None,
     ) -> tuple[bool, str]:
         """Validate file before upload. Returns (is_valid, error_message)."""
+        # 面向"用户可见"的业务校验（对外文件大小限制、扩展名白名单），
+        # 与前面 internal_max_upload_size 这种"内部硬性上限"是两层不同的校验目的。
         if file_size > self._config.max_file_size:
             max_mb = self._config.max_file_size / (1024 * 1024)
             return False, f"File size exceeds maximum of {max_mb:.1f}MB"
@@ -482,6 +520,7 @@ async def close_storage() -> None:
 
 def _parse_bool(value: object) -> bool:
     """Parse boolean value from various types."""
+    # 兼容环境变量常见的多种"真值"写法（字符串 "true"/"1"/"yes"/"on" 等），统一转换为布尔值。
     if value is None:
         return False
     if isinstance(value, bool):
@@ -502,6 +541,7 @@ async def get_s3_config_from_settings() -> S3Config:
     """Build S3Config from cached application settings."""
     from src.kernel.config import settings
 
+    # 未启用 S3 时直接使用应用配置里预置的（通常是本地存储）S3Config，不再走下面的厂商映射逻辑。
     if not get_s3_enabled():
         return settings.get_s3_config()
 
@@ -547,6 +587,8 @@ async def get_or_init_storage() -> S3StorageService:
     This is the single entry-point that infra-layer code should use
     instead of importing from API routes.
     """
+    # 根据当前配置动态决定使用对象存储还是本地存储；每次调用都会重新计算期望配置，
+    # 只有当期望配置与当前生效配置不一致时才重新 configure（并关闭旧后端），避免重复创建连接。
     if get_s3_enabled():
         config = await get_s3_config_from_settings()
     else:

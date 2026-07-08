@@ -26,12 +26,15 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 # 全局单例：user_id -> GlobalMCPEntry
+# 进程内每用户一份 MCP 管理器+工具的缓存，避免重复初始化
 _global_entries: dict[str, "GlobalMCPEntry"] = {}
 
 # 本地异步锁（进程内）
+# 每用户一把本地锁：先在进程内串行化，减少对 Redis 分布式锁的争用
 _local_locks: dict[str, asyncio.Lock] = {}
 
 # 后台任务追踪集合
+# 持有锁续约、管理器关闭等后台任务的强引用，防止被 GC 提前回收
 _background_tasks: Set[asyncio.Future] = set()
 
 # 清理计数器（用于定期清理检查）
@@ -48,10 +51,13 @@ GLOBAL_CACHE_TTL = 900
 
 # 最大缓存条目数（防止内存泄漏）
 MAX_GLOBAL_ENTRIES = 100
+# 等待其他实例完成初始化的默认最长秒数
 DEFAULT_INIT_WAIT_SECONDS = 5
 
 # Redis 键前缀
+# 初始化互斥锁键前缀（跨实例）
 LOCK_KEY_PREFIX = "mcp_init_lock:"
+# "初始化已完成"标记键前缀，供等待方快速得知无需再抢锁
 DONE_KEY_PREFIX = "mcp_init_done:"
 
 # MCP 缓存失效 Pub/Sub 频道
@@ -61,6 +67,8 @@ MCP_CACHE_INVALIDATE_CHANNEL = "mcp:cache:invalidate"
 _INSTANCE_ID = str(uuid.uuid4())[:8]
 
 # Lua 脚本：安全释放锁
+# 用 GET+DEL 的原子 Lua 脚本，仅当锁值等于自己持有的 value 才删除，
+# 防止误删已被其他实例重新获取的同名锁（经典分布式锁陷阱）
 RELEASE_LOCK_SCRIPT = """
 if redis.call("get", KEYS[1]) == ARGV[1] then
     return redis.call("del", KEYS[1])
@@ -69,6 +77,7 @@ else
 end
 """
 
+# 同理，仅当仍是锁持有者时才续期（EXPIRE），避免给别人的锁续命
 RENEW_LOCK_SCRIPT = """
 if redis.call("get", KEYS[1]) == ARGV[1] then
     return redis.call("expire", KEYS[1], ARGV[2])
@@ -84,6 +93,7 @@ class MCPGlobalCachePubSub:
     def __init__(self) -> None:
         self._subscription_token: str | None = None
         self._running = False
+        # 复用模块级实例 ID，用于过滤自己发出的失效消息
         self._instance_id = _INSTANCE_ID
 
     @property
@@ -91,6 +101,7 @@ class MCPGlobalCachePubSub:
         return self._instance_id
 
     async def start_listener(self) -> None:
+        # 幂等启动：订阅失效频道并启动 hub
         if self._running:
             return
 
@@ -105,6 +116,7 @@ class MCPGlobalCachePubSub:
         )
 
     async def stop_listener(self) -> None:
+        # 停止监听并在 hub 空闲时释放
         self._running = False
         if self._subscription_token:
             hub = get_pubsub_hub()
@@ -113,13 +125,16 @@ class MCPGlobalCachePubSub:
             await hub.stop_if_idle()
 
     async def _handle_message(self, message: dict[str, Any]) -> None:
+        # 处理跨实例失效广播：按 scope 决定是失效单用户还是全部
         try:
             data = await run_blocking_io(json.loads, message["data"])
+            # 忽略自己发出的消息（本地已就地失效）
             if data.get("instance_id") == self._instance_id:
                 return
 
             scope = data.get("scope")
             if scope == "all":
+                # publish=False：本次只做本地失效，避免消息风暴（无限转发）
                 await invalidate_all_global_cache(publish=False)
                 return
 
@@ -134,10 +149,12 @@ class MCPGlobalCachePubSub:
         return self._running
 
 
+# 模块级单例
 _mcp_cache_pubsub: MCPGlobalCachePubSub | None = None
 
 
 def get_mcp_cache_pubsub() -> MCPGlobalCachePubSub:
+    # 惰性创建并返回失效监听单例
     global _mcp_cache_pubsub
     if _mcp_cache_pubsub is None:
         _mcp_cache_pubsub = MCPGlobalCachePubSub()
@@ -146,6 +163,7 @@ def get_mcp_cache_pubsub() -> MCPGlobalCachePubSub:
 
 async def close_mcp_cache_pubsub() -> None:
     """Stop and release the MCP cache pub/sub singleton without creating it."""
+    # 停止并释放单例；先取后置空，避免关闭动作反而创建新实例
     global _mcp_cache_pubsub
     pubsub = _mcp_cache_pubsub
     _mcp_cache_pubsub = None
@@ -159,6 +177,7 @@ class GlobalMCPEntry:
 
     manager: "MCPClientManager"
     tools: list[BaseTool]
+    # created_at 用于 TTL 过期；last_access 用于 LRU 淘汰
     created_at: float = field(default_factory=time.time)
     last_access: float = field(default_factory=time.time)
 
@@ -176,20 +195,25 @@ class GlobalMCPEntry:
 def _get_local_lock(user_id: str) -> asyncio.Lock:
     """获取本地异步锁（带容量保护）"""
     # 如果锁数超过最大缓存条目的 2 倍，先清理孤儿锁
+    # 防止大量一次性 user_id 让 _local_locks 无限增长
     if len(_local_locks) > _get_max_global_entries() * 2:
         _cleanup_orphan_locks()
+    # setdefault 保证同一 user_id 只会有一把锁（单事件循环内原子）
     return _local_locks.setdefault(user_id, asyncio.Lock())
 
 
 def _get_global_cache_ttl() -> int:
+    # 读取有效全局缓存 TTL，优先配置项，回退默认值，至少 1 秒
     return max(int(getattr(settings, "MCP_GLOBAL_CACHE_TTL_SECONDS", GLOBAL_CACHE_TTL) or 0), 1)
 
 
 def _get_max_global_entries() -> int:
+    # 读取有效最大缓存条目数，优先配置项，回退默认值，至少 1
     return max(int(getattr(settings, "MCP_GLOBAL_MAX_ENTRIES", MAX_GLOBAL_ENTRIES) or 0), 1)
 
 
 def _get_global_warmup_max_users() -> int:
+    # 预热时最多处理的用户数上限，非法值回退 100
     value = getattr(settings, "MCP_GLOBAL_WARMUP_MAX_USERS", 100)
     try:
         return max(1, int(value))
@@ -198,6 +222,7 @@ def _get_global_warmup_max_users() -> int:
 
 
 def _get_global_init_wait_seconds() -> int:
+    # 等待其他实例完成初始化的最长秒数，非法值回退默认
     value = getattr(settings, "MCP_GLOBAL_INIT_WAIT_SECONDS", DEFAULT_INIT_WAIT_SECONDS)
     try:
         return max(1, int(value))
@@ -207,6 +232,7 @@ def _get_global_init_wait_seconds() -> int:
 
 def _cleanup_orphan_locks() -> int:
     """Clean up local locks that have no cache entry and are not in use."""
+    # 孤儿锁：无对应缓存条目的锁；仅清理当前未被持有的，避免破坏正在进行的临界区
     orphan_locks = [uid for uid in list(_local_locks) if uid not in _global_entries]
     removed = 0
     for uid in orphan_locks:
@@ -246,16 +272,19 @@ async def acquire_distributed_lock(
     Returns:
         (是否成功获取锁, 锁的唯一标识)
     """
+    # 生成随机 value 作为持有凭证，后续释放/续期都要校验它，防止误操作他人的锁
     lock_value = str(uuid.uuid4())
     try:
         redis_client = get_redis_client()
         # 使用 SET NX EX 原子操作
+        # NX 保证仅在键不存在时设置；EX 设过期，避免持锁进程崩溃后死锁
         result = await redis_client.set(lock_key, lock_value, nx=True, ex=ttl)
         if result is not None:
             logger.debug(f"[Global MCP] Acquired lock: {lock_key}")
             return True, lock_value
         return False, ""
     except Exception as e:
+        # Redis 异常时视为获取失败（后续会走降级路径），不抛出
         logger.warning(f"[Global MCP] Failed to acquire lock {lock_key}: {e}")
         return False, ""
 
@@ -280,6 +309,7 @@ async def release_distributed_lock(lock_key: str, lock_value: str) -> bool:
         result = redis_client.eval(RELEASE_LOCK_SCRIPT, 1, lock_key, lock_value)
 
         # 处理同步/异步返回值
+        # 不同 Redis 客户端 eval 可能返回协程或直接返回值，统一兼容
         if hasattr(result, "__await__"):
             result = await result
 
@@ -287,6 +317,7 @@ async def release_distributed_lock(lock_key: str, lock_value: str) -> bool:
         if released:
             logger.debug(f"[Global MCP] Released lock: {lock_key}")
         else:
+            # 未持有或已释放：可能锁已过期被别人重新获取，脚本会拒绝删除
             logger.warning(f"[Global MCP] Lock not owned or already released: {lock_key}")
         return released
     except Exception as e:
@@ -296,6 +327,7 @@ async def release_distributed_lock(lock_key: str, lock_value: str) -> bool:
 
 async def renew_distributed_lock(lock_key: str, lock_value: str, ttl: int) -> bool:
     """Renew a Redis lock only if this instance still owns it."""
+    # 仅当仍是持有者时续期，配合看门狗协程延长长耗时初始化期间的锁寿命
     try:
         redis_client = get_redis_client()
         result = redis_client.eval(RENEW_LOCK_SCRIPT, 1, lock_key, lock_value, str(int(ttl)))
@@ -308,6 +340,7 @@ async def renew_distributed_lock(lock_key: str, lock_value: str, ttl: int) -> bo
 
 
 def _get_lock_renew_interval(ttl: int) -> float:
+    # 续期间隔取 TTL/3，并夹在 [1s, 10s]：既能在过期前多次续期，又不过于频繁
     return max(1.0, min(float(ttl) / 3.0, 10.0))
 
 
@@ -317,12 +350,15 @@ async def _renew_lock_until_stopped(
     ttl: int,
     stop_event: asyncio.Event,
 ) -> None:
+    # 看门狗协程：周期性续期锁，直到 stop_event 被置位或续期失败（不再持有）
     interval = _get_lock_renew_interval(ttl)
     while True:
         try:
+            # 用带超时的 wait 实现"每 interval 秒续期一次，同时可被立即唤醒退出"
             await asyncio.wait_for(stop_event.wait(), timeout=interval)
             return
         except asyncio.TimeoutError:
+            # 超时即到达续期时点；若续期失败说明锁已易主，停止看门狗
             if not await renew_distributed_lock(lock_key, lock_value, ttl):
                 logger.warning("[Global MCP] Stopped renewing lock no longer owned: %s", lock_key)
                 return
@@ -330,6 +366,7 @@ async def _renew_lock_until_stopped(
 
 async def check_init_done(user_id: str) -> bool:
     """检查其他实例是否已完成初始化"""
+    # 通过 done 标记键判断：存在即代表某实例已完成，等待方可据此提前结束等待
     try:
         redis_client = get_redis_client()
         done_key = f"{DONE_KEY_PREFIX}{user_id}"
@@ -346,6 +383,7 @@ async def mark_init_done(user_id: str) -> None:
         redis_client = get_redis_client()
         done_key = f"{DONE_KEY_PREFIX}{user_id}"
         # 设置 30 秒过期，足够让其他实例看到
+        # 仅作短期信号，无需长期保留；过期后自动清理
         await redis_client.set(done_key, "1", ex=30)
     except Exception as e:
         logger.warning(f"[Global MCP] Failed to mark init done for {user_id}: {e}")
@@ -359,6 +397,7 @@ def _track_background_task(task: asyncio.Future) -> None:
 
 def _schedule_manager_close(manager: "MCPClientManager") -> None:
     """Schedule manager cleanup only when an event loop is available."""
+    # 无事件循环（如同步清理路径/解释器退出）时安全跳过，避免 create_task 报错
     try:
         asyncio.get_running_loop()
     except RuntimeError:
@@ -376,6 +415,7 @@ def _cleanup_expired_entries() -> int:
     for user_id in expired_users:
         entry = _global_entries.pop(user_id, None)
         if entry:
+            # 异步关闭其管理器，释放底层连接
             _schedule_manager_close(entry.manager)
         # 同步清理本地锁
         _local_locks.pop(user_id, None)
@@ -427,6 +467,7 @@ async def get_global_mcp_tools(
     global _cleanup_counter
 
     # 定期清理过期条目（使用计数器避免竞态条件）
+    # 借高频入口做惰性清理：每 CLEANUP_CHECK_INTERVAL 次访问触发一次
     _cleanup_counter += 1
     if _cleanup_counter >= CLEANUP_CHECK_INTERVAL:
         _cleanup_counter = 0
@@ -437,6 +478,7 @@ async def get_global_mcp_tools(
             logger.debug(f"[Global MCP] Cleaned up {removed} orphan local locks")
 
     # 1. 快速路径：检查全局单例
+    # 无锁命中：绝大多数请求走到这里直接返回，避免加锁开销
     if user_id in _global_entries:
         entry = _global_entries[user_id]
         if entry.manager._initialized and not entry.is_expired():
@@ -448,6 +490,7 @@ async def get_global_mcp_tools(
     local_lock = _get_local_lock(user_id)
     async with local_lock:
         # 3. 再次检查（double-check locking）
+        # 双重检查：可能在等待本地锁期间已被其他协程填充缓存
         if user_id in _global_entries:
             entry = _global_entries[user_id]
             if entry.manager._initialized and not entry.is_expired():
@@ -456,6 +499,7 @@ async def get_global_mcp_tools(
                 return entry.tools, entry.manager
 
         # 4. 获取 Redis 分布式锁
+        # 跨实例互斥：只让一个实例真正做初始化，其余等待其结果
         lock_key = f"{LOCK_KEY_PREFIX}{user_id}"
         logger.info(f"[Global MCP] Attempting to acquire lock: {lock_key}")
         lock_acquired, lock_value = await acquire_distributed_lock(lock_key)
@@ -469,6 +513,7 @@ async def get_global_mcp_tools(
 
             max_wait_seconds = _get_global_init_wait_seconds()
             # 等待完成标记；上限可配置，避免请求路径长期占用协程。
+            # 轮询等待：每秒检查本地缓存与 Redis 完成标记，最多等 max_wait_seconds 秒
             for attempt in range(max_wait_seconds):
                 logger.info(
                     "[Global MCP] Waiting... attempt %s/%s for %s",
@@ -491,6 +536,8 @@ async def get_global_mcp_tools(
                 # 检查其他实例是否已完成
                 if await check_init_done(user_id):
                     # 等待一小段时间让本地缓存更新（如果有的话）
+                    # 注意：完成标记在 Redis，但工具缓存是各实例进程内的，
+                    # 本实例并不会自动拿到别人的缓存，故这里仍可能需要自己再建一份
                     await asyncio.sleep(0.5)
                     if user_id in _global_entries:
                         entry = _global_entries[user_id]
@@ -502,8 +549,10 @@ async def get_global_mcp_tools(
                     break
 
             # 超时或未获取到缓存，尝试初始化（降级）
+            # 降级路径：未拿到锁也未等到结果，本实例自行初始化，保证请求不被卡死
             logger.warning(f"[Global MCP] Timeout waiting, creating new: {user_id}")
 
+        # 若持有分布式锁，则启动看门狗协程周期续期，防止初始化耗时超过锁 TTL 被抢占
         renew_stop_event: asyncio.Event | None = None
         renew_task: asyncio.Task | None = None
         if lock_acquired and lock_value:
@@ -520,6 +569,7 @@ async def get_global_mcp_tools(
 
         try:
             # 5. 再次检查（triple-check）
+            # 三重检查：等待/抢锁期间缓存可能已被填充
             if user_id in _global_entries:
                 entry = _global_entries[user_id]
                 if entry.manager._initialized and not entry.is_expired():
@@ -559,6 +609,7 @@ async def get_global_mcp_tools(
             return tools, manager
 
         finally:
+            # 无论成功与否都要停止看门狗并释放分布式锁，避免锁泄漏
             if renew_stop_event is not None:
                 renew_stop_event.set()
             if renew_task is not None:
@@ -572,6 +623,7 @@ async def get_global_mcp_tools(
 
 
 async def _publish_mcp_cache_invalidation(scope: str, *, user_id: str | None = None) -> None:
+    # 向失效频道广播一条消息，携带本实例 ID 供接收端过滤自身
     try:
         redis_client = get_redis_client()
         payload = await run_blocking_io(
@@ -584,6 +636,7 @@ async def _publish_mcp_cache_invalidation(scope: str, *, user_id: str | None = N
         )
         await redis_client.publish(MCP_CACHE_INVALIDATE_CHANNEL, payload)
     except Exception as e:
+        # 广播失败仅告警：本地失效通常已完成，跨实例同步失败不致命
         logger.warning("[Global MCP] Failed to publish invalidation: %s", e)
 
 
@@ -594,6 +647,8 @@ async def invalidate_global_cache(user_id: str, *, publish: bool = True) -> None
     Args:
         user_id: 用户 ID
     """
+    # publish 参数用于打断"广播->处理->再广播"的循环：
+    # 由本地主动触发时 publish=True 通知他人；由收到广播而触发时 publish=False
     # 清除进程内缓存
     if user_id in _global_entries:
         entry = _global_entries.pop(user_id)
@@ -608,6 +663,7 @@ async def invalidate_global_cache(user_id: str, *, publish: bool = True) -> None
         del _local_locks[user_id]
 
     # 清除 Redis 完成标记
+    # 一并删除 done 标记，确保下次请求会重新初始化而非误判为"已完成"
     try:
         redis_client = get_redis_client()
         done_key = f"{DONE_KEY_PREFIX}{user_id}"
@@ -629,6 +685,7 @@ async def invalidate_all_global_cache(*, publish: bool = True) -> int:
     count = len(_global_entries)
 
     # 关闭所有 manager
+    # 逐个关闭以释放底层连接，单个失败不影响整体清空
     for user_id, entry in list(_global_entries.items()):
         try:
             await entry.manager.close()
@@ -646,6 +703,7 @@ async def invalidate_all_global_cache(*, publish: bool = True) -> int:
 
 async def close_global_mcp_cache() -> int:
     """Close and clear every cached global MCP manager for process shutdown."""
+    # 停机专用：清空全部缓存但不广播（其他实例各自管理自己的生命周期）
     return await invalidate_all_global_cache(publish=False)
 
 
@@ -659,6 +717,7 @@ async def warmup_global_cache(user_ids: list[str]) -> None:
     if not user_ids:
         logger.info("[Global MCP] No users to warm up, skipping")
         return
+    # 预热用户数上限保护，超出只取前 max_users 个
     max_users = _get_global_warmup_max_users()
     if len(user_ids) > max_users:
         logger.warning(
@@ -672,20 +731,24 @@ async def warmup_global_cache(user_ids: list[str]) -> None:
     start_time = time.time()
 
     async def _warmup_user(user_id: str):
+        # 预热单个用户：复用正常获取路径，把缓存填好；失败不影响其他用户
         try:
             tools, _ = await get_global_mcp_tools(user_id)
             logger.info(f"[Global MCP] Warmed up {len(tools)} tools for user {user_id}")
         except Exception as e:
             logger.warning(f"[Global MCP] Warmup failed for user {user_id}: {e}")
 
+    # next_index + lock 构成工作队列游标，供多个 worker 抢占取用户
     next_index = 0
     lock = asyncio.Lock()
+    # 并发度受配置与用户数共同约束，避免预热压垮下游
     worker_count = min(
         max(1, int(getattr(settings, "MCP_GLOBAL_WARMUP_CONCURRENCY", 5) or 1)),
         len(user_ids),
     )
 
     async def _warmup_worker() -> None:
+        # 工作协程：循环领取用户直至取尽
         nonlocal next_index
         while True:
             async with lock:
@@ -728,11 +791,13 @@ async def warmup_active_users_mcp(limit: int = 10) -> None:
         db = client[settings.MONGODB_DB]
         users_collection = db["users"]
 
+        # limit<=0 表示不限制，回退到预热上限配置
         effective_limit = limit
         if effective_limit <= 0:
             effective_limit = _get_global_warmup_max_users()
 
         # 查询用户（去重）
+        # 用聚合按 _id 分组去重并限量，避免重复用户与全表拉取
         pipeline: list[dict[str, Any]] = [
             {"$group": {"_id": "$_id"}},
             {"$limit": effective_limit},
@@ -756,11 +821,13 @@ async def warmup_active_users_mcp(limit: int = 10) -> None:
         logger.info(f"[Global MCP] Warmup completed in {elapsed:.2f}s for {len(user_ids)} users")
 
     except Exception as e:
+        # 预热是尽力而为的优化，整体失败只告警不抛出
         logger.warning(f"[Global MCP] Failed to warmup users: {e}")
 
 
 def get_cache_stats() -> dict:
     """获取缓存统计信息"""
+    # 返回全局缓存概览（用户数、上限、TTL 及每用户明细），供监控/诊断
     now = time.time()
     return {
         "total_users": len(_global_entries),

@@ -23,6 +23,8 @@ from src.kernel.exceptions import AuthorizationError
 from src.kernel.schemas.model import ModelConfig
 
 logger = get_logger(__name__)
+# 保存"异步关闭 HTTP 连接池"的 future 引用，防止任务被 GC 提前回收；
+# 每个 future 完成后会从集合中移除（见 _safe_close_client / drain_close_tasks）。
 _close_tasks: set[asyncio.Future[None]] = set()
 
 # ── Provider 注册表 ──
@@ -68,6 +70,7 @@ PROVIDER_REGISTRY: dict[str, tuple[str, list[str]]] = {
 def _resolve_protocol(provider: str) -> str:
     """解析 provider 对应的协议类型。"""
     entry = PROVIDER_REGISTRY.get(provider)
+    # 注册表未收录的 provider 一律回退到 OpenAI 兼容协议
     return entry[0] if entry else "openai"
 
 
@@ -106,6 +109,14 @@ def _make_cache_key(
     profile: Optional[dict],
     max_retries: int,
 ) -> tuple:
+    """构造用于 LRU 缓存的可哈希键。
+
+    thinking / profile 都是 dict（不可哈希，不能直接作为字典 key），这里把它们
+    转成"排序后的 items 元组"，确保相同内容得到完全相同的 key，从而正确命中缓存。
+
+    Returns:
+        由所有会影响模型实例构造的参数组成的元组，作为 _model_cache 的键。
+    """
     thinking_key = tuple(sorted(thinking.items())) if thinking else None
     profile_key = tuple(sorted(profile.items())) if profile else None
     return (
@@ -121,12 +132,17 @@ def _make_cache_key(
     )
 
 
+# 生成稳定的 prompt 缓存路由键：让相同 provider+model 的请求命中服务端 prompt 缓存
+# （提升缓存局部性、降低重复前缀计费）。把 model_name 中的 '/' 换成 ':'，避免与
+# key 自身的分隔符冲突。
 def _prompt_cache_key(provider: str, model_name: str) -> str:
     """Stable routing key for provider-side prompt cache locality."""
     safe_model = model_name.replace("/", ":")
     return f"lambchat:{provider}:{safe_model}"
 
 
+# 过滤 profile：只保留 langchain-core 的 ModelProfile 能识别的字段，并剔除 None 值，
+# 避免把自定义/多余字段透传给底层 SDK 触发报错。
 def _langchain_profile(profile: Optional[dict]) -> Optional[dict]:
     """Return only profile keys understood by langchain-core."""
     if not profile:
@@ -138,6 +154,8 @@ def _langchain_profile(profile: Optional[dict]) -> Optional[dict]:
     }
 
 
+# key 解析的最后一环：进程内缓存未命中时，按 model_id / value 去存储层（MongoDB）
+# 查该模型的专属 api_key，查到后写回进程缓存供后续复用。任何异常都吞掉并返回 None。
 async def _lookup_stored_api_key(
     *,
     model_id: Optional[str],
@@ -160,6 +178,9 @@ async def _lookup_stored_api_key(
     return None
 
 
+# 判断调用方是否"故意"不带 Anthropic 认证头：当 default_headers 里把
+# X-Api-Key / Authorization 显式设为 None 或 Omit 哨兵时，说明凭据由网关注入，
+# 此时不应因"缺 api_key"而报错（见 get_model 的鉴权检查）。
 def _has_explicit_anthropic_auth_omission(kwargs: dict[str, Any]) -> bool:
     """Return whether callers intentionally omitted Anthropic auth headers."""
     default_headers = kwargs.get("default_headers")
@@ -174,6 +195,8 @@ def _has_explicit_anthropic_auth_omission(kwargs: dict[str, Any]) -> bool:
     return False
 
 
+# 判断能否从进程环境变量拿到该协议的凭据（Anthropic/Google 的官方 SDK 支持从
+# 环境变量读取 key）。若能，则即便未显式传入 api_key 也不算凭据缺失。
 def _has_env_provider_auth(protocol: str) -> bool:
     """Return whether provider SDKs can resolve credentials from process env."""
     if protocol == "anthropic":
@@ -183,9 +206,13 @@ def _has_env_provider_auth(protocol: str) -> bool:
     return False
 
 
+# 安全关闭模型底层的 httpx 连接池：在 LRU 淘汰或清空缓存时调用，防止连接泄漏。
+# aclose() 是协程，这里用 ensure_future 异步执行，并把 task 存入 _close_tasks 防止
+# 被 GC；完成回调里再移除并记录异常。全程吞掉异常，绝不影响主流程。
 def _safe_close_client(model_instance: BaseChatModel) -> None:
     """Safely close HTTP client with error logging."""
     try:
+        # 不同协议实现暴露的属性名不同：优先取 async_client，回退到 client
         _client = getattr(model_instance, "async_client", None) or getattr(
             model_instance, "client", None
         )
@@ -208,6 +235,8 @@ def _safe_close_client(model_instance: BaseChatModel) -> None:
 class LLMClient:
     """LLM 客户端工厂，支持 LRU 实例缓存和 fallback。"""
 
+    # 类级共享的 LRU 缓存：key 为 _make_cache_key 生成的参数元组，value 为模型实例。
+    # 用 OrderedDict 维护访问顺序——命中时 move_to_end，满了从头部（最久未用）淘汰。
     _model_cache: OrderedDict[tuple, BaseChatModel] = OrderedDict()
 
     @staticmethod
@@ -285,6 +314,8 @@ class LLMClient:
                 google_kwargs["profile"] = profile
             return ChatGoogleGenerativeAI(**google_kwargs, **kwargs)
 
+        # 协议既非 anthropic 也非 google → 走 OpenAI 兼容接口（覆盖绝大多数国内外 provider）。
+        # 无 key 时填占位符 "sk-placeholder"，兼容本地部署/网关等无需鉴权的场景。
         openai_kwargs: dict[str, Any] = {
             "model": model_name,
             "temperature": temperature,
@@ -314,6 +345,8 @@ class LLMClient:
                     provider,
                     model_name,
                 )
+        # 仅 OpenAI 官方：注入稳定的 prompt_cache_key 与 24h 保留期，
+        # 提升服务端 prompt 缓存命中率、降低重复前缀的计费。
         if provider == "openai":
             model_kwargs = dict(openai_kwargs.get("model_kwargs") or kwargs.pop("model_kwargs", {}))
             model_kwargs.setdefault("prompt_cache_key", _prompt_cache_key(provider, model_name))
@@ -324,6 +357,9 @@ class LLMClient:
         return ChatOpenAI(**openai_kwargs, **kwargs)
 
     @staticmethod
+    # 核心入口：把"模型标识/ID/配置"解析成一个可用的 LangChain 聊天模型，并做 LRU 缓存。
+    # 配置来源优先级：model_config（已解析，最高）> model_id（按 ID 查库）>
+    #   model 字符串（前缀推断）> 系统默认模型。显式参数始终优先于 DB 覆盖值。
     async def get_model(
         model: Optional[str] = None,
         model_id: Optional[str] = None,
@@ -397,6 +433,8 @@ class LLMClient:
             if profile is None and db_model.profile:
                 profile = db_model.profile.model_dump()
             use_model_config = False
+        # 次优先：只给了 model_id（UUID）时，直接按 ID 从存储层查完整配置，
+        # 解析出具体 channel/provider 以及各项覆盖参数；成功后跳过后续缓存查找。
         elif model_id:
             try:
                 from src.infra.agent.model_storage import get_model_storage
@@ -499,6 +537,8 @@ class LLMClient:
                         model_value=model,
                     )
 
+        # 鉴权检查：既没解析到 api_key，也无法从环境变量取到凭据时，
+        # 对强制鉴权的协议（anthropic/google）直接抛错；OpenAI 兼容协议用占位符放行。
         protocol = _resolve_protocol(provider)
         if not api_key and not _has_env_provider_auth(protocol):
             if protocol == "anthropic" and not _has_explicit_anthropic_auth_omission(kwargs):
@@ -571,6 +611,7 @@ class LLMClient:
         else:
             to_delete = []
             for key in LLMClient._model_cache:
+                # cache_key 元组的第 2 个元素是 model_name（见 _make_cache_key）
                 _, model_name, *_ = key
                 if model_pattern in model_name:
                     to_delete.append(key)
@@ -583,6 +624,7 @@ class LLMClient:
         return len(to_delete)
 
     @staticmethod
+    # 关闭所有缓存的模型客户端并清空进程内缓存：配置重载/优雅退出时调用。
     def close_cached_models() -> int:
         """Close all cached model clients and clear the in-process cache."""
         cached_models = list(LLMClient._model_cache.values())
@@ -592,6 +634,7 @@ class LLMClient:
         return len(cached_models)
 
     @staticmethod
+    # 优雅退出时等待所有延迟的 HTTP 关闭任务完成（带超时上限），避免连接悬挂泄漏。
     async def drain_close_tasks(timeout: float = 10.0) -> None:
         """Wait for deferred HTTP client close tasks during graceful shutdown."""
         tasks = list(_close_tasks)

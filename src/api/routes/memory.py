@@ -19,14 +19,24 @@ from src.kernel.schemas.user import TokenPayload
 
 router = APIRouter()
 
+# 本模块挂载于 /api/memory，负责用户长期记忆的增删改查、检索、批量删除以及导入/导出。
+# 所有接口都需登录（get_current_user_required），且严格按 user_id 隔离，仅能操作当前用户自己的记忆。
+# 后端存储通过 _get_backend() 复用记忆工具里的单例（MongoDB 集合 + 可选向量嵌入）。
+# 合法的记忆类型集合（由 MemoryType 枚举生成），用于校验入参
 _VALID_MEMORY_TYPES = {mt.value for mt in MemoryType}
+# 合法的记忆来源集合：manual 手动创建 / auto_retained 自动留存 / imported 导入 / consolidated 归并
 _VALID_SOURCES = {"manual", "auto_retained", "imported", "consolidated"}
+# 导出文件的格式版本号
 _MEMORY_EXPORT_VERSION = 1
+# 导入时单条记忆 content 的默认最大字符数
 _DEFAULT_MEMORY_IMPORT_CONTENT_MAX_CHARS = 64_000
+# 导入时所有记忆 content 累计的默认最大字符数（防止一次导入体量过大）
 _DEFAULT_MEMORY_IMPORT_TOTAL_CONTENT_MAX_CHARS = 2_000_000
+# 导出时单条记忆 content 的默认最大字符数（超出会被截断并标记）
 _DEFAULT_MEMORY_EXPORT_CONTENT_MAX_CHARS = 64_000
 
 
+# 复用记忆工具模块里的单例后端（MongoDB 集合 + 可选向量嵌入），避免重复建连。
 async def _get_backend():
     """Reuse the singleton memory backend from memory tools."""
     from src.infra.memory.tools import _get_backend
@@ -34,6 +44,7 @@ async def _get_backend():
     return await _get_backend()
 
 
+# 清洗标签：非 list 直接返回空；逐个 strip 并截断到 40 字符，最多保留 20 个，丢弃空串。
 def _clean_tags(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
@@ -47,6 +58,7 @@ def _clean_tags(value: Any) -> list[str]:
     return tags
 
 
+# 清洗文本：转字符串并去掉首尾空白；给了 max_length 时截断到该长度。
 def _clean_text(value: Any, max_length: int | None = None) -> str:
     text = str(value or "").strip()
     if max_length is not None:
@@ -54,6 +66,7 @@ def _clean_text(value: Any, max_length: int | None = None) -> str:
     return text
 
 
+# 读取"导入时单条 content 上限"配置（NATIVE_MEMORY_IMPORT_CONTENT_MAX_CHARS），无效则回退默认值。
 def _get_memory_import_content_max_chars() -> int:
     value = getattr(
         settings,
@@ -66,6 +79,7 @@ def _get_memory_import_content_max_chars() -> int:
         return _DEFAULT_MEMORY_IMPORT_CONTENT_MAX_CHARS
 
 
+# 读取"导入时全部 content 累计上限"配置，无效则回退默认值。
 def _get_memory_import_total_content_max_chars() -> int:
     value = getattr(
         settings,
@@ -78,6 +92,7 @@ def _get_memory_import_total_content_max_chars() -> int:
         return _DEFAULT_MEMORY_IMPORT_TOTAL_CONTENT_MAX_CHARS
 
 
+# 读取"导出时单条 content 上限"配置，无效则回退默认值。
 def _get_memory_export_content_max_chars() -> int:
     value = getattr(
         settings,
@@ -90,6 +105,7 @@ def _get_memory_export_content_max_chars() -> int:
         return _DEFAULT_MEMORY_EXPORT_CONTENT_MAX_CHARS
 
 
+# 校验单条记忆 content 的大小，超过导入单条上限抛 400。
 def _validate_memory_content_size(content: str) -> None:
     max_chars = _get_memory_import_content_max_chars()
     if len(content) > max_chars:
@@ -99,6 +115,7 @@ def _validate_memory_content_size(content: str) -> None:
         )
 
 
+# 校验一次导入的所有记忆 content 累计大小，超过总上限抛 400（边累加边判断，尽早失败）。
 def _validate_memory_import_total_content_size(raw_memories: list[Any]) -> None:
     max_chars = _get_memory_import_total_content_max_chars()
     total_chars = 0
@@ -113,6 +130,7 @@ def _validate_memory_import_total_content_size(raw_memories: list[Any]) -> None:
             )
 
 
+# MongoDB 查询投影：只取导出所需字段，减少读取与传输开销。
 def _memory_projection() -> dict[str, int]:
     return {
         "memory_id": 1,
@@ -133,10 +151,15 @@ def _memory_projection() -> dict[str, int]:
     }
 
 
+# 把 JSONEncoder 的增量编码结果收集成 list；配合 run_blocking_io 放到线程池执行，避免阻塞事件循环。
 def _json_iterencode_chunks(encoder: json.JSONEncoder, value: Any) -> list[str]:
     return list(encoder.iterencode(value))
 
 
+# GET /api/memory/ —— 分页列出当前用户的记忆（列表视图，正文可能非全量）。
+# 权限：需登录，仅返回本人（user_id）记忆。查询参数：
+#   memory_type 按类型过滤；search 在 title/summary/tags 上做不区分大小写正则匹配；
+#   limit（1~200，默认 50）、offset 分页。返回 {memories, total}。
 @router.get("/")
 async def list_memories(
     memory_type: Optional[str] = Query(None, description="Filter by memory type"),
@@ -146,6 +169,7 @@ async def list_memories(
     user: TokenPayload = Depends(get_current_user_required),
 ):
     """List stored memories for the current user."""
+    # 后端不可用时返回空列表（而非报错），保证前端可优雅降级
     backend = await _get_backend()
     if not backend:
         return {"memories": [], "total": 0}
@@ -156,10 +180,12 @@ async def list_memories(
             detail=f"Invalid memory_type. Must be one of: {', '.join(sorted(_VALID_MEMORY_TYPES))}",
         )
 
+    # 查询强制带上 user_id，确保只查当前用户的记忆
     query_filter: dict = {"user_id": user.sub}
     if memory_type:
         query_filter["memory_type"] = memory_type
 
+    # 搜索：转义后做不区分大小写的正则，在标题/摘要/标签任一命中即可
     if search:
         search_regex = {"$regex": re.escape(search), "$options": "i"}
         query_filter["$or"] = [
@@ -196,6 +222,7 @@ async def list_memories(
 
     memories = []
     async for doc in cursor:
+        # 组装列表项；has_full_content 表示正文是否被外存（store 模式），前端据此决定是否再拉详情
         memory = {
             "memory_id": doc["memory_id"],
             "title": doc.get("title", ""),
@@ -214,6 +241,10 @@ async def list_memories(
     return {"memories": memories, "total": total}
 
 
+# POST /api/memory/ —— 新建一条记忆。权限：需登录，归属当前用户。
+# 请求体（JSON dict）字段：content（正文，至少 5 字符，必填）、title、summary、
+#   memory_type（默认 user，须合法）、context、tags。source 固定标记为 "manual"。
+# 副作用：可能生成向量嵌入、把超长正文外存，并使该用户的记忆缓存失效。
 @router.post("/")
 async def create_memory(
     payload: dict[str, Any] = Body(...),
@@ -227,6 +258,7 @@ async def create_memory(
     if not backend:
         raise HTTPException(status_code=404, detail="Memory backend not available")
 
+    # 记忆类型缺省为 user，且必须落在合法集合内
     memory_type = _clean_text(payload.get("memory_type") or MemoryType.USER.value)
     if memory_type not in _VALID_MEMORY_TYPES:
         raise HTTPException(
@@ -234,6 +266,7 @@ async def create_memory(
             detail=f"Invalid memory_type. Must be one of: {', '.join(sorted(_VALID_MEMORY_TYPES))}",
         )
 
+    # 正文至少 5 个字符，并校验不超过单条上限
     content = _clean_text(payload.get("content"))
     if len(content) < 5:
         raise HTTPException(status_code=400, detail="Memory content must be at least 5 characters")
@@ -245,11 +278,14 @@ async def create_memory(
     tags = _clean_tags(payload.get("tags"))
     now = utc_now()
 
+    # 根据长度决定正文内联存储还是外存（返回 content / content_storage_mode / content_store_key 等）
     content_fields = await build_content_fields(backend, user.sub, memory_id, content)
+    # 若后端支持向量化，则为正文生成嵌入，供后续语义检索
     embedding = None
     if hasattr(backend, "_maybe_embed"):
         embedding = await backend._maybe_embed(content)
 
+    # index_label 由标题/摘要/正文拼成用于关键词检索；**content_fields 展开正文相关存储字段
     doc = {
         "memory_id": memory_id,
         "user_id": user.sub,
@@ -269,6 +305,7 @@ async def create_memory(
     }
 
     await backend._collection.insert_one(doc)
+    # 写入后使该用户的记忆缓存失效，保证后续读取拿到最新数据
     if hasattr(backend, "_invalidate_cache"):
         await backend._invalidate_cache(user.sub)
 
@@ -284,6 +321,9 @@ async def create_memory(
     }
 
 
+# PUT /api/memory/{memory_id} —— 局部更新一条记忆（仅更新 payload 中出现的字段）。
+# 权限：需登录且记忆归属当前用户，否则 404。可更新 title/memory_type/tags/source/content/summary。
+# 更新 content 时会重算外存字段与向量嵌入；若外存 key 变化，会异步清理旧的外存内容。
 @router.put("/{memory_id}")
 async def update_memory(
     memory_id: str,
@@ -301,6 +341,7 @@ async def update_memory(
     if not backend:
         raise HTTPException(status_code=404, detail="Memory backend not available")
 
+    # 先确认记忆存在且属于当前用户（顺带取出旧的外存信息，便于后面清理）
     existing = await backend._collection.find_one(
         {"user_id": user.sub, "memory_id": memory_id},
         {"content_storage_mode": 1, "content_store_key": 1},
@@ -331,6 +372,7 @@ async def update_memory(
             )
         update["source"] = src
 
+    # 仅当请求带了 content 才更新正文：重新清洗、校验，并重算外存字段与嵌入
     content = payload.get("content")
     if content is not None:
         content = _clean_text(content)
@@ -366,6 +408,7 @@ async def update_memory(
         {"$set": update},
     )
 
+    # 正文外存 key 发生变化时，删除旧的外存内容，避免残留孤儿数据
     old_key = (
         existing.get("content_store_key")
         if existing.get("content_storage_mode") == "store"
@@ -381,6 +424,10 @@ async def update_memory(
     return {"success": True, "memory_id": memory_id}
 
 
+# GET /api/memory/export —— 流式导出当前用户的全部记忆为 JSON 文件（作为附件下载）。
+# 权限：需登录。用 StreamingResponse 边查边写，避免一次性把所有记忆读入内存。
+# 注意：本路由声明在 /{memory_id} 之前，以免 "export" 被当作 memory_id 匹配。
+# 单条正文超过导出上限会被截断，并附带 content_truncated / content_original_chars 标记。
 @router.get("/export")
 async def export_memories(
     user: TokenPayload = Depends(get_current_user_required),
@@ -399,6 +446,7 @@ async def export_memories(
     encoder = json.JSONEncoder(ensure_ascii=False, separators=(",", ":"))
     exported_at = utc_now_iso()
 
+    # 生成器：手工拼出 JSON —— 先写 version/exported_at 头，再逐条追加 memories 数组元素
     async def stream_export():
         yield f'{{"version":{_MEMORY_EXPORT_VERSION},"exported_at":'
         for chunk in encoder.iterencode(exported_at):
@@ -407,6 +455,7 @@ async def export_memories(
 
         first = True
         async for doc in cursor:
+            # 还原完整正文（可能来自外存），并按导出上限截断（截断时下面会打标记）
             content = await hydrate_memory_text(backend, doc)
             content_original_chars = len(content)
             max_content_chars = _get_memory_export_content_max_chars()
@@ -446,6 +495,9 @@ async def export_memories(
     )
 
 
+# POST /api/memory/import —— 批量导入记忆，按 memory_id 做 upsert（存在则覆盖，不存在则新建）。
+# 权限：需登录，导入到当前用户名下。限制：一次最多 1000 条，且所有正文累计不超过总上限。
+# 覆盖时若外存 key 变化会清理旧外存内容。返回 imported/created/overwritten 计数。
 @router.post("/import")
 async def import_memories(
     payload: dict[str, Any] = Body(...),
@@ -459,6 +511,7 @@ async def import_memories(
     if not backend:
         raise HTTPException(status_code=404, detail="Memory backend not available")
 
+    # 入参必须是 memories 列表，条数与累计内容大小都要在限制内
     raw_memories = payload.get("memories")
     if not isinstance(raw_memories, list):
         raise HTTPException(status_code=400, detail="memories must be a list")
@@ -503,6 +556,7 @@ async def import_memories(
         if hasattr(backend, "_maybe_embed"):
             embedding = await backend._maybe_embed(content)
 
+        # 时间戳优先用导入数据里的 ISO 字符串，缺失/非法则用当前时间兜底
         created_at = (
             parse_iso(raw["created_at"])
             if isinstance(raw.get("created_at"), str) and raw["created_at"].strip()
@@ -542,6 +596,7 @@ async def import_memories(
             **content_fields,
         }
 
+        # upsert 覆盖写：matched_count>0 说明命中已有记录（记为覆盖），否则记为新建
         result = await backend._collection.replace_one(
             {"user_id": user.sub, "memory_id": memory_id},
             doc,
@@ -574,6 +629,8 @@ async def import_memories(
     }
 
 
+# GET /api/memory/{memory_id} —— 获取单条记忆的完整信息（含 hydrate 后的全量正文）。
+# 权限：需登录且记忆归属当前用户，否则 404。与列表接口不同，这里会还原被外存的正文。
 @router.get("/{memory_id}")
 async def get_memory(
     memory_id: str,
@@ -607,6 +664,7 @@ async def get_memory(
     if not doc:
         raise HTTPException(status_code=404, detail="Memory not found")
 
+    # 还原完整正文（若为外存模式则从外部拉取），列表接口不做这一步
     full_content = await hydrate_memory_text(backend, doc)
 
     return {
@@ -624,6 +682,7 @@ async def get_memory(
     }
 
 
+# DELETE /api/memory/{memory_id} —— 删除单条记忆。权限：需登录且归属当前用户，找不到则 404。
 @router.delete("/{memory_id}")
 async def delete_memory(
     memory_id: str,
@@ -641,12 +700,15 @@ async def delete_memory(
     return result
 
 
+# POST /api/memory/batch-delete —— 批量删除记忆。权限：需登录，仅删当前用户的记忆。
+# 请求体 {"memory_ids": [...]}，必须为非空列表且不超过 100 条；返回实际删除数量。
 @router.post("/batch-delete")
 async def batch_delete_memories(
     request: Request,
     user: TokenPayload = Depends(get_current_user_required),
 ):
     """Delete multiple memories at once."""
+    # 从原始请求体解析 memory_ids，要求为非空列表
     body = await request.json()
     memory_ids = body.get("memory_ids", [])
     if not memory_ids or not isinstance(memory_ids, list):

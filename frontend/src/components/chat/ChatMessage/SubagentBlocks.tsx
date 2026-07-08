@@ -173,6 +173,7 @@ const SUBAGENT_ROLE_ICON_META: Record<
   },
 };
 
+// 根据子 agent 名称用正则推断其角色（设计/编码/测试/研究/写作/数据/审查/评分），返回对应图标与配色；无匹配则用通用图标
 // eslint-disable-next-line react-refresh/only-export-components
 export function getSubagentRoleIconMeta(
   agentName: string,
@@ -222,6 +223,7 @@ export function getSubagentAvatarImageUrl(
   return null;
 }
 
+// 子 agent 状态图标：running=转圈、complete=对勾、error=叉、cancelled=禁止、其余=右箭头
 function SubagentStatusIcon({
   status,
   className,
@@ -274,6 +276,7 @@ function SubagentStatusIcon({
   );
 }
 
+// 由子 agent 数据推导面板展示状态（映射到 CollapsibleStatus）、副标题、面板 key 与格式化名称
 // eslint-disable-next-line react-refresh/only-export-components
 export function buildSubagentPanelState(data: SubagentPanelData) {
   const effectiveStatus =
@@ -314,6 +317,7 @@ function createSubagentPanelFooter(subtitle: string | undefined) {
   );
 }
 
+// 按 agentId 打开子 agent 的右侧持久面板（若面板已打开则直接返回 true）
 // eslint-disable-next-line react-refresh/only-export-components
 export function openSubagentPanelByAgentId(agentId: string): boolean {
   const data = subagentPanelStore.get(agentId);
@@ -360,6 +364,7 @@ function extractPartsText(parts: MessagePart[]): string {
     .join("\n\n");
 }
 
+// 侧栏 Markdown 内容：流式或超长时只渲染尾部预览，并提供「展开」查看全文
 function SidebarMarkdownContent({
   content,
   isStreaming,
@@ -404,6 +409,7 @@ function SidebarMarkdownContent({
   );
 }
 
+// 通用可折叠区块（标题 + 折叠箭头 + 可选操作，支持 error 变体），面板内广泛复用
 export function CollapsibleSection({
   title,
   defaultExpanded = true,
@@ -471,6 +477,8 @@ export function CollapsibleSection({
 // Subagent panel content (reactive)
 // ==========================================
 
+// 子 agent 的响应式面板内容：订阅 store，展示输入/处理过程/结果/错误，
+// 并在流式追加内容时自动滚到底部（用户上滑后暂停自动滚动，并显示「回到底部」按钮）。
 function SubagentPanelContent({ agentId }: { agentId: string }) {
   const { t } = useTranslation();
   const data = useSubagentPanelData(agentId);
@@ -685,6 +693,7 @@ function SubagentPanelContent({ agentId }: { agentId: string }) {
 // Utility
 // ==========================================
 
+// 思考块：折叠为一颗胶囊（显示思考预览），点击在右侧面板展示完整思考内容
 // Thinking Block - pill button, content in sidebar panel
 export function ThinkingBlock({
   content,
@@ -758,6 +767,8 @@ export function ThinkingBlock({
   );
 }
 
+// 子 agent 块：渲染为紧凑卡片（角色图标/头像 + 名称 + 输入摘要 + 状态角标），
+// 详情始终在右侧持久面板展示；满足条件时会自动打开面板（避免多个并发子 agent 抢焦点）。
 // Subagent Block - compact card, content always in sidebar panel
 export function SubagentBlock({
   agent_id,
@@ -814,6 +825,7 @@ export function SubagentBlock({
   // changes every render from the parent but content only changes on real updates.
   const partsKey = useMemo(() => JSON.stringify(parts ?? []), [parts]);
 
+  // 把最新子 agent 数据写入 store；若面板已打开则更新其状态，否则按策略决定是否自动打开
   useEffect(() => {
     subagentPanelStore.set({
       agentId: agent_id,
@@ -883,6 +895,7 @@ export function SubagentBlock({
     };
   }, [agent_id]);
 
+  // 点击卡片：打开（或聚焦）该子 agent 的右侧面板
   const handleOpenInPanel = useCallback(() => {
     resetSubagentPanelAutoOpenDismissal();
     openPersistentToolPanel({

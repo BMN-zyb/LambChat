@@ -1,5 +1,8 @@
 /**
  * Authenticated fetch wrapper with token refresh support
+ *
+ * 全站发起后端请求的统一底层：自动附带 JWT、按语言设置 Accept-Language、
+ * 主动/被动刷新 token、统一解析后端错误并本地化。业务的各领域客户端都建立在它之上。
  */
 
 import i18n from "i18next";
@@ -17,6 +20,8 @@ import { translateBackendError } from "../../utils/backendErrors";
 // ============================================
 
 interface FetchOptions extends RequestInit {
+  // skipAuth: 跳过鉴权（不加 Authorization，也不做 401 刷新），用于登录等公开接口
+  // _retry: 内部标志，标记这是 401 刷新后的重试请求，防止无限递归重试
   skipAuth?: boolean;
   _retry?: boolean;
 }
@@ -37,6 +42,9 @@ export async function authFetch<T>(
     ...restOptions
   } = options;
 
+  // 组装请求头：FormData 时不手动设置 Content-Type，交由浏览器自动带上正确的
+  // multipart 边界(boundary)；其余请求默认 JSON。Accept-Language 跟随当前 i18n 语言。
+  // 传入的 headers 放最后，允许调用方覆盖默认值。
   const finalHeaders: HeadersInit = {
     ...(restOptions.body instanceof FormData
       ? {}
@@ -61,12 +69,16 @@ export async function authFetch<T>(
   });
 
   // 检查当前用户是否被修改（需要重新登录）
+  // 后端可在权限/账号变更时下发该响应头，强制前端清除登录态并重登，确保权限即时生效。
   if (!skipAuth && response.headers.get("X-Force-Relogin") === "true") {
     clearAuthState();
     throw new Error("用户权限已变更，请重新登录");
   }
 
   // 处理 401 未授权响应
+  // 被动刷新兜底：即便上面主动刷新过，token 仍可能在服务端被判失效。
+  // 此时若有 refresh token 且当前不是重试请求(_retry=false)，先刷新再带上 _retry 重发一次；
+  // 刷新失败或本就是重试则跳转登录。_retry 保证最多只重试一次，避免死循环。
   if (response.status === 401 && !skipAuth) {
     const refreshToken = getRefreshToken();
 
@@ -84,6 +96,8 @@ export async function authFetch<T>(
     throw new Error("Unauthorized");
   }
 
+  // 其余非 2xx：尽力解析后端错误体（detail 可能是字符串或含 message 的对象），
+  // 再经 translateBackendError 本地化后抛出，供上层展示。
   if (!response.ok) {
     const errorData = await response.json().catch(() => ({}));
     // 处理 detail 为对象或字符串的情况

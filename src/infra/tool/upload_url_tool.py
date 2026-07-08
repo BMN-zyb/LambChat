@@ -6,6 +6,11 @@ URL 文件上传到沙箱工具
 
 通过 ToolRuntime 注入 backend，复用 backend_utils 获取沙箱后端。
 """
+# 中文补充说明：本工具优先让"下载"这一步发生在沙箱内部（生成一段 python 脚本，
+# 通过 backend.aexecute 在沙箱里直接执行 urllib 下载），这样大文件不需要先拉回
+# API 进程再转发一次，节省带宽和内存。只有当 backend 不支持 execute（旧版 backend）
+# 时，才降级为"API 进程下载 + aupload_files 上传"的兼容路径，且该兼容路径对文件
+# 大小做了更严格的限制（_FALLBACK_UPLOAD_MAX_BYTES）。
 
 import json
 import shlex
@@ -29,17 +34,30 @@ _DOWNLOAD_TIMEOUT = 60
 _MAX_FILE_SIZE = 50 * 1024 * 1024
 
 # Keep small downloads in memory, spill larger ones to disk while enforcing _MAX_FILE_SIZE.
+# 中文：小文件保留在内存中，超过该阈值后 SpooledTemporaryFile 会自动落盘，
+# 避免大文件把 API 进程内存占满
 _SPOOL_MAX_MEMORY_BYTES = 2 * 1024 * 1024
 
 # Legacy fallback backends only accept bytes via aupload_files(); keep that path small.
+# 中文：走兼容路径（API 侧下载后再整体上传）时，文件必须整个读进内存再一次性上传，
+# 因此这里设置一个更小的上限，避免超大文件走这条路径拖垮 API 进程
 _FALLBACK_UPLOAD_MAX_BYTES = 2 * 1024 * 1024
 
 
 async def _json_dumps_result(data: dict[str, Any]) -> str:
+    # 统一以 JSON 字符串形式返回工具结果给 LLM
     return await run_blocking_io(json.dumps, data, ensure_ascii=False)
 
 
 def _sandbox_download_command(url: str, file_path: str) -> str:
+    # 中文：构造一段在沙箱内执行的 python3 -c 脚本，直接用标准库 urllib 流式下载，
+    # 不依赖沙箱内是否装了 requests/httpx 等第三方库；
+    # 关键点：
+    #   1）边下载边累加 total 字节数，超过 max_size 时主动抛异常中止，防止把沙箱磁盘写满；
+    #   2）先写入临时文件 tmp_path，成功后再用 os.replace 原子改名为目标路径，
+    #      避免下载中途失败时留下一个不完整的目标文件；
+    #   3）用 shlex.quote 对整段脚本做 shell 转义后拼进 python3 -c 命令，
+    #      防止 url/file_path 中的特殊字符破坏命令行结构。
     script = f"""
 import os
 import urllib.request
@@ -79,6 +97,9 @@ except Exception:
 
 
 async def _execute_sandbox_download(backend, url: str, file_path: str) -> tuple[bool, str]:
+    # 中文：兼容两种 backend 接口形态——优先使用异步 aexecute，
+    # 没有的话降级为同步 execute（通过 run_blocking_io 放入线程池执行，避免阻塞事件循环）；
+    # 两者都不支持则说明该 backend 完全不能在沙箱内执行命令，只能走 API 侧下载兼容路径
     command = _sandbox_download_command(url, file_path)
     if hasattr(backend, "aexecute"):
         result = await backend.aexecute(command)
@@ -94,6 +115,8 @@ async def _execute_sandbox_download(backend, url: str, file_path: str) -> tuple[
     return False, str(output or f"exit_code={exit_code}")
 
 
+# 中文：这是唯一对外暴露的 LLM 工具；runtime 通过 InjectedToolArg 注入，
+# 用于取出沙箱 backend 与 base_url，对 LLM 不可见
 @tool
 async def upload_url_to_sandbox(
     url: Annotated[str, "要下载的文件 URL"],
@@ -105,6 +128,7 @@ async def upload_url_to_sandbox(
     Use this tool to transfer external files (user uploads, web resources) into the sandbox
     so they can be accessed by shell commands and scripts.
     """
+    # 目标路径必须是绝对路径，否则沙箱内脚本的 os.makedirs/os.replace 语义会不明确
     if not file_path.startswith("/"):
         return await _json_dumps_result(
             {"success": False, "error": "file_path must be an absolute path"}
@@ -123,6 +147,8 @@ async def upload_url_to_sandbox(
         else:
             logger.warning("[upload_url_to_sandbox] url is relative but base_url is empty: %s", url)
 
+    # 优先走"沙箱内直接下载"路径：省去 API 进程中转，且不受 _MAX_FILE_SIZE 之外
+    # 更严格的兼容上限约束；只有该路径抛异常或返回失败时才继续走下面的兼容分支
     if hasattr(backend, "aexecute") or hasattr(backend, "execute"):
         try:
             ok, output = await _execute_sandbox_download(backend, url, file_path)
@@ -141,6 +167,8 @@ async def upload_url_to_sandbox(
             logger.warning("[upload_url_to_sandbox] Sandbox download failed: %s", e)
 
     # 下载文件
+    # 中文：兼容路径——在 API 进程内用 httpx 流式下载到 SpooledTemporaryFile
+    # （小文件留内存、大文件自动落盘），边下载边检查两级大小上限
     content: bytes
     try:
         async with httpx.AsyncClient(follow_redirects=True, timeout=_DOWNLOAD_TIMEOUT) as client:
@@ -152,6 +180,7 @@ async def upload_url_to_sandbox(
                         if not chunk:
                             continue
                         total_size += len(chunk)
+                        # 超过硬性总大小上限：无论如何都拒绝，防止无限下载耗尽内存/磁盘
                         if total_size > _MAX_FILE_SIZE:
                             return await _json_dumps_result(
                                 {
@@ -161,6 +190,7 @@ async def upload_url_to_sandbox(
                                     ),
                                 }
                             )
+                        # 超过兼容路径专用的更小上限：提示应改用支持沙箱内下载的 backend
                         if total_size > _FALLBACK_UPLOAD_MAX_BYTES:
                             return await _json_dumps_result(
                                 {
@@ -187,6 +217,8 @@ async def upload_url_to_sandbox(
         return await _json_dumps_result({"success": False, "error": f"Download failed: {e}"})
 
     # 上传到沙箱
+    # 中文：兼容路径下载完成后，通过 backend.aupload_files 把整块字节内容一次性上传，
+    # 这是传统 backend 都支持的最基础接口
     try:
         results = await backend.aupload_files([(file_path, content)])
         result = results[0]
@@ -207,4 +239,5 @@ async def upload_url_to_sandbox(
 
 def get_upload_url_tool() -> BaseTool:
     """获取 upload_url_to_sandbox 工具实例"""
+    # 中文：供 agent 构建工具集时按需注册（仅在沙箱模式下加载本工具）
     return upload_url_to_sandbox

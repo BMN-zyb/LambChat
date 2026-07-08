@@ -17,6 +17,8 @@ logger = get_logger(__name__)
 # streaming card created via /cardkit/v1/cards is referenced by /im/v1/messages
 # before it has propagated. Retrying after a short delay lets the card become
 # usable instead of falling back to a second (duplicate) non-stream card.
+# 刚创建的流式卡片 ID 可能因未同步而被短暂判为无效（错误码 230099）；
+# 此时不应回退成再发一张普通卡片（会重复），而应稍等重试。
 _FEISHU_CARD_NOT_READY_CODE = 230099
 _STREAM_CARD_SEND_MAX_ATTEMPTS = 3
 _STREAM_CARD_SEND_RETRY_DELAY_SECONDS = 0.5
@@ -35,6 +37,7 @@ class FeishuBaseSenderMixin:
     _chat_mode_cache: OrderedDict
     _feishu_http_client: httpx.AsyncClient | None = None
 
+    # 常用文件扩展名到飞书文件类型的映射（上传文件时用）。
     _FILE_TYPE_MAP = {
         ".opus": "opus",
         ".mp4": "mp4",
@@ -47,11 +50,14 @@ class FeishuBaseSenderMixin:
         ".pptx": "ppt",
     }
     _FEISHU_API_BASE = "https://open.feishu.cn/open-apis"
+    # 回复接口返回这些错误码时，回退为"直接发送"而非回复（如原消息不可回复）。
     _REPLY_FALLBACK_ERROR_CODES = {230011}
+    # 缓存的 tenant_access_token 及其过期时间戳（避免每次请求都重新换取）。
     _tenant_access_token: str | None = None
     _tenant_access_token_expires_at: float = 0.0
 
     def _get_feishu_http_client(self) -> httpx.AsyncClient:
+        # 惰性创建并复用 httpx 异步客户端；已关闭则重建。
         client: httpx.AsyncClient | None = getattr(self, "_feishu_http_client", None)
         if client is None or getattr(client, "is_closed", False):
             client = httpx.AsyncClient(timeout=httpx.Timeout(10.0))
@@ -59,6 +65,7 @@ class FeishuBaseSenderMixin:
         return client
 
     async def close_feishu_http_client(self) -> None:
+        # 关闭并清空 httpx 客户端（渠道停止时调用）。
         client = getattr(self, "_feishu_http_client", None)
         if client is not None:
             await client.aclose()
@@ -66,12 +73,14 @@ class FeishuBaseSenderMixin:
 
     def _resolve_receive_id(self, chat_id: str) -> tuple[str, str]:
         """Return Feishu receive_id_type and receive_id, stripping local thread suffixes."""
+        # 去掉本地话题隔离用的 "#root_id" 后缀；以 oc_ 开头判为群聊(chat_id)，否则按 open_id。
         receive_id = chat_id.split("#", 1)[0]
         receive_id_type = "chat_id" if receive_id.startswith("oc_") else "open_id"
         return receive_id_type, receive_id
 
     async def _get_tenant_access_token(self) -> str | None:
         """Fetch and cache tenant_access_token for CardKit REST APIs."""
+        # 命中未过期缓存则直接返回，减少换取次数。
         now = time.time()
         if self._tenant_access_token and now < self._tenant_access_token_expires_at:
             return self._tenant_access_token
@@ -104,6 +113,7 @@ class FeishuBaseSenderMixin:
         token = payload.get("tenant_access_token")
         if not token:
             return None
+        # 提前 5 分钟视为过期（并至少留 60s 余量），避免边界处 token 失效。
         expire = int(payload.get("expire", 7200))
         self._tenant_access_token = token
         self._tenant_access_token_expires_at = now + max(expire - 300, 60)
@@ -117,6 +127,8 @@ class FeishuBaseSenderMixin:
         json_body: dict[str, Any] | None = None,
         params: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
+        # 统一的飞书 REST 调用封装：自动带上 tenant_access_token 与 JSON 头，
+        # 解析响应体并对错误做告警。失败/无 token 时返回 None。
         token = await self._get_tenant_access_token()
         if not token:
             return None
@@ -129,6 +141,7 @@ class FeishuBaseSenderMixin:
                 },
                 "params": params,
             }
+            # JSON 序列化放线程池，且 ensure_ascii=False 以正确传中文。
             if json_body is not None:
                 request_kwargs["content"] = await run_blocking_io(
                     json.dumps,
@@ -143,6 +156,7 @@ class FeishuBaseSenderMixin:
             try:
                 payload = response.json()
             except ValueError:
+                # 非 JSON 响应：包装成统一结构以便上层判断。
                 payload = {"code": response.status_code, "msg": response.text}
             if response.is_error:
                 logger.warning(
@@ -158,6 +172,8 @@ class FeishuBaseSenderMixin:
             return None
 
     def _build_stream_card_json(self, content: str, streaming: bool = True) -> str:
+        # 构建 CardKit 2.0 流式卡片 JSON：streaming=True 时开启打字机式增量渲染，
+        # summary 为折叠态预览文案，正文放一个可增量更新的 markdown 元素（element_id=stream_md）。
         preview = content.strip().replace("\n", " ")[:30] or (
             "正在生成回复..." if streaming else " "
         )
@@ -187,6 +203,7 @@ class FeishuBaseSenderMixin:
         )
 
     async def create_stream_card(self, initial_text: str = "...") -> str | None:
+        # 通过 CardKit 接口先创建一张流式卡片实体，返回其 card_id（后续增量更新它）。
         card_json = await run_blocking_io(self._build_stream_card_json, initial_text)
         payload = await self._feishu_json(
             "POST",
@@ -205,6 +222,7 @@ class FeishuBaseSenderMixin:
         *,
         reply_to_id: str | None = None,
     ) -> tuple[bool, str | None]:
+        # 把已创建的卡片实体作为消息发送出去，返回 (是否成功, 消息ID)。
         content = await run_blocking_io(
             json.dumps,
             {"type": "card", "data": {"card_id": card_id}},
@@ -213,6 +231,7 @@ class FeishuBaseSenderMixin:
         # Retry on the card-not-ready propagation race (code 230099). A freshly
         # created card_id can be reported invalid for a brief window; waiting and
         # retrying avoids giving up and emitting a duplicate non-stream card.
+        # 针对"卡片尚未同步好"(230099) 的传播竞态做有限次退避重试。
         for attempt in range(_STREAM_CARD_SEND_MAX_ATTEMPTS):
             ok, message_id, code = await self._send_stream_card_attempt(
                 content, chat_id, reply_to_id
@@ -226,6 +245,7 @@ class FeishuBaseSenderMixin:
                     attempt + 1,
                 )
                 return True, message_id
+            # 仅在 230099 且仍有重试次数时等待重试；延迟随尝试次数线性增大。
             if code == _FEISHU_CARD_NOT_READY_CODE and attempt < _STREAM_CARD_SEND_MAX_ATTEMPTS - 1:
                 delay = _STREAM_CARD_SEND_RETRY_DELAY_SECONDS * (attempt + 1)
                 logger.info(
@@ -249,6 +269,7 @@ class FeishuBaseSenderMixin:
         reply_to_id: str | None,
     ) -> tuple[bool, str | None, Any]:
         """Single send attempt for a stream card. Returns (ok, message_id, code)."""
+        # 优先以"回复原消息"的形式发送；若失败码属于可回退集合，则改为直接发送到会话。
         if reply_to_id:
             payload = await self._feishu_json(
                 "POST",
@@ -259,6 +280,7 @@ class FeishuBaseSenderMixin:
             if payload and code == 0:
                 data = payload.get("data") or {}
                 return True, data.get("message_id"), code
+            # 非可回退错误：直接判定失败并返回错误码。
             if code not in self._REPLY_FALLBACK_ERROR_CODES:
                 logger.warning(
                     "[CARD_CREATE_DEBUG] send_card_by_id STREAM REPLY failed code=%s reply_to=%s",
@@ -271,6 +293,7 @@ class FeishuBaseSenderMixin:
                 code,
             )
 
+        # 直接发送分支（无 reply_to 或回复回退）。
         receive_id_type, receive_id = self._resolve_receive_id(chat_id)
         payload = await self._feishu_json(
             "POST",
@@ -295,6 +318,7 @@ class FeishuBaseSenderMixin:
         return False, None, code
 
     async def update_stream_card(self, card_id: str, content: str, sequence: int) -> bool:
+        # 增量更新流式卡片正文（stream_md 元素）；sequence 单调递增，飞书据此排序去重。
         payload = await self._feishu_json(
             "PUT",
             f"/cardkit/v1/cards/{card_id}/elements/stream_md/content",
@@ -306,6 +330,7 @@ class FeishuBaseSenderMixin:
         return True
 
     async def finalize_stream_card(self, card_id: str, content: str, sequence: int) -> bool:
+        # 定稿：用 streaming=False 的整卡覆盖，关闭打字机效果并落定最终内容。
         card_json = await run_blocking_io(
             self._build_stream_card_json,
             content or " ",

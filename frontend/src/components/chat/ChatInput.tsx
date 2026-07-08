@@ -47,6 +47,9 @@ import type { Team } from "../../types/team";
 
 export type { ChatInputProps } from "./chatInputTypes";
 
+// 聊天输入框（记忆化）：应用的主输入组件。负责多行输入、附件上传（粘贴/拖拽/选择）、
+// 斜杠命令（/技能、/工具、/人设、/团队、/agent、/goal）、@提及（人设或团队）、
+// 历史记录、思考等级等；底部工具栏与各选择器面板由子组件承担。
 export const ChatInput = memo(function ChatInput({
   onSend,
   onStop,
@@ -115,6 +118,7 @@ export const ChatInput = memo(function ChatInput({
   const { t } = useTranslation();
   const [input, setInput] = useState("");
 
+  // 消费外部传入的 pendingInput：填入输入框、聚焦并把光标移到末尾
   // Consume external pendingInput: fill textarea and focus
   useEffect(() => {
     if (pendingInput) {
@@ -156,6 +160,7 @@ export const ChatInput = memo(function ChatInput({
     >
   ).filter((cat) => hasPermission(FILE_CATEGORY_PERMISSIONS[cat]));
 
+  // 附件状态可受控（外部传入）或非受控（组件内部维护）
   const attachments = externalAttachments ?? internalAttachments;
   const setAttachments = externalOnAttachmentsChange ?? setInternalAttachments;
 
@@ -178,6 +183,7 @@ export const ChatInput = memo(function ChatInput({
     scheduleTextareaResize,
   });
 
+  // 提及模式：团队 Agent 下 @ 提及团队，否则 @ 提及人设预设
   const mentionMode = currentAgent === "team" ? "team" : "persona";
   const mentionEnabled =
     mentionMode === "team" ? !!onSelectTeam : !!onUsePersonaPreset;
@@ -221,6 +227,7 @@ export const ChatInput = memo(function ChatInput({
     onMentionQueryChange(mention.isActive ? mention.query : null);
   }, [mention.isActive, mention.query, onMentionQueryChange]);
 
+  // 选中人设后：从输入框中删除刚输入的「@查询词」并复位光标
   useEffect(() => {
     if (!onMentionQueryChange || !selectedPersonaPresetId || !mention.isActive)
       return;
@@ -240,6 +247,7 @@ export const ChatInput = memo(function ChatInput({
     // eslint-disable-next-line react-hooks/exhaustive-deps -- fires only on preset selection
   }, [selectedPersonaPresetId]);
 
+  // 选中团队后：同样删除输入框中的「@查询词」并复位光标
   useEffect(() => {
     if (!onMentionQueryChange || !selectedTeamId || !mention.isActive) return;
     const before = input.substring(0, mention.atIndex);
@@ -258,6 +266,7 @@ export const ChatInput = memo(function ChatInput({
     // eslint-disable-next-line react-hooks/exhaustive-deps -- fires only on team selection
   }, [selectedTeamId]);
 
+  // 处理来自「划词操作」的 prompt：追加到输入框并聚焦（挂载时也先消费一次待处理项）
   useEffect(() => {
     const applySelectionActionPrompt = (prompt: string) => {
       setInput((previous) => {
@@ -293,6 +302,7 @@ export const ChatInput = memo(function ChatInput({
     };
   }, [scheduleTextareaResize]);
 
+  // 快捷键 Ctrl+T / Cmd+T：在团队模式下打开/关闭团队选择面板
   // Ctrl+T / Cmd+T -> open team picker
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -311,6 +321,7 @@ export const ChatInput = memo(function ChatInput({
     return () => document.removeEventListener("keydown", handleKeyDown);
   }, [currentAgent, onSelectTeam]);
 
+  // 计算 @提及弹窗的固定定位（随窗口/视口的滚动与缩放实时更新）
   useEffect(() => {
     if (!mention.isActive) {
       setMentionPopupPlacement(null);
@@ -367,6 +378,7 @@ export const ChatInput = memo(function ChatInput({
     [skills, enableSkills],
   );
 
+  // 按输入内容与光标位置匹配斜杠命令候选（含可用技能）；有候选即展开下拉
   const slashDropdownItems = useMemo(
     () =>
       getMatchingSlashDropdownItems(
@@ -384,6 +396,8 @@ export const ChatInput = memo(function ChatInput({
 
   const [slashHighlightIndex, setSlashHighlightIndex] = useState(0);
 
+  // 应用斜杠下拉的选择：技能项→加入本次消息启用技能并清掉斜杠输入；
+  // 面板命令→打开对应选择器；插入命令（如 /goal）→把对应文本插入输入框。
   const applySlashDropdownSelection = useCallback(
     (item: SlashDropdownItem) => {
       // ── Skill selection: require this skill for the next message ──
@@ -444,6 +458,7 @@ export const ChatInput = memo(function ChatInput({
     [availableRunSkills, cursorPosition, input, scheduleTextareaResize],
   );
 
+  // 应用人设 @提及：删除「@查询词」后调用 onUsePersonaPreset 选用该人设
   const applyMentionSelection = useCallback(
     (preset: PersonaPreset) => {
       if (!mention.isActive) return;
@@ -466,6 +481,7 @@ export const ChatInput = memo(function ChatInput({
     [input, mention, onUsePersonaPreset, resetMention, scheduleTextareaResize],
   );
 
+  // 应用团队 @提及：删除「@查询词」后选中该团队
   const applyTeamMentionSelection = useCallback(
     (team: Team) => {
       if (!mention.isActive) return;
@@ -488,6 +504,8 @@ export const ChatInput = memo(function ChatInput({
     [input, mention, onSelectTeam, resetMention, scheduleTextareaResize],
   );
 
+  // 提交发送：校验可发送后带上 agent 选项、附件与本次启用技能调用 onSend，
+  // 随后清空输入/附件、写入历史并把输入框高度复位。
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!canSend) return;
@@ -509,6 +527,7 @@ export const ChatInput = memo(function ChatInput({
     }
   };
 
+  // 键盘处理（斜杠下拉/@提及导航、回车发送、上下键翻历史、停止确认等）集中在此 hook
   const handleKeyDown = useChatInputKeyboard(
     {
       open: slashCommandOpen,
@@ -542,6 +561,7 @@ export const ChatInput = memo(function ChatInput({
     },
   );
 
+  // 可提交条件：有非空内容、有发送权限、未在生成中、且没有正在上传的附件
   const hasContent = !!input.trim() && !disabled;
   const hasUploadingAttachment = attachments.some((a) => a.isUploading);
   const canSubmit =
@@ -557,6 +577,7 @@ export const ChatInput = memo(function ChatInput({
     setIsDraggingOver(false);
   };
 
+  // 拖拽释放文件：校验数量后上传
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
     setIsDraggingOver(false);
@@ -566,6 +587,7 @@ export const ChatInput = memo(function ChatInput({
     uploadFiles(files);
   };
 
+  // 从 agent 选项中取出「思考等级」的当前显示文案与取值（供工具栏展示）
   const thinkingLabel = agentOptions
     ? Object.entries(agentOptions)
         .filter(([, opt]) => opt.options && opt.options.length > 0)
@@ -593,6 +615,7 @@ export const ChatInput = memo(function ChatInput({
         })[0]
     : undefined;
 
+  // 本次消息启用的技能集合（未显式设置时默认取所有已启用技能）
   const runSkillNameSet = useMemo(() => {
     const initialNames =
       runEnabledSkillNames ?? availableRunSkills.map((skill) => skill.name);
@@ -621,6 +644,8 @@ export const ChatInput = memo(function ChatInput({
     [availableRunSkills],
   );
 
+  // 渲染：外层 form 包裹输入容器（拖拽遮罩、目标条、@提及弹窗、附件区、
+  // 本次技能 chips、textarea、斜杠下拉、底部工具栏），下方是各选择器面板与若干弹窗。
   return (
     <div
       className="chat-input-shell sm:px-4 pb-3 sm:pb-5"
@@ -697,6 +722,7 @@ export const ChatInput = memo(function ChatInput({
           />
 
           <div className="px-2.5 pt-1">
+            {/* 本次消息临时启用的技能：以可移除的 SkillChip 展示 */}
             {runEnabledSkillNames && runEnabledSkillNames.length > 0 && (
               <div
                 className="group flex flex-wrap items-center gap-2.5 px-2.5 py-2.5 mb-px"
@@ -758,6 +784,7 @@ export const ChatInput = memo(function ChatInput({
               </div>
             )}
             <div className="relative">
+              {/* 主输入框：change/click/keyup 均同步光标位置，供 @提及与斜杠命令定位 */}
               <textarea
                 ref={textareaRef}
                 value={input}

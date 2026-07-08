@@ -88,6 +88,7 @@ class E2BSandboxAdapter:
         self._auto_pause = auto_pause
         self._auto_resume = auto_resume
 
+    # 每次创建前从全局 settings 重新同步配置，使 DB/热更新后的配置对下一次 create 生效。
     def _sync_from_settings(self) -> None:
         """Sync config values from global settings (after DB update)."""
         from src.kernel.config.base import settings
@@ -103,6 +104,7 @@ class E2BSandboxAdapter:
 
         return E2BSandbox
 
+    # 从环境变量读取 E2B 连接选项：api_url（可选，自建端点）、domain（默认 e2b.app）、请求超时。
     def _get_e2b_opts(self) -> dict:
         opts: dict = {}
         api_url = os.environ.get("E2B_API_URL")
@@ -217,6 +219,8 @@ class E2BSandboxAdapter:
             return {"sandbox_id": self.get_sandbox_id(sandbox), "state": "unknown"}
 
 
+# CubeSandbox 的原生生命周期适配器：接口与 E2BSandboxAdapter 对齐（create/get/pause/stop/kill…），
+# 以便 SessionSandboxManager 用同一套流程驱动不同平台。stop 同样"优先 pause 保留状态"。
 class CubeSandboxAdapter:
     """Native CubeSandbox lifecycle adapter."""
 
@@ -310,6 +314,7 @@ class CubeSandboxAdapter:
         except Exception:
             return None
 
+    # 列出属于该 user 的、处于可用状态且模板匹配的 CubeSandbox，按启动时间倒序（最近的在前）。
     def list_user_sandboxes(self, user_id: str) -> list[dict]:
         self._sync_from_settings()
         cube_class = self._get_cube_class()

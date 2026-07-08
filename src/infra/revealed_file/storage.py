@@ -11,8 +11,11 @@ from src.infra.utils.datetime import to_iso, utc_now
 from src.kernel.config import settings
 
 logger = get_logger(__name__)
+# 单页最多返回的记录条数上限。
 REVEALED_FILE_PAGE_LIMIT_MAX = 50
+# 按会话分组展示时，每个会话预览最多附带的文件条数上限（避免单个"热"会话把整页响应撑爆）。
 REVEALED_FILE_GROUPED_FILES_PER_SESSION_MAX = 10
+# 用户会话列表（get_user_sessions）最多返回的会话条数上限。
 REVEALED_FILE_SESSION_LIST_LIMIT = 100
 
 
@@ -22,10 +25,12 @@ def _safe_search_pattern(text: str) -> str:
 
 
 def _bounded_page_limit(limit: int) -> int:
+    # 收敛分页大小到 [1, REVEALED_FILE_PAGE_LIMIT_MAX] 区间，防止外部传入非法或过大的值。
     return min(max(int(limit), 1), REVEALED_FILE_PAGE_LIMIT_MAX)
 
 
 def _normalize_dedupe_path(path: str) -> str:
+    # 统一路径分隔符为 "/"，折叠连续的重复斜杠，并去掉末尾斜杠，得到用于去重比较的规范化路径。
     normalized = path.strip().replace("\\", "/")
     while "//" in normalized:
         normalized = normalized.replace("//", "/")
@@ -33,6 +38,8 @@ def _normalize_dedupe_path(path: str) -> str:
 
 
 def _normalize_dedupe_url(url: str) -> str:
+    # URL 去重规范化：协议与域名统一小写，路径做百分号解码并去掉末尾斜杠，
+    # 使得同一资源的不同写法（大小写、编码差异）能被视为同一条记录。
     parsed = urlparse(url.strip())
     scheme = parsed.scheme.lower()
     netloc = parsed.netloc.lower()
@@ -41,6 +48,9 @@ def _normalize_dedupe_url(url: str) -> str:
 
 
 def _build_dedupe_key(file_key: str, source: str, data: Dict[str, Any]) -> str:
+    # 计算"去重键"：优先使用调用方传入的 original_path（区分是远程 URL 还是本地路径分别规范化）；
+    # 若没有 original_path，则退化为用 file_key 本身判断（同样先看是否为 URL）；
+    # 最后兜底为 "source:file_key" 组合，保证老数据也能生成一个可用的去重键。
     original_path = data.get("original_path")
     if isinstance(original_path, str) and original_path.strip():
         parsed = urlparse(original_path.strip())
@@ -59,10 +69,12 @@ class RevealedFileStorage:
     """MongoDB storage for revealed file records."""
 
     def __init__(self):
+        # 集合连接延迟初始化。
         self._collection = None
 
     @property
     def collection(self):
+        # 惰性获取 revealed_files 集合。
         if self._collection is None:
             from src.infra.storage.mongodb import get_mongo_client
 
@@ -72,6 +84,7 @@ class RevealedFileStorage:
         return self._collection
 
     async def ensure_indexes_if_needed(self):
+        # 用实例属性做"进程内只执行一次"的标记，避免每次调用都重复检查/创建索引。
         if not hasattr(self, "_indexes_ensured"):
             self._indexes_ensured = True
             await self._ensure_indexes()
@@ -98,6 +111,8 @@ class RevealedFileStorage:
             if "user_key_source_unique_idx" in existing_indexes:
                 await c.drop_index("user_key_source_unique_idx")
 
+            # 数据迁移：为历史上还没有 dedupe_key 字段的旧文档补齐该字段
+            # （用 source + file_key 拼出一个等价的去重键），以便后续统一按 dedupe_key 建唯一索引。
             await c.update_many(
                 {"dedupe_key": {"$exists": False}},
                 [{"$set": {"dedupe_key": {"$concat": ["key:", "$source", ":", "$file_key"]}}}],
@@ -182,6 +197,7 @@ class RevealedFileStorage:
         older records.  Updates reset *created_at* so the entry bubbles to the
         top of time-sorted lists.  Preserves ``is_favorite`` on the existing doc.
         """
+        # 关键字段缺失时直接放弃写入并记警告日志，而不是插入一条无法被正常检索/去重的脏数据。
         if not user_id or not file_name or not source:
             logger.warning(
                 f"Skipping upsert_by_name: user_id={user_id!r}, "
@@ -208,6 +224,8 @@ class RevealedFileStorage:
                 if k not in self._PROTECTED_FIELDS:
                     set_fields[k] = v
 
+            # 按 (user_id, dedupe_key, source) 做 upsert：同一资源再次被揭示时更新已有记录
+            # 并把 created_at 重置为当前时间，使其重新排到按时间排序列表的最前面。
             await self.collection.update_one(
                 {
                     "user_id": user_id,
@@ -218,6 +236,7 @@ class RevealedFileStorage:
                 upsert=True,
             )
         except Exception as e:
+            # 写入失败仅记录日志、不向上抛出异常，避免因为"记录一下揭示历史"这种次要功能影响主流程。
             logger.warning(f"Failed to upsert revealed file record by name: {e}")
 
     @staticmethod
@@ -225,6 +244,7 @@ class RevealedFileStorage:
         """Normalize MongoDB records for API responses."""
         normalized = dict(item)
 
+        # project_meta 只有 project 类型的记录才有意义，其他类型上如果混入了脏数据就顺手清掉。
         if normalized.get("file_type") != "project":
             normalized.pop("project_meta", None)
 
@@ -237,6 +257,8 @@ class RevealedFileStorage:
 
     async def _search_session_ids(self, search: str) -> list[str]:
         """Find session IDs whose name matches the search term."""
+        # 允许按会话名称搜索：先在 sessions 集合里模糊匹配出候选 session_id 列表，
+        # 供上层查询时通过 "$or" 把"文件名/描述匹配"与"所属会话名匹配"结合起来。
         try:
             from src.infra.storage.mongodb import get_mongo_client
 
@@ -258,6 +280,7 @@ class RevealedFileStorage:
         from bson import ObjectId
 
         # Use aggregation pipeline update for atomic toggle
+        # 用聚合管道形式的 update（而非先读后写）保证"取反"操作是原子的，避免并发请求下的竞态。
         result = await self.collection.update_one(
             {"_id": ObjectId(file_id), "user_id": user_id},
             [{"$set": {"is_favorite": {"$not": {"$ifNull": ["$is_favorite", False]}}}}],
@@ -292,6 +315,7 @@ class RevealedFileStorage:
         if session_id:
             query["session_id"] = session_id
         if project_id == "none":
+            # 特殊值 "none" 表示筛选"未归属任何项目"的文件，与"不传 project_id 参数"区分开。
             query["project_id"] = None
         elif project_id:
             query["project_id"] = project_id
@@ -319,6 +343,7 @@ class RevealedFileStorage:
             sort_key = "created_at"
 
         cursor = self.collection.find(query).sort(sort_key, sort_dir).skip(skip).limit(limit)
+        # 并发发出"统计总数"与"取当前页数据"两个查询，减少一次往返等待时间。
         total, items = await asyncio.gather(
             self.collection.count_documents(query),
             cursor.to_list(length=limit),
@@ -411,6 +436,8 @@ class RevealedFileStorage:
             file_sort_key = "created_at"
 
         # Aggregate: one doc per session with the latest matching file timestamp
+        # 第一阶段聚合：按 session_id 分组，得到每个会话内"最新文件时间"和"文件总数"，
+        # 这一步只用于确定会话级别的排序与分页，尚未取出具体文件内容。
         pipeline: list[Dict[str, Any]] = [
             {"$match": query},
             {
@@ -425,6 +452,7 @@ class RevealedFileStorage:
             pipeline.append({"$sort": {"latest_file_at": sort_dir}})
         elif file_sort_key == "file_name":
             # Sort sessions by the alphabetically first/last file name within the session
+            # 若按文件名排序会话，需要 $lookup 回原集合找出该会话内排序后的第一个文件名作为排序依据。
             pipeline.append(
                 {
                     "$lookup": {
@@ -454,6 +482,7 @@ class RevealedFileStorage:
             )
             pipeline.append({"$sort": {"_name_sample.file_name": sort_dir}})
         elif file_sort_key == "file_size":
+            # 同上，按文件大小排序会话时同样需要 $lookup 找出该会话内排序后的第一个文件的大小。
             pipeline.append(
                 {
                     "$lookup": {
@@ -539,6 +568,8 @@ class RevealedFileStorage:
         name_map: Dict[str, Optional[str]] = {s["session_id"]: s.get("name") for s in sessions}
 
         # Group files by session
+        # 逐会话查询文件预览，每个会话最多取 REVEALED_FILE_GROUPED_FILES_PER_SESSION_MAX 条，
+        # 用循环 + 单独查询而非一次性聚合，是为了保证"每会话限量"这一约束能被精确应用。
         files_by_session: Dict[str, list] = {sid: [] for sid in session_ids}
         for sid in session_ids:
             file_query = {**file_query_base, "session_id": sid}
@@ -643,14 +674,17 @@ class RevealedFileStorage:
         return result.modified_count
 
     async def close(self) -> None:
+        # 释放集合引用，供上层在应用关闭时统一清理。
         self._collection = None
 
 
 # Singleton
+# 进程级单例，避免重复创建存储实例及其底层连接。
 _revealed_file_storage: Optional[RevealedFileStorage] = None
 
 
 def get_revealed_file_storage() -> RevealedFileStorage:
+    # 惰性获取单例。
     global _revealed_file_storage
     if _revealed_file_storage is None:
         _revealed_file_storage = RevealedFileStorage()
@@ -658,6 +692,7 @@ def get_revealed_file_storage() -> RevealedFileStorage:
 
 
 async def close_revealed_file_storage() -> None:
+    # 应用关闭时释放单例资源。
     global _revealed_file_storage
     storage = _revealed_file_storage
     _revealed_file_storage = None

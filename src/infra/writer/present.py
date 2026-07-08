@@ -18,6 +18,14 @@ Writer 模块 - 统一流式输出 + 事件存储
 - done: 流结束
 - error: 错误
 """
+# 中文补充说明：本文件是 Presenter 的组装入口——真正的事件构建逻辑在
+# presenter_events.EventPresenterMixin（同步、纯数据构建），落库逻辑在
+# presenter_storage.StoragePresenterMixin（异步、对接 Redis+MongoDB 的
+# DualEventWriter），下面的 Presenter 类通过多重继承把两者组合成一个整体，
+# 再在此基础上补充一批 emit_* 便捷方法（= present_x 构建事件 + save_event 落库，
+# 一次调用同时完成"生成事件"与"持久化"两件事）。
+# 这里的"事件契约"必须与前端严格对齐：事件类型名、data 字段结构一旦变化，
+# 需要同步检查前端 SSE 解析逻辑，否则会出现前端无法识别/渲染新事件的问题。
 
 import asyncio
 from typing import Any, AsyncGenerator, Dict, List, Optional, Sequence
@@ -66,7 +74,9 @@ class Presenter(EventPresenterMixin, StoragePresenterMixin):
         self.config = config or PresenterConfig()
         self._tool_calls: List[Dict] = []
         self._step_count: int = 0
+        # DualEventWriter 实例，懒加载（见 StoragePresenterMixin._get_dual_writer）
         self._dual_writer = None
+        # 以下均为一次性/终态动作的幂等标记，防止同一 Presenter 实例内重复执行
         self._trace_created: bool = False
         self._completed: bool = False
         self._token_usage_recorded: bool = False
@@ -77,6 +87,9 @@ class Presenter(EventPresenterMixin, StoragePresenterMixin):
     @property
     def trace_id(self) -> str:
         """获取 trace_id (延迟生成)"""
+        # 中文：延迟到第一次访问时才生成，这样如果调用方在构造 Presenter 后、
+        # 首次访问 trace_id 前手动设置了 config.trace_id（例如从上游传递过来），
+        # 就会直接复用外部传入的值，而不是覆盖生成一个新的
         if not self.config.trace_id:
             self.config.trace_id = _generate_trace_id()
         return self.config.trace_id
@@ -88,6 +101,7 @@ class Presenter(EventPresenterMixin, StoragePresenterMixin):
     @property
     def run_id(self) -> str:
         """获取 run_id (延迟生成，用于 LangSmith 关联)"""
+        # 同 trace_id，延迟生成以支持外部传入复用
         if not self.config.run_id:
             self.config.run_id = _generate_run_id()
         return self.config.run_id
@@ -105,6 +119,7 @@ class Presenter(EventPresenterMixin, StoragePresenterMixin):
         """获取 LangSmith trace URL"""
         import os
 
+        # 未开启 LangSmith 追踪时直接返回 None，调用方应据此判断是否展示该链接
         if os.getenv("LANGSMITH_TRACING", "false").lower() != "true":
             return None
 
@@ -112,6 +127,8 @@ class Presenter(EventPresenterMixin, StoragePresenterMixin):
         return f"https://smith.langchain.com/o/default/projects/p/{project}/r/{self.run_id}"
 
     # ==================== 异步流式输出方法 (构建 + 保存) ====================
+    # 中文：以下 emit_* 方法统一遵循"present_x() 构建事件 -> await save_event()
+    # 落库 -> 返回事件"的固定模式，是 present_x 系列同步方法的异步落库版本。
 
     async def emit_text(self, content: str) -> Dict[str, Any]:
         """输出文本并保存事件"""
@@ -129,6 +146,9 @@ class Presenter(EventPresenterMixin, StoragePresenterMixin):
             content: 完整文本
             chunk_size: 分块大小，0 表示按字符输出
         """
+        # 中文：chunk_size=0 时逐字符输出（模拟最细粒度的打字机效果）；
+        # 否则按固定长度切块输出。chunk_delay > 0 时在每块之间人为加入延迟，
+        # 用于演示/测试场景模拟真实流式输出的节奏感
         if chunk_size == 0:
             for char in content:
                 event = await self.emit_text(char)
@@ -155,6 +175,8 @@ class Presenter(EventPresenterMixin, StoragePresenterMixin):
     ) -> Dict[str, Any]:
         """输出推荐追问列表并保存"""
         event = self.present_recommend_questions(questions)
+        # 中文：推荐追问在一次运行中只应该落库一次；重复调用时仍返回构建好的
+        # 事件（供本次继续 yield 展示），但不会再次写入存储
         if self._recommend_questions_recorded:
             return event
         await self.save_event(event)
@@ -173,6 +195,8 @@ class Presenter(EventPresenterMixin, StoragePresenterMixin):
             content, attachments, message_id=message_id, enabled_skills=enabled_skills
         )
         await self.save_event(event)
+        # 中文：除了落库事件本身，用户消息还有两个附带的"副作用"——
+        # 1）把消息文本追加进会话的全文搜索索引，支持后续按内容搜索历史会话
         if self.config.session_id:
             try:
                 from src.infra.session.storage import SessionStorage
@@ -183,6 +207,7 @@ class Presenter(EventPresenterMixin, StoragePresenterMixin):
                 )
             except Exception as e:
                 logger.warning("Failed to update session search index for user message: %s", e)
+        # 2）为消息中引用的附件增加引用计数，避免附件在仍被消息引用时被后台垃圾回收清理
         attachment_keys = _extract_attachment_keys(attachments)
         if attachment_keys:
             try:
@@ -258,6 +283,8 @@ def create_presenter(
     user_id: Optional[str] = None,
 ) -> Presenter:
     """创建 Presenter 实例"""
+    # 中文：便捷构造函数——按位置/关键字参数直接拼出 PresenterConfig，
+    # 免去调用方手动 import PresenterConfig 再构造的步骤
     config = PresenterConfig(
         session_id=session_id,
         agent_id=agent_id,

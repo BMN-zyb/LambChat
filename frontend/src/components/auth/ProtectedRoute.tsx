@@ -63,6 +63,8 @@ function NoPermission() {
   );
 }
 
+// 路由守卫：按「加载中 → 未登录 → 无权限 → 通过」的顺序决定渲染。
+// 支持多种权限校验（任意其一 / 全部满足 / 管理员），无权限时可 Toast、重定向或显示兜底页。
 export function ProtectedRoute({
   children,
   permissions,

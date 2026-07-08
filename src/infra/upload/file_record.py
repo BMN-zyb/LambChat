@@ -7,10 +7,12 @@ from src.infra.logging import get_logger
 from src.infra.utils.datetime import utc_now
 from src.kernel.config import settings
 
+# 单次「引用增减」操作允许处理的最大 key 数,防止异常输入导致一次更新过多文档。
 REFERENCE_KEYS_MAX = 100
 
 
 def _bounded_unique_keys(keys: list[str], *, limit: int = REFERENCE_KEYS_MAX) -> list[str]:
+    # 清洗并去重 key 列表:去空白、丢弃空串与重复项,且最多保留 limit 个(有界)。
     unique_keys: list[str] = []
     seen = set()
     for key in keys:
@@ -27,15 +29,20 @@ def _bounded_unique_keys(keys: list[str], *, limit: int = REFERENCE_KEYS_MAX) ->
 class FileRecordStorage:
     """Storage layer for file records, keyed by content hash."""
 
+    # 以内容哈希(hash)去重:相同内容只存一份对象,file_records 文档用 reference_count
+    # 记录被多少条已持久化消息引用,引用归零后可安全清理底层对象。
+
     REFERENCE_KEYS_MAX = REFERENCE_KEYS_MAX
 
     def __init__(self):
+        # MongoDB 集合(惰性加载)与「后台建索引」任务句柄。
         self._collection = None
         self._indexes_task: asyncio.Task[None] | None = None
 
     @property
     def collection(self):
         """Lazy-load MongoDB collection."""
+        # 首次访问时才连接 Mongo 并取集合,避免模块导入期建立连接。
         if self._collection is None:
             from src.infra.storage.mongodb import get_mongo_client
 
@@ -46,6 +53,8 @@ class FileRecordStorage:
 
     async def ensure_indexes_if_needed(self):
         """Ensure indexes exist (called lazily on first use)."""
+        # 首次使用时「触发一次」后台建索引:用 _indexes_ensured 标志保证只触发一次,
+        # 并以 fire-and-forget 任务执行(不阻塞当前请求);done 回调读取 exception 以免"未取回异常"告警。
         if not hasattr(self, "_indexes_ensured"):
             self._indexes_ensured = True
             task = asyncio.create_task(self._ensure_indexes())
@@ -54,6 +63,8 @@ class FileRecordStorage:
 
     async def _ensure_indexes(self):
         """Create required indexes on the file_records collection."""
+        # 建索引:hash/key 唯一(保证去重与按 key 定位),uploaded_by 普通索引(按上传者查询)。
+        # background=True 后台建索引;失败仅告警,不影响主流程。
         try:
             collection = self.collection
             await collection.create_index("hash", unique=True, background=True)
@@ -74,6 +85,7 @@ class FileRecordStorage:
         await self.ensure_indexes_if_needed()
         doc = await self.collection.find_one({"hash": file_hash})
         if doc:
+            # 把 Mongo 的 _id(ObjectId)转成字符串 id,便于对外(JSON)使用。
             doc["id"] = str(doc.pop("_id"))
         return doc
 
@@ -118,6 +130,7 @@ class FileRecordStorage:
         """
         await self.ensure_indexes_if_needed()
         now = utc_now()
+        # 新记录初始 reference_count=0;引用计数在消息真正持久化时才通过 add_references 增加。
         doc = {
             "hash": file_hash,
             "key": key,
@@ -136,6 +149,7 @@ class FileRecordStorage:
 
     async def add_references(self, keys: list[str]) -> int:
         """Increment persisted message references for the given storage keys."""
+        # 批量给这些 key 的引用计数 +1(先清洗去重);返回实际被修改的文档数。
         unique_keys = _bounded_unique_keys(keys)
         if not unique_keys:
             return 0
@@ -149,6 +163,7 @@ class FileRecordStorage:
 
     async def release_references(self, keys: list[str]) -> int:
         """Decrement persisted message references for the given storage keys."""
+        # 批量 -1,但仅对 reference_count>0 的文档生效,避免计数被减成负数。
         unique_keys = _bounded_unique_keys(keys)
         if not unique_keys:
             return 0
@@ -190,6 +205,7 @@ class FileRecordStorage:
         return result.deleted_count > 0
 
     async def close(self) -> None:
+        # 收尾:取消后台建索引任务、清除「已建索引」标志与集合引用,便于重置/释放。
         task = self._indexes_task
         self._indexes_task = None
         if task is not None and not task.done():

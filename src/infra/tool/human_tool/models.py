@@ -13,6 +13,9 @@ from pydantic import BaseModel, Field
 class FieldType(str, Enum):
     """表单字段类型枚举"""
 
+    # 继承 str 使得该枚举既能参与序列化（json_schema/model_dump 里直接是字符串），
+    # 也能直接用字符串比较，前端根据这个值决定渲染哪种输入控件
+
     TEXT = "text"
     """单行文本输入"""
 
@@ -41,6 +44,8 @@ class FieldType(str, Enum):
 class FormField(BaseModel):
     """表单字段定义"""
 
+    # 每个 FormField 描述表单里的一个输入项；AskHumanInput.fields 是这些字段的列表，
+    # 前端据此动态渲染出一张表单，人工填写后连同 name 一起作为响应结构的 key 返回
     name: str = Field(
         default="choice",
         description="字段名称，用于标识返回值中的字段",
@@ -107,6 +112,10 @@ class FormField(BaseModel):
 class AskHumanInput(BaseModel):
     """ask_human 工具的输入参数（支持多字段表单）"""
 
+    # 本模型同时承担两个角色：
+    # 1) 作为 AskHumanTool 的 args_schema，供 LLM function calling 生成结构化参数；
+    # 2) 提供 choices/multiple 简写路径——LLM 只需给出一组选项字符串，无需手写完整的
+    #    fields 结构；具体如何把 choices 展开成单个 FormField 由 tool.py 里的实现完成
     message: str = Field(
         ...,
         description="向用户展示的提示消息，说明需要用户提供什么信息",

@@ -16,6 +16,7 @@ from src.kernel.schemas.share import (
     ShareVisibility,
 )
 
+# 分享列表单页/单次返回的最大条数上限，防止 limit 参数被传入过大值。
 SHARE_LIST_LIMIT_MAX = 100
 
 
@@ -27,6 +28,7 @@ class ShareStorage:
     """
 
     def __init__(self):
+        # 集合连接延迟初始化。
         self._collection = None
 
     @property
@@ -42,8 +44,11 @@ class ShareStorage:
 
     async def ensure_indexes(self):
         """确保索引存在"""
+        # share_id 是对外暴露的公开分享链接标识，必须唯一。
         await self.collection.create_index("share_id", unique=True)
+        # 按 session_id 查询该会话下的所有分享记录。
         await self.collection.create_index("session_id")
+        # 按 owner_id 查询某用户创建的所有分享记录。
         await self.collection.create_index("owner_id")
 
     def _generate_share_id(self) -> str:
@@ -52,6 +57,8 @@ class ShareStorage:
 
     def _build_shared_session(self, share_dict: dict) -> SharedSession:
         """Convert a Mongo document into a SharedSession with legacy defaults."""
+        # 兼容历史数据：share_type/visibility 字段若缺失则回退到默认值（FULL/PUBLIC），
+        # updated_at 缺失则回退为 created_at，避免旧记录在反序列化时报错。
         normalized = dict(share_dict)
         normalized["id"] = str(normalized.pop("_id"))
         created_at = normalized.get("created_at") or utc_now()
@@ -76,6 +83,7 @@ class ShareStorage:
     ) -> SharedSession:
         """创建分享记录"""
         now = utc_now()
+        # 生成一个新的、不可预测的短分享 ID 作为公开访问入口。
         share_id = self._generate_share_id()
 
         share_dict = {
@@ -106,6 +114,7 @@ class ShareStorage:
 
     async def get_by_share_id(self, share_id: str) -> Optional[SharedSession]:
         """通过分享 ID 获取分享记录"""
+        # 这是分享页面对外访问的主查询路径：任何人拿到 share_id 都可以查询（权限校验在上层完成）。
         share_dict = await self.collection.find_one({"share_id": share_id})
 
         if not share_dict:
@@ -117,6 +126,7 @@ class ShareStorage:
         """通过数据库 ID 获取分享记录"""
         from bson import ObjectId
 
+        # share_db_id 非法 ObjectId 格式时直接返回 None，而不是让异常向上抛出。
         try:
             share_dict = await self.collection.find_one({"_id": ObjectId(share_db_id)})
         except Exception:
@@ -138,6 +148,7 @@ class ShareStorage:
         query = {"owner_id": owner_id}
 
         cursor = self.collection.find(query).skip(skip).limit(limit).sort("created_at", -1)
+        # 并发获取总数与当前页数据，减少一次往返等待。
         total, share_dicts = await asyncio.gather(
             self.collection.count_documents(query),
             cursor.to_list(length=limit),
@@ -190,6 +201,7 @@ class ShareStorage:
         """删除分享记录（需验证所有权）"""
         from bson import ObjectId
 
+        # 查询条件里同时带上 owner_id，确保只能删除自己创建的分享，防止越权删除他人分享。
         try:
             result = await self.collection.delete_one(
                 {"_id": ObjectId(share_db_id), "owner_id": owner_id}
@@ -215,6 +227,7 @@ class ShareStorage:
             return None
 
         now = utc_now()
+        # 同样带上 owner_id 校验所有权；share_id 本身不在 $set 范围内，因此更新不会改变对外访问链接。
         result = await self.collection.update_one(
             {"_id": object_id, "owner_id": owner_id},
             {

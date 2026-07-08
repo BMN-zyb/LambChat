@@ -14,6 +14,8 @@ logger = get_logger(__name__)
 SKILLS_GREP_MAX_MATCHES = 1000
 
 
+# 逐行遍历文本并产出 (行号, 行内容)：手动查找 '\n' 而非 splitlines()，避免为大文件
+# 一次性构造整份行列表，节省内存；行号从 1 开始。
 def _iter_text_lines(content: str):
     start = 0
     line_number = 1
@@ -27,6 +29,8 @@ def _iter_text_lines(content: str):
         line_number += 1
 
 
+# 在给定文件集合里做"子串"匹配（非正则）：命中即记一条 GrepMatch，path 前缀成
+# /<skill_name>/<file>，单行文本截断到 2000 字符；累计达到 max_matches 立即返回。
 def _grep_skill_files(
     pattern: str,
     skill_name: str,
@@ -65,6 +69,7 @@ async def grep_single_skill(
     max_matches: int = SKILLS_GREP_MAX_MATCHES,
 ) -> list[GrepMatch]:
     """在单个 skill 的指定文件中搜索"""
+    # 不可见的 skill 直接跳过（可见性/权限由 is_skill_visible_fn 判定）
     if not is_skill_visible_fn(skill_name):
         return []
 
@@ -72,6 +77,7 @@ async def grep_single_skill(
         return []
 
     if glob_pattern:
+        # 按 glob 过滤候选文件：整路径或 basename 命中其一即保留
         file_paths = [
             p
             for p in file_paths
@@ -111,6 +117,7 @@ def grep_across_skills(
                 if fnmatch.fnmatch(fp, glob_pattern)
                 or fnmatch.fnmatch(fp.split("/")[-1], glob_pattern)
             ]
+        # 剩余配额 = max_matches - 已收集数，逐个 skill 累加，达到上限即提前返回
         skill_matches = _grep_skill_files(
             pattern,
             skill_name,
@@ -138,6 +145,7 @@ def build_file_list_from_paths(skill_name: str, prefix: str, paths: list[str]) -
         relative = file_path[len(prefix_slash) :]
         slash_idx = relative.find("/")
         if slash_idx >= 0:
+            # 相对路径里还含 '/'，说明是子目录下的文件 → 只登记一次该子目录条目（去重）
             dir_name = relative[:slash_idx]
             if dir_name not in seen_dirs:
                 seen_dirs.add(dir_name)

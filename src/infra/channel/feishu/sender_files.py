@@ -11,11 +11,13 @@ from src.infra.logging import get_logger
 from src.kernel.config import settings
 
 logger = get_logger(__name__)
+# 旧版一次性字节下载上限；字节上传的默认上限（可被配置覆盖）。
 _LEGACY_BYTES_DOWNLOAD_MAX_BYTES = 2 * 1024 * 1024
 _UPLOAD_BYTES_MAX_SIZE = 20 * 1024 * 1024
 
 
 def _get_upload_bytes_max_size() -> int:
+    # 读取上传字节上限：优先用配置项，至少为 1（避免 0/负数导致全部被拒）。
     return max(
         int(getattr(settings, "FEISHU_UPLOAD_BYTES_MAX_SIZE", _UPLOAD_BYTES_MAX_SIZE) or 0), 1
     )

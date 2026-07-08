@@ -14,6 +14,11 @@ from src.infra.settings.storage import (
 )
 from src.kernel.schemas.setting import SettingItem, SettingType
 
+# 取值优先级：MongoDB（管理员通过界面/接口修改过的值）> .env 环境变量 > SETTING_DEFINITIONS 中
+# 声明的默认值。本类是应用范围内的单例（见 get_instance），持有一个 SettingsStorage 实例负责
+# 真正的数据库读写；写入成功后会通过 SettingsPubSub 把变更广播给其他实例，
+# 使多实例部署下所有进程的内存态配置最终保持一致。
+
 
 class SettingsService:
     """
@@ -32,12 +37,15 @@ class SettingsService:
     @classmethod
     def get_instance(cls) -> "SettingsService":
         """Get singleton instance"""
+        # 懒创建单例：本项目在单事件循环下调用，无需额外加锁
         if cls._instance is None:
             cls._instance = cls()
         return cls._instance
 
     async def initialize(self) -> None:
         """Initialize service and import from .env if needed"""
+        # 只在应用启动时真正执行一次：把 .env 中已配置但数据库里还没有记录的配置项导入数据库，
+        # 之后同一进程内即使再次调用也会因 _initialized 标记而直接跳过
         if self._initialized:
             return
 
@@ -58,19 +66,23 @@ class SettingsService:
         # Check if key is valid
         if key not in SETTING_DEFINITIONS:
             # Try environment variable directly
+            # 未在 SETTING_DEFINITIONS 中声明的 key 视为"临时/自定义"配置，直接透传环境变量，不查数据库
             return os.environ.get(key)
 
         # Try database first
+        # 优先查数据库：管理员可能已经通过界面/接口覆盖过默认值
         setting = await self._storage.get(key)
         if setting is not None:
             return setting.value
 
         # Fallback to environment variable
+        # 数据库里没有覆盖记录，回退到 .env / 环境变量
         env_value = os.environ.get(key)
         if env_value is not None:
             return await self._parse_env_value_async(key, env_value)
 
         # Return default
+        # 环境变量也没有配置，最终回退到代码里声明的默认值
         return SETTING_DEFINITIONS[key]["default"]
 
     async def get_raw(self, key: str) -> Any:
@@ -126,14 +138,18 @@ class SettingsService:
         Returns:
             Updated setting item
         """
+        # 先写入数据库——这是配置的唯一持久化来源
         result = await self._storage.set(key, value, user_id)
 
         # Refresh the global settings object to reflect the change
+        # 写库成功后立即刷新本进程持有的全局 settings 对象，
+        # 保证同一进程内紧接着发生的读取能立刻看到新值，无需等待下一次轮询/重启
         from src.kernel.config import refresh_settings
 
         await refresh_settings(key)
 
         # Broadcast to other instances via Redis pub/sub
+        # 再通过 Redis 广播给其他实例，让它们各自刷新本地内存态，实现跨实例配置同步
         await self._publish_change(key, value)
 
         return result
@@ -150,8 +166,11 @@ class SettingsService:
         """
         imported = 0
 
+        # 遍历所有已声明的配置项，逐个检查是否需要从环境变量导入初始值
         for key, definition in SETTING_DEFINITIONS.items():
             # Check if already in database
+            # 数据库中已有明确写入记录（updated_at 不为空，说明曾被真正写入过而非默认值兜底）
+            # 则跳过，不用 .env 覆盖管理员已经设置过的值
             existing = await self._storage.get(key)
             if existing is not None and existing.updated_at is not None:
                 continue  # Already set, skip
@@ -162,6 +181,8 @@ class SettingsService:
                 continue  # No env value, skip
 
             # Parse and store via self.set() to trigger refresh + pub/sub broadcast
+            # 按配置声明的类型解析字符串值；通过 self.set() 写入是为了复用其中的
+            # "刷新本地全局配置 + 广播其他实例" 逻辑，而不是绕过它直接调用 storage.set
             parsed_value = await self._parse_env_value_async(key, env_value)
             result = await self.set(key, parsed_value, "system:init")
             if result is not None:
@@ -182,6 +203,7 @@ class SettingsService:
         count = await self._storage.reset(key)
 
         # Refresh the global settings object to reflect the change
+        # 与 set() 一样，重置后也要刷新本进程全局配置，并广播给其他实例
         from src.kernel.config import refresh_settings
 
         await refresh_settings(key)
@@ -204,6 +226,8 @@ class SettingsService:
         Returns:
             Setting value from environment or default
         """
+        # 同步接口只能读环境变量/默认值，读不到数据库中的覆盖值——
+        # 这是历史遗留的向后兼容入口，新代码应优先使用异步的 get()
         if key not in SETTING_DEFINITIONS:
             return os.environ.get(key)
 
@@ -215,6 +239,8 @@ class SettingsService:
 
     def _parse_env_value(self, key: str, value: str) -> Any:
         """Parse environment variable string to correct type"""
+        # 把 .env 中天然是字符串的值，按配置声明的类型转换为 bool/number/json 等原生类型；
+        # 未声明类型或转换失败时原样返回字符串
         if key not in SETTING_DEFINITIONS:
             return value
 
@@ -224,6 +250,7 @@ class SettingsService:
             return value.lower() in ("true", "1", "yes", "on")
         elif setting_type == SettingType.NUMBER:
             try:
+                # 先尝试整数，失败再退化为浮点数
                 return int(value)
             except ValueError:
                 return float(value)
@@ -244,6 +271,8 @@ class SettingsService:
 
         setting_type = SETTING_DEFINITIONS[key]["type"]
         if setting_type == SettingType.JSON:
+            # 只有 JSON 解析可能相对更耗时（值可能较大），丢到线程池执行；
+            # 其余类型转换本身足够轻量，直接复用同步版本即可
             try:
                 return await run_blocking_io(json.loads, value)
             except json.JSONDecodeError:
@@ -264,6 +293,8 @@ class SettingsService:
 
     async def close(self) -> None:
         """Close connections"""
+        # 关闭底层存储连接，并把自身从单例槽位里摘掉——下次 get_instance() 会创建全新实例。
+        # 主要用于测试之间的状态隔离，或需要彻底重建连接时。
         await self._storage.close()
         self._initialized = False
         if SettingsService._instance is self:
@@ -273,6 +304,7 @@ class SettingsService:
     async def _publish_change(key: Optional[str], value: Any) -> None:
         """Broadcast a settings change to other instances via Redis pub/sub."""
         try:
+            # 延迟导入，避免模块加载期产生循环依赖
             from src.infra.settings.pubsub import get_settings_pubsub
             from src.infra.storage.redis import get_redis_client
             from src.infra.task.constants import SETTINGS_CHANNEL
@@ -286,6 +318,8 @@ class SettingsService:
             )
         except Exception as e:
             # Pub/sub failure should not block the setting update
+            # 广播失败（例如 Redis 暂时不可用）不应影响本次配置修改的主流程——
+            # 本实例自身已经生效，只是其他实例暂时未同步，等它们后续自行刷新时会追上
             import logging
 
             logging.getLogger(__name__).warning(f"Failed to publish setting change: {e}")

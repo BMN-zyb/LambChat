@@ -24,10 +24,12 @@ from src.kernel.schemas.feedback import (
 
 logger = get_logger(__name__)
 
+# 反馈列表分页查询单页最多返回的条数上限
 FEEDBACK_LIST_LIMIT_MAX = 100
 
 
 def _bounded_limit(limit: int) -> int:
+    # 收敛 limit 到 [1, FEEDBACK_LIST_LIMIT_MAX] 区间
     return min(max(int(limit), 1), FEEDBACK_LIST_LIMIT_MAX)
 
 
@@ -49,6 +51,8 @@ class FeedbackStorage:
     async def create_indexes(self) -> None:
         """创建索引"""
         # 唯一索引：每个用户对每个 run 只能有一条反馈
+        # 这是"每用户每次运行只能反馈一次"业务规则在数据库层面的兜底保证，
+        # 即便应用层的 get_user_feedback_for_run 检查存在竞态，唯一索引也能拦截重复写入
         await self.collection.create_index(
             [("user_id", 1), ("session_id", 1), ("run_id", 1)], unique=True, name="user_run_unique"
         )
@@ -79,6 +83,7 @@ class FeedbackStorage:
             ValueError: 如果用户已对该 run 提交过反馈
         """
         # 检查是否已存在
+        # 应用层预检查：提前给出友好的中文错误提示；真正的并发安全兜底靠上面的唯一索引
         existing = await self.get_user_feedback_for_run(
             user_id, feedback_data.session_id, feedback_data.run_id
         )
@@ -96,6 +101,7 @@ class FeedbackStorage:
             "created_at": now,
         }
         if feedback_data.attachments:
+            # by_alias=True：保持附件字段按模型定义的别名（而非 Python 属性名）序列化落库
             feedback_dict["attachments"] = [
                 a.model_dump(by_alias=True) for a in feedback_data.attachments
             ]
@@ -167,6 +173,7 @@ class FeedbackStorage:
         Returns:
             反馈列表
         """
+        # 单个 run 下的反馈数量通常很小，这里用固定上限 100 兜底防御异常情况
         cursor = (
             self.collection.find(
                 {
@@ -205,6 +212,7 @@ class FeedbackStorage:
             反馈列表
         """
         limit = _bounded_limit(limit)
+        # 三个过滤条件均为可选，按需叠加到 query 上（相当于 AND 组合），全部为空时即查全表
         query: dict[str, Any] = {}
         if rating is not None:
             query["rating"] = rating
@@ -237,6 +245,7 @@ class FeedbackStorage:
         Returns:
             数量
         """
+        # 与 list() 保持同样的过滤条件构造逻辑，便于配合分页展示总数
         query: dict[str, Any] = {}
         if rating is not None:
             query["rating"] = rating
@@ -264,6 +273,7 @@ class FeedbackStorage:
             return False
 
     async def close(self) -> None:
+        # 释放集合引用，下次访问 collection property 时会重新获取
         self._collection = None
 
     async def get_stats(
@@ -288,6 +298,7 @@ class FeedbackStorage:
             query["run_id"] = run_id
 
         # Use aggregation to get all counts in a single query
+        # 用一次聚合查询同时算出总数、好评数、差评数，避免分别执行三次 count_documents
         pipeline = [
             {"$match": query},
             {
@@ -303,6 +314,7 @@ class FeedbackStorage:
         result = await self.collection.aggregate(pipeline).to_list(length=1)
 
         if not result:
+            # 没有任何匹配的反馈记录时，$group 不会产生结果行，需要手动兜底返回全零统计
             return FeedbackStats(total_count=0, up_count=0, down_count=0, up_percentage=0.0)
 
         stats = result[0]

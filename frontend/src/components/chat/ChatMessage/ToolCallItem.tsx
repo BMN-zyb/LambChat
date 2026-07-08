@@ -17,6 +17,7 @@ import {
   type ToolCallPanelData,
 } from "./toolCallPanelStore";
 
+// 工具执行中（pending）时用 requestAnimationFrame 持续刷新已耗时秒数；非 pending 时归零
 /** Returns the number of seconds elapsed since the tool started, or 0 when not pending. */
 function useElapsedSeconds(isPending?: boolean, startedAt?: string): number {
   const [elapsed, setElapsed] = useState(0);
@@ -55,6 +56,7 @@ function formatElapsed(seconds: number): string {
   return `${m}m ${s}s`;
 }
 
+// 把任意值压成一行短预览文本（折叠空白、超长截断加省略号），用于胶囊摘要
 function compactPreviewText(
   value: unknown,
   maxLength = 72,
@@ -67,6 +69,7 @@ function compactPreviewText(
   return `${compact.slice(0, maxLength - 1)}…`;
 }
 
+// 为工具胶囊生成简短摘要：优先取 command/path/query 等关键参数，否则取前两个键值对
 function buildToolPillSummary(
   args: Record<string, unknown>,
 ): string | undefined {
@@ -99,6 +102,7 @@ function buildToolPillSummary(
   return entries.length > 0 ? entries.join(" ") : undefined;
 }
 
+// 统一从本文件再导出各专用工具展示组件（供 MessagePartRenderer 按工具名选用）
 // Re-export all sub-components
 export { ReadFileItem } from "./items/ReadFileItem";
 export { EditFileItem } from "./items/EditFileItem";
@@ -125,6 +129,7 @@ export { AskHumanItem } from "./items/AskHumanItem";
 export { ToolSearchItem } from "./items/ToolSearchItem";
 export { EvalItem } from "./items/EvalItem";
 
+// 由工具属性推导胶囊显示状态：pending→loading、取消→cancelled、成功→success、有结果但失败→error
 /** Derive status from tool props */
 function deriveStatus(props: {
   isPending?: boolean;
@@ -143,6 +148,7 @@ function deriveStatus(props: {
 // Tool call panel content (reactive)
 // ==========================================
 
+// 持久化工具面板的内容：订阅 store，实时展示该工具调用的参数、结果与运行耗时
 function ToolCallPanelContent({ toolCallId }: { toolCallId: string }) {
   const { t } = useTranslation();
   const [, forceRender] = useState(0);
@@ -235,6 +241,8 @@ function useElapsedSecondsForPanel(
 // Collapsible Tool Call Item
 // ==========================================
 
+// 通用工具调用展示（紧凑的可折叠胶囊）：没有专用组件的工具都用它。
+// 显示工具名 + 参数摘要，可内联展开或打开右侧持久面板查看完整参数/结果。
 // Collapsible Tool Call Item (compact design)
 export function ToolCallItem({
   id,
@@ -267,6 +275,7 @@ export function ToolCallItem({
     [startedAt, completedAt],
   );
 
+  // 解析 MCP 工具名（形如 "server:tool"）：拆出服务器名与工具名
   // Parse MCP server name from tool name (format: "server_name:tool_name")
   const colonIdx = name.indexOf(":");
   const isMcpTool = colonIdx > 0;
@@ -290,6 +299,7 @@ export function ToolCallItem({
 
   const hasArgs = Object.keys(displayArgs).length > 0;
 
+  // 推导当前工具状态，并组装胶囊标签（工具名 + 参数摘要）
   const status = deriveStatus({ isPending, cancelled, success, hasResult });
 
   const canExpand = hasArgs || hasResult;
@@ -299,6 +309,7 @@ export function ToolCallItem({
   // Build a panelKey from the tool call ID (used for persistent panel identity)
   const panelKey = useMemo(() => (id ? `tool:${id}` : undefined), [id]);
 
+  // 把实时数据同步进响应式 store，供已打开的持久面板读取
   // Sync live data to the reactive store so the persistent panel can read it
   const storeData = useMemo<ToolCallPanelData | null>(
     () =>
@@ -390,6 +401,7 @@ export function ToolCallItem({
     </div>
   );
 
+  // 打开右侧持久化工具面板，展示该工具调用的完整详情
   const handlePanelOpen = () => {
     if (!canExpand || !id) return;
     openPersistentToolPanel({

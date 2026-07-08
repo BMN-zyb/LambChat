@@ -13,15 +13,19 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from src.infra.logging import TraceContext
 
 logger = logging.getLogger(__name__)
+# 合法 request_id 的正则：字母数字与 . _ : - ，长度 1~128；用于校验客户端传入的 X-Request-ID，避免非法/超长值进入日志与响应头
 REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 
 
+# 生成或复用请求 ID：客户端传入的 X-Request-ID 若合法则沿用（便于跨系统串联同一请求），否则生成新的 uuid hex
 def _make_request_id(raw_request_id: str | None) -> str:
     if raw_request_id and REQUEST_ID_PATTERN.fullmatch(raw_request_id):
         return raw_request_id
     return uuid.uuid4().hex
 
 
+# 汇总当前请求的日志上下文字段，作为 logging 的 extra 传入，使每条日志都自动带上追踪信息。
+# 取值优先级：先取 TraceContext 中的值，再回退到 request.state 上由 UserContextMiddleware 写入的 session_id/user_id，最后以 "-" 占位。
 def _current_log_context(request: Request | None = None) -> dict[str, str]:
     info = TraceContext.get()
     request_context = TraceContext.get_request_context()
@@ -40,6 +44,8 @@ def _current_log_context(request: Request | None = None) -> dict[str, str]:
     }
 
 
+# 追踪中间件：位于中间件链靠外层（在 RequestBodyLimit 之后、Auth 之前执行）。
+# 为每个请求生成 request_id/trace_id/span_id 写入追踪上下文与响应头，并统计处理耗时、输出统一的访问日志。
 class TracingMiddleware(BaseHTTPMiddleware):
     """
     追踪中间件
@@ -53,11 +59,13 @@ class TracingMiddleware(BaseHTTPMiddleware):
         request_id = _make_request_id(request.headers.get("X-Request-ID"))
         # 从请求头获取或生成 trace_id（支持分布式追踪）
         trace_id = request.headers.get("X-Trace-ID") or str(uuid.uuid4())[:16]
+        # span_id 标识本次处理这一段（span），取 uuid 前 8 位
         span_id = str(uuid.uuid4())[:8]
 
         # 设置追踪上下文
         TraceContext.set(trace_id=trace_id, span_id=span_id, request_id=request_id)
         TraceContext.set_request_context(request_id=request_id, trace_id=trace_id)
+        # 同时把追踪 ID 写入 request.state，供后续中间件/路由处理及响应头阶段直接读取
         request.state.request_id = request_id
         request.state.trace_id = trace_id
         request.state.span_id = span_id
@@ -68,6 +76,7 @@ class TracingMiddleware(BaseHTTPMiddleware):
         try:
             # 处理请求
             response = await call_next(request)
+        # 异常路径：补记处理耗时并输出带堆栈的失败访问日志（固定记为 status_code=500），随后重新抛出交给上层异常处理
         except Exception:
             process_time = time.time() - start_time
             client_host = request.client.host if request.client else "-"
@@ -80,6 +89,7 @@ class TracingMiddleware(BaseHTTPMiddleware):
                 extra=_current_log_context(request),
             )
             raise
+        # 正常路径：记录完成访问日志，并把追踪 ID 与处理耗时写入响应头返回客户端
         else:
             # 计算处理时间
             process_time = time.time() - start_time

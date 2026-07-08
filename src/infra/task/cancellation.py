@@ -26,20 +26,28 @@ logger = get_logger(__name__)
 
 # 内存中的中断标志集合（用于快速检查）
 # run_id -> 加入时间戳，支持定期清理过期条目
+# 进程内的「中断标志」表：run_id -> 打标时间戳。用于极低成本地快速判断某个
+# run 是否已被要求中断（check_interrupt_fast 只查这里，不做任何 IO）。分布式
+# 场景下，其他实例通过 Redis pub/sub 把取消信号同步过来后也会写入此表。
 _interrupted_runs: Dict[str, float] = {}
 
 # 清理参数
 _INTERRUPT_MAX_AGE = 600  # 10 分钟
 _INTERRUPT_CLEANUP_INTERVAL = 1000  # 每 1000 次检查触发一次清理
+# 优雅取消的等待窗口：取消后先给任务这么久自行收尾，超时才强制 cancel()。
 _GRACEFUL_CANCEL_TIMEOUT = 2.0
+# 调用 agent.close() 的超时，避免个别 agent 卡死拖垮取消流程。
 _AGENT_CLOSE_CANCEL_TIMEOUT = 2.0
 _interrupt_check_counter = 0
 
 
+# JSON 序列化放到线程池执行，避免阻塞事件循环。
 async def _cancel_payload_json_dumps(payload: dict[str, Any]) -> str:
     return await run_blocking_io(json.dumps, payload)
 
 
+# 带超时地调用 agent.close(run_id) 以中止底层 graph 执行；超时返回 False 而非
+# 抛错，保证取消主流程能继续走下去。
 async def _close_agent_safely(agent: Any, run_id: str) -> bool:
     try:
         await asyncio.wait_for(agent.close(run_id), timeout=_AGENT_CLOSE_CANCEL_TIMEOUT)
@@ -71,6 +79,14 @@ class TaskCancellation:
         self._lock = lock
         self._tasks = tasks
 
+    # 分布式取消的核心入口，采用「多级、尽力而为」的策略，逐层收紧：
+    #   1) 立刻写内存中断标志（最快，本进程内高频检查点即可感知）；
+    #   2) 写 Redis 中断信号（供任务真正运行的那个实例的检查点感知）；
+    #   3) 若任务恰在本进程，走优雅取消（先等一会，超时再强制 cancel）；
+    #   4) 调用 agent.close() 中止底层 graph；
+    #   5) 通过 pub/sub 广播，让运行该任务的其他实例就地取消；
+    #   6) 释放 Redis 并发槽位。
+    # 只要中断信号成功设置就算 success，即使任务实际在别的实例上运行。
     async def cancel_run(
         self,
         run_id: str,
@@ -179,6 +195,9 @@ class TaskCancellation:
                 except Exception as e:
                     logger.warning(f"Failed to call agent.close: {e}")
 
+        # 本进程持有该任务时的优雅取消：用 shield 包住，先给它
+        # _GRACEFUL_CANCEL_TIMEOUT 秒自行收尾（此时 run_task 会按正确顺序落
+        # 终态事件）；超时仍未结束才真正 cancel() 并等待其退出。
         if task_to_cancel is not None:
             try:
                 await asyncio.wait_for(
@@ -258,6 +277,8 @@ class TaskCancellation:
             "message": message,
         }
 
+    # 极低成本的中断检查：只查内存标志，不做任何 IO，适合在主循环里高频调用。
+    # 每调用 _INTERRUPT_CLEANUP_INTERVAL 次顺带触发一次过期条目清理，摊薄成本。
     @staticmethod
     def check_interrupt_fast(run_id: str) -> bool:
         """
@@ -282,6 +303,9 @@ class TaskCancellation:
 
         return run_id in _interrupted_runs
 
+    # 供 agent 在执行过程中调用的中断检查点：命中则抛 TaskInterruptedError。
+    # 先查内存标志（带 _INTERRUPT_MAX_AGE 时效，防止老标志误伤新任务），
+    # 再查 Redis（覆盖「取消发生在别的实例」的分布式场景）。
     @staticmethod
     async def check_interrupt(run_id: str) -> None:
         """
@@ -318,6 +342,8 @@ class TaskCancellation:
         except Exception as e:
             logger.warning(f"Failed to check Redis interrupt signal: {e}")
 
+    # 清除中断信号（内存标志 + Redis key）。任务终态收尾时调用，避免遗留标志
+    # 影响后续复用同一 run_id 的场景。
     @staticmethod
     async def clear_interrupt(run_id: str) -> None:
         """
@@ -339,6 +365,8 @@ class TaskCancellation:
             logger.warning(f"Failed to clear interrupt signal: {e}")
 
 
+# 清理内存中断标志表里超过 _INTERRUPT_MAX_AGE 的过期条目，防止无限增长导致
+# 内存泄漏。由 check_interrupt_fast 按调用次数周期性触发。
 def _cleanup_stale_interrupts() -> None:
     """清理超过 _INTERRUPT_MAX_AGE 的过期中断条目"""
     global _interrupted_runs

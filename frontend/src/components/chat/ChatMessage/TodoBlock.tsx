@@ -3,11 +3,13 @@ import { CheckCircle2, Circle, Loader2, ListTodo, XCircle } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { TodoItem, TodoStatus } from "../../../types";
 
+// TodoBlock 的 props：待办项数组 + 是否流式生成中
 interface TodoBlockProps {
   items: TodoItem[];
   isStreaming?: boolean;
 }
 
+// 各待办状态对应的图标与颜色样式（pending/in_progress/completed/cancelled）
 const statusConfig: Record<
   TodoStatus,
   { icon: typeof Circle; colorClass: string; textClass: string }
@@ -34,11 +36,13 @@ const statusConfig: Record<
   },
 };
 
+// 待办清单块：顶部显示完成进度（数量 + 进度条），下方逐条渲染任务，全部完成时进度条变绿
 export function TodoBlock({ items, isStreaming }: TodoBlockProps) {
   const { t } = useTranslation();
 
   if (!items || items.length === 0) return null;
 
+  // 统计已完成数量并计算进度百分比，判断是否全部完成
   const completedCount = items.filter((i) => i.status === "completed").length;
   const totalCount = items.length;
   const progress = totalCount > 0 ? (completedCount / totalCount) * 100 : 0;
@@ -104,6 +108,7 @@ export function TodoBlock({ items, isStreaming }: TodoBlockProps) {
   );
 }
 
+// 单条待办行：按状态显示图标（进行中转圈）与文字样式（完成/取消加删除线）
 function TodoItemRow({ item }: { item: TodoItem }) {
   const config = statusConfig[item.status];
   const Icon = config.icon;

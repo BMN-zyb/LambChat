@@ -5,6 +5,10 @@
  * message parts (text, thinking, tool, subagent, sandbox).
  * Used by eventProcessor.ts (the unified event handler).
  */
+// 【消息 parts 的底层构造 / 合并 / 路由工具】
+// 这些是被 eventProcessor 复用的纯函数积木：创建各类 part、把流式增量合并进已有 part、
+// 按 depth 把 part 路由进正确的（可能多层嵌套的）子 agent，以及流结束时清理 loading 态。
+// 全部为不可变更新（返回新数组，不改动入参）。
 
 import type {
   MessagePart,
@@ -25,6 +29,7 @@ import type { SubagentStackItem } from "./types";
 /**
  * Create a tool part from tool data.
  */
+// 创建一个「待完成」的工具调用 part（isPending=true），工具结果到达后再回填。
 export function createToolPart(
   toolName: string,
   args: Record<string, unknown>,
@@ -48,6 +53,7 @@ export function createToolPart(
 /**
  * Create a thinking part from thinking data.
  */
+// 创建思考 part；thinking_id 用于把同一思考块的多个增量归并到一起。
 export function createThinkingPart(
   content: string,
   thinkingId: string | undefined,
@@ -68,6 +74,7 @@ export function createThinkingPart(
 /**
  * Create a subagent part from agent call data.
  */
+// 创建子 agent part（status=running）；其 parts 字段用于承载该子 agent 内部的嵌套内容。
 export function createSubagentPart(
   agentId: string,
   agentName: string,
@@ -99,6 +106,8 @@ export function createSubagentPart(
  * Merge a thinking chunk into an existing parts array (reverse scan).
  * Returns a new array with content concatenated, or null if no match found.
  */
+// 把思考增量并入已有思考 part：倒序查找同一 thinking_id 的部件（无 ID 时匹配同样无 ID 的），
+// 命中则拼接文本返回新数组；未找到返回 null（由调用方决定追加新部件）。
 function mergeThinkingPart(
   parts: MessagePart[],
   part: ThinkingPart,
@@ -147,6 +156,7 @@ function mergeThinkingPart(
  * If the last part is text, concatenates content and returns a new array.
  * Otherwise returns null (caller should append).
  */
+// 把正文增量并入末尾 part：仅当末尾是 text part 时拼接并返回新数组，否则返回 null。
 function mergeTextPart(
   parts: MessagePart[],
   content: string,
@@ -167,6 +177,7 @@ function mergeTextPart(
  * Merge a summary chunk into an existing parts array.
  * Returns a new array with content concatenated, or null if no match found.
  */
+// 把摘要增量并入已有摘要 part（按 summary_id 匹配）；未找到返回 null。
 function mergeSummaryPart(
   parts: MessagePart[],
   part: SummaryPart,
@@ -189,6 +200,7 @@ function mergeSummaryPart(
  * Handles thinking, text, summary, and todo with merge semantics.
  * For all other types, appends a new copy.
  */
+// 通用「合并或追加」：thinking/text/summary 走累加语义，todo 走单例 upsert，其余类型直接追加新副本。
 function mergeOrAppendPart(
   existingParts: MessagePart[],
   part: MessagePart,
@@ -208,6 +220,7 @@ function mergeOrAppendPart(
     }
     case "todo": {
       // Upsert: at most one todo per subagent
+      // upsert：每个（子）agent 至多保留一个 todo part，已有则替换
       const todoIdx = existingParts.findIndex((p) => p.type === "todo");
       if (todoIdx >= 0) {
         const newParts = [...existingParts];
@@ -230,6 +243,8 @@ function mergeOrAppendPart(
  * Recursively descends into nested subagents. Returns updated parts array,
  * or null if no matching subagent was found.
  */
+// 在 parts 中递归查找匹配的子 agent（pending、depth 相符、agent_id 相符），把 part 合并进它的内部 parts；
+// 若本层未命中，则深入更深层嵌套的子 agent 继续查找。全程未找到返回 null。
 function findAndMergeInSubagent(
   parts: MessagePart[],
   part: MessagePart,
@@ -250,6 +265,7 @@ function findAndMergeInSubagent(
     }
 
     // Recurse into nested subagents
+    // 本层不是目标：若该子 agent 内部还有嵌套，递归深入其 parts 继续查找
     if (p.type === "subagent" && p.parts) {
       const result = findAndMergeInSubagent(
         p.parts,
@@ -273,6 +289,12 @@ function findAndMergeInSubagent(
  * Returns a new parts array (immutable update).
  * Uses agent_id for precise matching to support parallel subagents.
  */
+// 把 part 添加到正确的嵌套深度（本模块的核心路由函数）：
+// - targetDepth<=0：主线层。text 与相邻的顶层 text 合并，其余直接追加；
+// - targetDepth>0：先从子 agent 栈解析出目标 agent_id（支持并行子 agent 的精确归属），
+//   再递归找到对应子 agent 并合并进去；
+//   若对应子 agent 尚未出现（例如 thinking 早于 agent:call 到达），则回退到主线层合并/追加。
+// 始终返回不可变的新数组。
 export function addPartToDepth(
   parts: MessagePart[],
   part: MessagePart,
@@ -283,6 +305,7 @@ export function addPartToDepth(
 ): MessagePart[] {
   if (targetDepth <= 0) {
     // Merge adjacent text blocks at depth 0
+    // 主线层：相邻的顶层 text 合并成一段，避免碎片化
     if (part.type === "text") {
       const lastPart = parts[parts.length - 1];
       if (lastPart?.type === "text" && !lastPart.depth) {
@@ -298,6 +321,7 @@ export function addPartToDepth(
   }
 
   // Resolve effectiveAgentId from stack (reverse scan, no allocation)
+  // 未显式给出 agent_id 时，从子 agent 栈倒序推断目标 agent（匹配同一消息、深度相符或差一层）
   let effectiveAgentId = targetAgentId;
   if (!effectiveAgentId && messageId) {
     for (let i = activeSubagentStack.length - 1; i >= 0; i--) {
@@ -313,6 +337,7 @@ export function addPartToDepth(
   }
 
   // Try to find matching subagent and merge into it
+  // 尝试在（可能多层嵌套的）子 agent 中找到目标并合并进去
   const subagentResult = findAndMergeInSubagent(
     parts,
     part,
@@ -323,6 +348,7 @@ export function addPartToDepth(
 
   // Fallback: merge at top level when subagent block doesn't exist yet
   // (e.g. thinking arrives before agent:call)
+  // 回退：对应子 agent 块尚未出现（如 thinking 早于 agent:call 到达）时，就地在主线层合并/追加
   if (part.type === "thinking") {
     const merged = mergeThinkingPart(parts, part);
     if (merged) return merged;
@@ -345,6 +371,7 @@ export function addPartToDepth(
 // Subagent result
 // ============================================
 
+// 倒序查找匹配 summaryId 的摘要 part 索引；找不到返回 -1。
 function findSummaryIndex(parts: MessagePart[], summaryId?: string): number {
   for (let i = parts.length - 1; i >= 0; i--) {
     const part = parts[i];
@@ -358,6 +385,8 @@ function findSummaryIndex(parts: MessagePart[], summaryId?: string): number {
 /**
  * Update subagent result. Returns new parts array.
  */
+// 子 agent 结束时回填其结果/成功态/错误：先在本层查找匹配的 pending 子 agent，
+// 命中则置为 complete/error 终态；本层未命中则递归进更深层。无匹配则原样返回。
 export function updateSubagentResult(
   parts: MessagePart[],
   agentId: string,
@@ -414,6 +443,7 @@ export function updateSubagentResult(
 /**
  * Recursively update subagent result in parts.
  */
+// updateSubagentResult 的递归内核：在嵌套 parts 中查找并回填子 agent 结果；未找到返回 null。
 export function updateSubagentResultInParts(
   parts: MessagePart[],
   agentId: string,
@@ -472,6 +502,8 @@ export function updateSubagentResultInParts(
 /**
  * Update tool result at specified depth. Returns new parts array.
  */
+// 工具结果回填：优先按 tool_call_id 精确匹配顶层 pending 工具（兼容无 id 时匹配首个 pending 工具），
+// 顶层未命中再进入（agent_id 相符的）子 agent 内部递归查找。无匹配则原样返回。
 export function updateToolResultInDepth(
   parts: MessagePart[],
   toolCallId: string,
@@ -483,6 +515,7 @@ export function updateToolResultInDepth(
   completedAt?: string,
 ): MessagePart[] {
   // Try direct match on top-level tools first
+  // 先在顶层工具中直接匹配
   for (let i = parts.length - 1; i >= 0; i--) {
     const p = parts[i];
     if (p.type === "tool" && p.id === toolCallId && p.isPending) {
@@ -498,6 +531,7 @@ export function updateToolResultInDepth(
       return newParts;
     }
     // Backward compat: match by name when no id
+    // 向后兼容：历史数据无 id 时，回填首个仍 pending 的无 id 工具
     if (p.type === "tool" && !p.id && p.isPending) {
       const newParts = [...parts];
       newParts[i] = {
@@ -513,6 +547,7 @@ export function updateToolResultInDepth(
   }
 
   // Then search inside subagents
+  // 顶层未命中：进入子 agent 内部递归查找
   for (let i = parts.length - 1; i >= 0; i--) {
     const p = parts[i];
     if (p.type === "subagent" && p.parts) {
@@ -540,6 +575,7 @@ export function updateToolResultInDepth(
 /**
  * Recursively update tool result in parts by tool_call_id.
  */
+// updateToolResultInDepth 的递归内核：按 tool_call_id 在嵌套 parts 中回填工具结果；未找到返回 null。
 export function updateToolResultInPartsById(
   parts: MessagePart[],
   toolCallId: string,
@@ -603,6 +639,9 @@ export function updateToolResultInPartsById(
  * isStreaming: false on thinking, cancels unfinished todos.
  * Returns a new parts array with updated loading states.
  */
+// 递归清理所有「加载中」状态（在流结束/中断时收尾，避免残留转圈动画）：
+// 未完成的工具 → 取消；流式思考 → 结束；子 agent → 保留其已有的完成/错误终态、否则标记取消；
+// 未完成的 todo 项 → 取消；启动中的沙箱 → 取消。返回新数组。
 export function clearAllLoadingStates(parts: MessagePart[]): MessagePart[] {
   return parts.map((part) => {
     switch (part.type) {
@@ -622,6 +661,7 @@ export function clearAllLoadingStates(parts: MessagePart[]): MessagePart[] {
           ? clearAllLoadingStates(subagentPart.parts)
           : [];
         // Preserve existing terminal status (complete/error) instead of forcing cancelled
+        // 保留子 agent 已有的终态（complete/error），仅对仍未结束的才标记为 cancelled
         const wasCompleted = subagentPart.status === "complete";
         const hadError = subagentPart.status === "error";
         return {

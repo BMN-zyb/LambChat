@@ -25,16 +25,20 @@ COLLECTION_NAME = "user_env_vars"
 
 # 每用户最大环境变量数量
 MAX_ENV_VARS_PER_USER = 50
+# 单个环境变量值的最大字符数，避免用户塞入超大文本拖慢加密/存储/沙箱注入
 ENV_VAR_MAX_VALUE_CHARS = 16_000
+# 单个用户所有环境变量值的字符数总和上限，防止绕过单值限制后用"数量 x 大小"叠加撑爆
 ENV_VAR_MAX_TOTAL_VALUE_CHARS = 64_000
 
 
 def _validate_env_var_value_size(value: str) -> None:
+    # 校验单个值是否超过单值长度上限，超限直接抛错，交由上层转成 4xx 响应
     if len(str(value)) > ENV_VAR_MAX_VALUE_CHARS:
         raise ValueError(f"Environment variable value too large (max {ENV_VAR_MAX_VALUE_CHARS})")
 
 
 def _validate_env_var_bulk_value_size(variables: dict[str, str]) -> None:
+    # 批量设置场景下，既要逐个校验单值上限，也要累加校验总字符数上限
     total_chars = 0
     for value in variables.values():
         text = str(value)
@@ -53,6 +57,8 @@ def _validate_env_var_bulk_value_size(variables: dict[str, str]) -> None:
 class EnvVarStorage:
     """用户环境变量存储（加密）"""
 
+    # 类级别状态，跨实例共享：确保唯一索引只被调度一次，避免每次新建
+    # EnvVarStorage 实例都重复触发一次 create_index
     _index_task: asyncio.Task[None] | None = None
     _index_ensured = False
 
@@ -68,10 +74,12 @@ class EnvVarStorage:
             client = get_mongo_client()
             db = client[settings.MONGODB_DB]
             self._collection = db[COLLECTION_NAME]
+            # 首次拿到集合时顺带异步调度索引创建，无需阻塞调用方
             self._schedule_index()
         return self._collection
 
     def _schedule_index(self) -> None:
+        # 幂等调度：已确保过索引，或已有一个未完成的建索引任务，都直接跳过
         cls = type(self)
         if cls._index_ensured:
             return
@@ -81,7 +89,11 @@ class EnvVarStorage:
         try:
             task = asyncio.create_task(self._ensure_index())
         except RuntimeError:
+            # 当前没有运行中的事件循环时（例如同步上下文调用），放弃调度，
+            # 索引会在下一次有事件循环的调用中再尝试
             return
+        # 挂一个空操作的 done_callback 只是为了「消费」掉异常，
+        # 防止任务失败时产生 "Task exception was never retrieved" 的警告日志
         task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
         cls._index_task = task
         cls._index_ensured = True
@@ -96,6 +108,7 @@ class EnvVarStorage:
                 background=True,
             )
         except Exception as e:
+            # 建索引失败不影响正常读写功能，仅记录警告
             logger.warning(f"Failed to create index on {COLLECTION_NAME}: {e}")
 
     # ── 加密辅助 ──────────────────────────────────────────────────
@@ -103,6 +116,8 @@ class EnvVarStorage:
     @staticmethod
     async def _encrypt_value(value: str) -> dict:
         """加密单个值（包装为 dict 后加密）"""
+        # encrypt_value 是同步阻塞的加密调用（CPU 密集型），
+        # 用 run_blocking_io 丢到线程池执行，避免阻塞事件循环
         return await run_blocking_io(encrypt_value, {"v": value})
 
     @staticmethod
@@ -117,6 +132,8 @@ class EnvVarStorage:
 
     async def list_vars(self, user_id: str) -> list[EnvVarResponse]:
         """列出用户所有环境变量（value 掩码）"""
+        # 投影中排除 _id 和 user_id，只取展示所需字段；列表接口不返回明文，
+        # 而是统一用 "***" 掩码，避免敏感值在列表页被批量泄露
         cursor = (
             self._coll.find(
                 {"user_id": user_id},
@@ -139,6 +156,8 @@ class EnvVarStorage:
 
     async def get_var(self, user_id: str, key: str) -> Optional[EnvVarResponse]:
         """获取单个环境变量（明文）"""
+        # 与 list_vars 不同，单条查询会真正解密返回明文，
+        # 用于用户主动查看/编辑某一个变量的场景
         doc = await self._coll.find_one(
             {"user_id": user_id, "key": key},
             {"_id": 0, "user_id": 0},
@@ -163,6 +182,8 @@ class EnvVarStorage:
             try:
                 result[doc["key"]] = await self._decrypt_value(doc.get("value"))
             except Exception as e:
+                # 单个变量解密失败（例如加密密钥轮换、数据损坏）不应影响其他变量的注入，
+                # 跳过该变量并记录警告即可
                 logger.warning(f"Failed to decrypt env var '{doc['key']}' for user {user_id}: {e}")
         return result
 
@@ -172,6 +193,8 @@ class EnvVarStorage:
         now = utc_now_iso()
 
         # 检查数量上限（仅 insert 时）
+        # 先判断这个 key 是否已存在：已存在则是更新操作，不占用新的数量配额；
+        # 不存在才需要检查是否会超出每用户上限
         existing = await self._coll.find_one({"user_id": user_id, "key": key})
         if not existing:
             count = await self._coll.count_documents({"user_id": user_id})
@@ -186,6 +209,7 @@ class EnvVarStorage:
                     "value": encrypted,
                     "updated_at": now,
                 },
+                # $setOnInsert 保证 created_at 只在首次插入时写入，更新时不会被覆盖
                 "$setOnInsert": {
                     "created_at": now,
                 },
@@ -202,6 +226,7 @@ class EnvVarStorage:
 
     async def set_vars_bulk(self, user_id: str, variables: dict[str, str]) -> int:
         """批量设置环境变量"""
+        # 先做一次粗略校验：本次请求里不重复的 key 数量本身就不能超过上限
         if len({key for key in variables if key}) > MAX_ENV_VARS_PER_USER:
             raise ValueError(
                 f"Would exceed maximum {MAX_ENV_VARS_PER_USER} environment variables per user"
@@ -212,6 +237,8 @@ class EnvVarStorage:
         count = 0
 
         # 检查数量上限
+        # 结合已有 key 集合计算出"真正会新增"的 key 数量，
+        # 避免"更新已存在的 key"被误判为占用新配额而拒绝合法请求
         current_count = await self._coll.count_documents({"user_id": user_id})
         existing_keys = set()
         existing_cursor = self._coll.find({"user_id": user_id}, {"key": 1}).limit(
@@ -256,6 +283,8 @@ class EnvVarStorage:
         return result.deleted_count
 
     async def close(self) -> None:
+        # 关闭时取消尚未完成的建索引任务，并重置类级状态标记，
+        # 便于测试或重启场景下重新调度索引创建
         cls = type(self)
         task = cls._index_task
         cls._index_task = None

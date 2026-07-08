@@ -68,24 +68,36 @@ from src.infra.share.seo import (
 from src.infra.task.constants import HEARTBEAT_TIMEOUT
 from src.kernel.config import initialize_settings, settings
 
+# 屏蔽 oss2 SDK 源码中的无效转义序列告警（第三方库自身问题，与本项目无关）
 # Suppress SyntaxWarning from oss2 SDK (invalid escape sequence in their source)
 warnings.filterwarnings("ignore", message=".*invalid escape sequence.*", category=SyntaxWarning)
 
 logger = get_logger(__name__)
 
+# 静态资源按路径前缀设置 Cache-Control：
+#   assets/ 文件名带内容指纹，可长期强缓存且 immutable（一年）；icons/ 缓存一周；images/ 缓存一周并允许 stale-while-revalidate 后台刷新
 STATIC_CACHE_CONTROL_BY_PREFIX = {
     "assets/": "public, max-age=31536000, immutable",
     "icons/": "public, max-age=604800",
     "images/": "public, max-age=604800, stale-while-revalidate=86400",
 }
+# manifest.json 缓存一天
 MANIFEST_CACHE_CONTROL = "public, max-age=86400"
+# Service Worker 脚本禁用缓存，保证能及时拉到新版本
 SERVICE_WORKER_CACHE_CONTROL = "no-cache"
+# 离线兜底页禁用缓存
 OFFLINE_PAGE_CACHE_CONTROL = "no-cache"
+# index.html 内存缓存（LRU）最多保留的条目数
 INDEX_HTML_CACHE_MAX_ENTRIES = 4
+# index.html 允许进内存缓存的最大字节数，超过则拒绝缓存（异常保护，避免被超大文件撑爆内存）
 INDEX_HTML_MAX_BYTES = 2 * 1024 * 1024
+# index.html 的 LRU 内存缓存：key 为解析后的绝对路径，value 为 (mtime_ns, size, HTML 文本)
 _INDEX_HTML_CACHE: OrderedDict[Path, tuple[int, int, str]] = OrderedDict()
+# 非上传类 API 请求体大小上限：8 MiB，超过直接返回 413 拒绝
 API_REQUEST_BODY_MAX_BYTES = 8 * 1024 * 1024
+# 豁免请求体大小限制的 multipart 上传路径（文件/头像上传需要允许大体积）
 API_MULTIPART_UPLOAD_PATHS = {"/api/upload/file", "/api/upload/avatar", "/upload/file"}
+# lifespan 期间登记到 app.state 上的后台任务名，应用关闭时统一按名取消
 _LIFESPAN_BACKGROUND_TASK_NAMES = (
     "session_search_backfill_task",
     "memory_monitor_startup_reset_task",
@@ -95,9 +107,11 @@ _LIFESPAN_BACKGROUND_TASK_NAMES = (
     "stale_task_cleanup_recheck_task",
     "feishu_task",
 )
+# 残留任务清理的二次复查延迟：取 max(5 秒, 2×心跳超时+5 秒)，等跨节点 heartbeat 判定稳定后再复查一次，避免误清理
 _STALE_TASK_CLEANUP_RECHECK_DELAY_SECONDS = max(5.0, HEARTBEAT_TIMEOUT * 2 + 5)
 
 
+# 判断某请求是否豁免请求体大小限制：仅当 Content-Type 为 multipart/form-data 且路径命中上传白名单（含技能上传/二进制文件）时豁免
 def _is_body_limit_exempt(scope: Scope) -> bool:
     path = str(scope.get("path") or "")
 
@@ -115,6 +129,8 @@ def _is_body_limit_exempt(scope: Scope) -> bool:
     )
 
 
+# 请求体大小限制中间件（纯 ASGI 中间件，非 BaseHTTPMiddleware）。
+# 在中间件链中作为最外层、最先执行，从而在请求体被下游路由/框架完全读入内存「之前」就拦下超大请求，避免 OOM 风险。
 class RequestBodyLimitMiddleware:
     """Reject oversized non-upload request bodies before they are materialized."""
 
@@ -122,6 +138,7 @@ class RequestBodyLimitMiddleware:
         self.app = app
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        # 非 HTTP 请求（WebSocket、lifespan 事件等）或命中上传豁免的请求直接透传，不做体积限制
         if scope["type"] != "http" or _is_body_limit_exempt(scope):
             await self.app(scope, receive, send)
             return
@@ -130,6 +147,7 @@ class RequestBodyLimitMiddleware:
             key.decode("latin-1").lower(): value.decode("latin-1")
             for key, value in scope.get("headers", [])
         }
+        # 快路径：若带有可信的 Content-Length 头，直接据此判定，无需读取请求体
         content_length = headers.get("content-length")
         if content_length:
             try:
@@ -141,6 +159,7 @@ class RequestBodyLimitMiddleware:
             except ValueError:
                 pass
 
+        # 慢路径：无 Content-Length（如 chunked 传输）时，边接收边累加，一旦超限立即拒绝
         body = bytearray()
         while True:
             message = await receive()
@@ -158,6 +177,8 @@ class RequestBodyLimitMiddleware:
 
         replayed = False
 
+        # 关键点：上面为了统计体积已经把请求体从 receive 通道「消费」掉了，下游 app 再直接 receive 将读不到 body。
+        # 因此包一层 replay_body：首次调用把已缓存的完整 body 一次性重放给下游，之后再回退到原始 receive，保证下游能正常读取请求体。
         async def replay_body() -> Message:
             nonlocal replayed
             if replayed:
@@ -167,6 +188,7 @@ class RequestBodyLimitMiddleware:
 
         await self.app(scope, replay_body, send)
 
+    # 直接构造并发送 413 响应，告知客户端请求体过大
     async def _send_too_large(self, scope: Scope, receive: Receive, send: Send) -> None:
         response = JSONResponse(
             status_code=413,
@@ -175,6 +197,7 @@ class RequestBodyLimitMiddleware:
         await response(scope, receive, send)
 
 
+# 根据请求路径返回对应的 Cache-Control：先按前缀匹配 assets/icons/images，再精确匹配 manifest.json / sw.js / offline.html，均不匹配则返回 None
 def _cache_control_for_static_path(path: str) -> str | None:
     normalized_path = path.lstrip("/")
     for prefix, cache_control in STATIC_CACHE_CONTROL_BY_PREFIX.items():
@@ -189,6 +212,7 @@ def _cache_control_for_static_path(path: str) -> str | None:
     return None
 
 
+# 构造静态文件响应，并按路径附加合适的 Cache-Control 头
 def _static_file_response(file_path: Path, request_path: str) -> FileResponse:
     headers = {}
     cache_control = _cache_control_for_static_path(request_path)
@@ -197,22 +221,28 @@ def _static_file_response(file_path: Path, request_path: str) -> FileResponse:
     return FileResponse(str(file_path), headers=headers)
 
 
+# 判断路径是否为已存在的普通文件（会被包在 run_blocking_io 中调用，避免阻塞事件循环）
 def _is_existing_file(file_path: Path) -> bool:
     return file_path.exists() and file_path.is_file()
 
 
+# 读取 index.html 文本，并用 (mtime_ns, size) 作为版本标识做内存缓存（避免每次 SPA/分享请求都读盘）
 def _read_index_html(index_file: Path) -> str:
     stat = index_file.stat()
+    # 超过大小上限视为异常情况，直接抛错而不缓存
     if stat.st_size > INDEX_HTML_MAX_BYTES:
         raise ValueError(f"index.html too large: {stat.st_size} bytes (max {INDEX_HTML_MAX_BYTES})")
     cache_key = index_file.resolve()
     cached = _INDEX_HTML_CACHE.get(cache_key)
+    # 缓存命中且文件未变更（mtime 与 size 都一致）：移到末尾维持 LRU 顺序并直接返回
     if cached and cached[0] == stat.st_mtime_ns and cached[1] == stat.st_size:
         _INDEX_HTML_CACHE.move_to_end(cache_key)
         return cached[2]
 
+    # 未命中或文件已变更：重新读盘并写入缓存
     html_doc = index_file.read_text(encoding="utf-8")
     _INDEX_HTML_CACHE[cache_key] = (stat.st_mtime_ns, stat.st_size, html_doc)
+    # 超过条目上限时按 LRU 淘汰最久未使用的项
     while len(_INDEX_HTML_CACHE) > INDEX_HTML_CACHE_MAX_ENTRIES:
         _INDEX_HTML_CACHE.popitem(last=False)
     return html_doc
@@ -272,6 +302,7 @@ def _schedule_stale_task_cleanup(app: FastAPI) -> asyncio.Task[None]:
     return task
 
 
+# 按名批量取消登记在 app.state 上的后台任务：逐个取出并清空引用，对未完成的发起 cancel，最后统一 await 收敛（吞掉取消异常）
 async def _cancel_background_tasks(app: FastAPI, *task_names: str) -> None:
     tasks = []
     for task_name in task_names:
@@ -286,6 +317,7 @@ async def _cancel_background_tasks(app: FastAPI, *task_names: str) -> None:
         await asyncio.gather(*tasks, return_exceptions=True)
 
 
+# 关闭时优先停止飞书长连接：先取消其后台任务，再调用 stop_feishu_channels 释放 lease，避免快速重启时旧锁阻止新实例启动
 async def _stop_feishu_channels_for_shutdown(app: FastAPI) -> None:
     await _cancel_background_tasks(app, "feishu_task")
     try:
@@ -297,6 +329,7 @@ async def _stop_feishu_channels_for_shutdown(app: FastAPI) -> None:
         logger.warning(f"Failed to stop Feishu channels: {e}")
 
 
+# 关闭各路由依赖所持有的单例资源（反馈/通知/推送/揭示文件/上传/人设预设等管理器），释放其连接与后台协程
 async def _close_route_dependency_singletons() -> None:
     from src.infra.persona_preset.manager import close_persona_preset_manager
     from src.infra.revealed_file.storage import close_revealed_file_storage
@@ -311,16 +344,19 @@ async def _close_route_dependency_singletons() -> None:
     await close_persona_preset_manager()
 
 
+# 关闭用户级会话沙箱管理器（SessionSandboxManager 管理的沙箱）
 async def _close_session_sandbox_manager_for_shutdown() -> None:
     from src.infra.sandbox.session_manager import close_session_sandbox_manager
 
     await close_session_sandbox_manager()
 
 
+# 统一取消 lifespan 期间启动的所有后台任务（见 _LIFESPAN_BACKGROUND_TASK_NAMES）
 async def _cancel_lifespan_background_tasks_for_shutdown(app: FastAPI) -> None:
     await _cancel_background_tasks(app, *_LIFESPAN_BACKGROUND_TASK_NAMES)
 
 
+# 返回 (名称, 初始化协程函数) 列表；每个初始化器为对应存储创建/确保索引，供启动阶段并发执行
 def _startup_index_initializers():
     async def _init_agent_config_storage() -> None:
         from src.infra.agent.config_storage import get_agent_config_storage
@@ -432,6 +468,7 @@ async def _run_startup_indexes(app: FastAPI) -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期管理"""
+    # lifespan 以 yield 为界：yield 之前是「启动阶段」（按依赖顺序初始化各组件），yield 之后的 finally 是「关闭阶段」（按安全顺序优雅释放资源）
     # 启动时初始化
     logger.info("%s v%s starting...", settings.APP_NAME, settings.APP_VERSION)
 
@@ -486,6 +523,7 @@ async def lifespan(app: FastAPI):
     # 后台预热 Agent 注册，避免阻塞服务启动；请求路径仍有懒发现兜底
     app.state.agent_discovery_task = asyncio.create_task(_warm_agent_registry())
 
+    # 阻塞等待存储索引初始化完成后再继续——索引是后续服务的前置依赖，必须先就绪
     await _run_startup_indexes(app)
 
     # 启动分布式运行时监听器（任务/设置/模型/记忆/WebSocket）
@@ -531,6 +569,7 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning(f"Failed to start Feishu channels: {e}")
 
+    # 保留任务引用（挂到 app.state），防止被垃圾回收器回收导致任务被提前取消
     # Keep task reference to prevent GC from cancelling it
     _feishu_task = asyncio.create_task(_start_feishu())
     app.state.feishu_task = _feishu_task
@@ -546,6 +585,7 @@ async def lifespan(app: FastAPI):
         _reset_memory_monitor_after_startup()
     )
 
+    # 启动阶段结束，交出控制权让应用开始处理请求；直到进程收到关闭信号才会从 yield 恢复并进入下方 finally 做清理
     try:
         yield
     except asyncio.CancelledError:
@@ -651,6 +691,7 @@ async def lifespan(app: FastAPI):
         close_approval_storage()
         await close_mongo_client()
 
+        # 兜底：取消进程内其余仍在运行的后台任务（如第三方库 lark_oapi 的定时清理协程），并等待它们收敛后再退出
         # Cancel remaining background tasks (e.g., lark_oapi ExpiringCache cron)
         pending = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
         for task in pending:
@@ -670,6 +711,7 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
+    # CORS：放行所有来源/方法/请求头，并允许携带凭证（Cookie/Authorization）
     # CORS 中间件
     app.add_middleware(
         CORSMiddleware,
@@ -679,6 +721,8 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
+    # 中间件注册顺序至关重要：Starlette 中「后 add 的中间件位于更外层、更先执行」，请求由外到内穿过、响应由内到外返回。
+    # 因此下面按「最内层先 add」登记（UserContext 最先 add → 最内层、紧邻路由），最终得到下一行标注的实际执行链。
     # 自定义中间件 (顺序：后添加的先执行)
     # 执行顺序: RequestBodyLimitMiddleware -> TracingMiddleware -> AuthMiddleware -> UserContextMiddleware -> Route
     app.add_middleware(UserContextMiddleware)
@@ -686,6 +730,7 @@ def create_app() -> FastAPI:
     app.add_middleware(TracingMiddleware)
     app.add_middleware(RequestBodyLimitMiddleware)
 
+    # 注册各业务路由：除健康检查、WebSocket 等少数无前缀路由外，其余统一挂在 /api/* 前缀下，并用 tags 分组便于 OpenAPI 文档归类
     # 注册路由
     app.include_router(health.router, tags=["Health"])
     app.include_router(version.router, prefix="/api", tags=["Version"])
@@ -738,6 +783,8 @@ def create_app() -> FastAPI:
     # WebSocket 路由: /ws 用于实时通知
     app.include_router(websocket.router, tags=["WebSocket"])
 
+    # 托管前端资源：resolve_frontend_target 决定运行模式——
+    #   ("static", 目录) 为生产模式，由后端直接提供已构建的前端；("redirect", url) 为本地开发，重定向到 Vite dev server
     # Serve frontend static files
     project_root = Path(__file__).parent.parent.parent
     frontend_target = resolve_frontend_target(
@@ -748,6 +795,7 @@ def create_app() -> FastAPI:
         static_dir = frontend_target[1]
         assert isinstance(static_dir, Path)
 
+        # 将带内容指纹的构建产物目录挂载为静态路由（/assets、/icons），交由 StaticFiles 直接高效服务
         assets_dir = static_dir / "assets"
         if assets_dir.exists():
             app.mount("/assets", StaticFiles(directory=str(assets_dir)), name="assets")
@@ -756,6 +804,7 @@ def create_app() -> FastAPI:
         if icons_dir.exists():
             app.mount("/icons", StaticFiles(directory=str(icons_dir)), name="icons")
 
+        # PWA 的 manifest.json：存在则带缓存头返回，缺失则返回错误 JSON
         # Serve other static files (manifest.json, etc.)
         @app.get("/manifest.json")
         async def serve_manifest():
@@ -764,6 +813,8 @@ def create_app() -> FastAPI:
                 return _static_file_response(manifest_file, "manifest.json")
             return {"error": "manifest.json not found"}
 
+        # 分享页：服务端把 SEO 元数据注入 index.html，让爬虫/社媒预览能抓到标题、描述与 OG 卡片；
+        # 若分享内容需要鉴权或不存在，则注入对应的错误态 SEO 并返回相应状态码（401/404）。
         @app.get("/shared/{share_id}", response_class=HTMLResponse)
         async def serve_shared_page(share_id: str, request: Request):
             """Serve shared pages with server-injected SEO metadata."""
@@ -771,11 +822,13 @@ def create_app() -> FastAPI:
             if not await run_blocking_io(_is_existing_file, index_file):
                 return {"error": "Frontend not built. Run 'npm run build' in frontend directory."}
 
+            # 优先使用配置的 APP_BASE_URL 作为 SEO 绝对链接前缀，缺省则回退到请求自身的 base_url
             base_url = getattr(settings, "APP_BASE_URL", "").rstrip("/") or str(
                 request.base_url
             ).rstrip("/")
             html_doc = await run_blocking_io(_read_index_html, index_file)
 
+            # 以匿名身份获取分享内容用于生成 SEO：401 标记为 auth_required，其余异常按 not_found 处理
             try:
                 shared_content = await share.get_shared_content(share_id, user=None)
             except HTTPException as exc:
@@ -801,6 +854,7 @@ def create_app() -> FastAPI:
             rendered = inject_share_seo_into_html(html_doc, seo)
             return HTMLResponse(content=rendered)
 
+        # SPA 兜底路由（匹配所有未命中的路径）：先尝试把它当作真实静态文件返回；否则返回注入了公共路由 SEO 的 index.html，交由前端客户端路由处理
         # SPA fallback - serve index.html for all unmatched routes
         @app.get("/{full_path:path}")
         async def serve_spa(full_path: str, request: Request):
@@ -822,6 +876,7 @@ def create_app() -> FastAPI:
                 return HTMLResponse(content=rendered)
             return {"error": "Frontend not built. Run 'npm run build' in frontend directory."}
 
+    # 本地开发模式：把所有前端路由请求 302 重定向到 Vite dev server
     elif frontend_target and frontend_target[0] == "redirect":
         frontend_dev_url = frontend_target[1]
         assert isinstance(frontend_dev_url, str)

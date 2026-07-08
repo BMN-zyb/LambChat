@@ -1,7 +1,9 @@
 """HTML email template renderer with cross-client compatibility."""
 
+# 启用未来注解语义，支持延迟求值的类型注解
 from __future__ import annotations
 
+# html：提供 HTML 转义能力，防止用户内容注入邮件正文造成 XSS
 import html
 from typing import Optional
 
@@ -17,14 +19,17 @@ class EmailTemplate:
     @staticmethod
     def _escape_html(text: str) -> str:
         """Escape HTML special characters to prevent XSS attacks."""
+        # quote=True 同时转义引号，确保放入属性值时也安全
         return html.escape(str(text), quote=True)
 
     @staticmethod
     def _escape_url(url: str) -> str:
         """Validate and escape URL to prevent javascript: and data: URL attacks."""
         url = str(url).strip()
+        # 只放行 http/https 协议，拦截 javascript:/data: 等危险协议
         if url.startswith(("http://", "https://")):
             return html.escape(url, quote=True)
+        # 非法协议返回空串，等价于「无链接」
         return ""
 
     @staticmethod
@@ -53,12 +58,15 @@ class EmailTemplate:
         Returns:
             Complete HTML email content.
         """
+        # 纯文本字段统一转义后再插入 HTML，杜绝 XSS
         safe_title = EmailTemplate._escape_html(title)
         safe_heading = EmailTemplate._escape_html(heading)
+        # 按钮/图标 URL 需经协议校验，非法则变为空串
         safe_button_url = EmailTemplate._escape_url(button_url)
         safe_button_text = EmailTemplate._escape_html(button_text)
         safe_icon_url = EmailTemplate._escape_url(icon_url)
 
+        # 图标块：仅在图标 URL 合法时渲染，否则留空
         icon_html = (
             f'<div style="width: 72px; height: 72px; margin: 0 auto 20px auto; '
             f"background: rgba(255,255,255,0.1); border-radius: 20px; "
@@ -70,6 +78,7 @@ class EmailTemplate:
             else ""
         )
 
+        # 页脚块：仅在传入 footer 时渲染（footer 为可含 HTML 的富文本）
         footer_html = (
             f'<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">'
             f'<tr><td style="padding-bottom: 8px; font-size: 13px; line-height: 1.5; '
@@ -80,7 +89,9 @@ class EmailTemplate:
             else ""
         )
 
+        # 按钮 URL 合法时渲染可点击按钮
         if safe_button_url:
+            # 使用 MSO 条件注释 + VML roundrect 为 Outlook 渲染圆角按钮（Outlook 不支持 CSS 圆角）
             button_html = (
                 f'<!--[if mso]><v:roundrect xmlns:v="urn:schemas-microsoft-com:vml" '
                 f'xmlns:w="urn:schemas-microsoft-com:office:word" href="{safe_button_url}" '
@@ -99,6 +110,7 @@ class EmailTemplate:
                 f"</td></tr></table>"
             )
         else:
+            # URL 非法时降级为不可点击的纯样式按钮（避免渲染出危险链接）
             button_html = (
                 f'<table cellpadding="0" cellspacing="0" border="0" role="presentation" '
                 f'align="center" style="margin: 0 auto;">'
@@ -111,8 +123,10 @@ class EmailTemplate:
                 f"</td></tr></table>"
             )
 
+        # 预览文案（preheader）：收件箱列表中标题旁的摘要文字，取转义后的标题
         preheader = EmailTemplate._escape_html(heading)
 
+        # 返回完整 HTML；注意 f-string 中 CSS 的花括号需写成 {{ }} 转义
         return f"""<!DOCTYPE html>
 <html lang="en" xmlns="http://www.w3.org/1999/xhtml" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office">
 <head>

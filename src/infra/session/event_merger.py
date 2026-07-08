@@ -34,9 +34,11 @@ from src.kernel.config import settings
 logger = get_logger(__name__)
 
 # 可合并的事件类型
+# 只有流式增量文本类事件才允许合并：多条 chunk/thinking 拼成一条，减少事件条数
 MERGEABLE_EVENT_TYPES = frozenset(["message:chunk", "thinking"])
 
 # Redis 分布式锁配置
+# 分布式锁 key：多实例部署时保证同一时间只有一个实例在做合并
 MERGE_LOCK_KEY = "event_merger:lock"
 
 # 单次合并超时时间（秒）
@@ -56,14 +58,17 @@ def _get_merge_interval() -> float:
 
 def _get_lock_timeout() -> int:
     """获取锁超时时间（合并间隔的 2 倍）"""
+    # 锁 TTL 取合并间隔两倍，给单轮合并留足时间，避免中途锁过期被别人抢走
     return int(_get_merge_interval() * 2)
 
 
 def _get_merge_timeout() -> float:
+    # 从配置读取单轮合并超时，缺省用 MERGE_TIMEOUT，且下限保底 1 秒
     return max(float(getattr(settings, "EVENT_MERGE_TIMEOUT_SECONDS", MERGE_TIMEOUT) or 0), 1.0)
 
 
 def _get_immediate_merge_debounce_seconds() -> float:
+    # 即时合并的防抖延迟：短时间内多次触发只在延迟后合并一次
     return max(
         float(getattr(settings, "EVENT_MERGE_IMMEDIATE_DEBOUNCE_SECONDS", 2.0) or 0),
         0.0,
@@ -71,14 +76,17 @@ def _get_immediate_merge_debounce_seconds() -> float:
 
 
 def _get_merge_batch_size() -> int:
+    # 每轮扫描的 trace 上限（可配置，最小为 1）
     return max(int(getattr(settings, "EVENT_MERGE_BATCH_SIZE", BATCH_SIZE) or 0), 1)
 
 
 def _get_merge_concurrency() -> int:
+    # 单批内并发合并的 worker 数（可配置，最小为 1）
     return max(int(getattr(settings, "EVENT_MERGE_CONCURRENCY", _MERGE_CONCURRENCY) or 0), 1)
 
 
 def _get_merge_max_events_per_trace() -> int:
+    # 单个 trace 允许合并的事件数上限，超大 trace 跳过以免单次处理过重
     return max(int(getattr(settings, "EVENT_MERGE_MAX_EVENTS_PER_TRACE", 50000) or 0), 1)
 
 
@@ -98,34 +106,42 @@ class EventMerger:
 
     def __init__(self, trace_storage):
         self.trace_storage = trace_storage
+        # 后台循环是否在运行的标志
         self._running = False
+        # 后台周期性合并循环任务
         self._task: Optional[asyncio.Task] = None
+        # 即时（一次性）合并任务
         self._merge_once_task: Optional[asyncio.Task] = None
         self._redis = None
         self._lock_value: Optional[str] = None  # 锁的唯一标识
 
     def start(self):
         """启动后台合并任务"""
+        # 幂等：已在运行则直接返回
         if self._running:
             return
         self._running = True
         if self._redis is None:
             # Use an isolated Redis pool for merger locks so background
             # lock traffic does not contend with long-lived shared listeners.
+            # 用独立连接池，避免后台锁流量与长连接监听器争用
             self._redis = create_redis_client(isolated_pool=True)
         self._task = asyncio.create_task(self._merge_loop())
+        # 附加回调消费异常，防止任务异常被静默丢弃产生告警
         self._task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
         logger.info("EventMerger started with distributed lock support")
 
     async def stop(self):
         """停止后台合并任务，等待当前操作完成"""
         self._running = False
+        # 取消周期性循环任务并等待退出
         if self._task:
             self._task.cancel()
             try:
                 await self._task
             except asyncio.CancelledError:
                 pass
+        # 一并取消未完成的即时合并任务
         if self._merge_once_task and not self._merge_once_task.done():
             self._merge_once_task.cancel()
             try:
@@ -133,6 +149,7 @@ class EventMerger:
             except asyncio.CancelledError:
                 pass
         self._merge_once_task = None
+        # 关闭独立 Redis 连接
         if self._redis is not None:
             await self._redis.aclose()
             self._redis = None
@@ -140,12 +157,14 @@ class EventMerger:
 
     def schedule_merge_once(self) -> None:
         """Request an immediate one-shot merge without blocking the caller."""
+        # 请求一次即时合并；若已有未完成的即时任务则复用，避免重复触发
         if self._merge_once_task is not None and not self._merge_once_task.done():
             return
         self._merge_once_task = asyncio.create_task(self._debounced_merge_once())
         self._merge_once_task.add_done_callback(self._on_merge_once_task_done)
 
     def _on_merge_once_task_done(self, task: asyncio.Task) -> None:
+        # 即时合并任务完成回调：清理句柄并记录异常（取消不算错误）
         if self._merge_once_task is task:
             self._merge_once_task = None
         if task.cancelled():
@@ -158,6 +177,7 @@ class EventMerger:
             logger.warning("Immediate event merge failed: %s", exc)
 
     async def _debounced_merge_once(self) -> None:
+        # 防抖：先等待一小段时间，把短时间内的多次触发合并为一次执行
         delay = _get_immediate_merge_debounce_seconds()
         if delay > 0:
             await asyncio.sleep(delay)
@@ -165,11 +185,14 @@ class EventMerger:
 
     async def merge_once(self) -> None:
         """Run one merge pass if this instance can acquire the distributed lock."""
+        # 功能开关关闭则不合并
         if not settings.ENABLE_EVENT_MERGER:
             return
+        # 抢不到分布式锁说明别的实例正在合并，直接返回
         if not await self._acquire_lock():
             return
         try:
+            # 用超时包裹整轮合并，防止异常场景下卡死占用锁
             merge_timeout = _get_merge_timeout()
             async with asyncio.timeout(merge_timeout):
                 await self._merge_completed_traces()
@@ -178,6 +201,7 @@ class EventMerger:
                 f"Immediate merge operation timed out after {merge_timeout}s, will retry later"
             )
         finally:
+            # 无论成功失败都释放锁
             await self._release_lock()
 
     async def _merge_loop(self):
@@ -213,6 +237,7 @@ class EventMerger:
             self._lock_value = str(uuid.uuid4())
 
             # 使用 SET NX EX 原子操作获取锁
+            # nx=True：仅当锁不存在才写入；ex：附带 TTL，防止持有者崩溃后死锁
             result = await self._redis.set(
                 MERGE_LOCK_KEY,
                 self._lock_value,
@@ -280,6 +305,7 @@ class EventMerger:
 
             # 查询最近完成的 traces（未合并的）
             # 使用投影减少数据传输
+            # 过滤条件：非 running（已完成）、未合并过、事件数不超过上限（或缺失字段）
             batch_size = _get_merge_batch_size()
             max_events_per_trace = _get_merge_max_events_per_trace()
             cursor = collection.find(
@@ -301,6 +327,7 @@ class EventMerger:
                 },
             ).limit(batch_size)
 
+            # 攒够 process_batch_size 个 trace 就并发处理一小批，处理完 yield 一次
             trace_batch: list[dict[str, Any]] = []
             total_found = 0
             total_modified = 0
@@ -323,8 +350,10 @@ class EventMerger:
                     total_skipped += skipped
                     total_errors += errors
                     trace_batch.clear()
+                    # 让出事件循环，避免长时间占用
                     await asyncio.sleep(0)
 
+            # 处理最后不足一批的剩余 trace
             if trace_batch:
                 modified, merged, skipped, errors = await self._merge_trace_batch(
                     collection,
@@ -381,6 +410,7 @@ class EventMerger:
             error_count = 0
 
             for r in results:
+                # worker 抛出的异常以对象形式收集，这里计入错误数
                 if isinstance(r, BaseException):
                     error_count += 1
                     logger.warning(f"Failed to merge trace: {r}")
@@ -390,15 +420,19 @@ class EventMerger:
                     skipped_count += 1
                     continue
 
+                # 兼容两种返回形态：四元组，或缺 trace_doc 时补一个占位 doc
                 trace_id, original_events, merged_events, trace_doc = (
                     r if len(r) == 4 else (r[0], r[1], r[2], {"trace_id": r[0]})
                 )
+                # 无论是否真正减少事件，都打上 merged 标记避免下轮重复扫描
                 update_fields: Dict[str, Any] = {
                     "metadata.merged": True,
                     "metadata.merged_at": now,
                     "updated_at": now,
                 }
+                # 仅当合并确实减少了事件数才写回事件本体
                 if len(merged_events) < len(original_events):
+                    # 开启分块存储时，事件走独立分块集合（绕过 Mongo 16MB 文档上限）
                     if getattr(settings, "SESSION_EVENT_CHUNK_STORAGE_ENABLED", False):
                         await self.trace_storage.replace_trace_events_with_chunks(
                             trace_doc,
@@ -413,6 +447,7 @@ class EventMerger:
 
                 operations.append(UpdateOne({"trace_id": trace_id}, {"$set": update_fields}))
 
+            # 一次 bulk_write 落库整批更新，减少数据库往返；ordered=False 允许乱序并行
             if operations:
                 bulk_result = await collection.bulk_write(operations, ordered=False)
                 return bulk_result.modified_count, merged_count, skipped_count, error_count
@@ -427,14 +462,17 @@ class EventMerger:
         *,
         concurrency: int,
     ) -> list[Any]:
+        # 有界并发：固定数量 worker 从共享游标索引里取任务，避免为整批创建海量协程
         results: list[Any] = []
         next_index = 0
+        # 用锁保护共享索引 next_index，实现 worker 间的任务分发
         lock = asyncio.Lock()
         worker_count = min(max(concurrency, 1), len(traces))
 
         async def _worker() -> None:
             nonlocal next_index
             while True:
+                # 取下一个待处理 trace 的下标；取尽则退出
                 async with lock:
                     if next_index >= len(traces):
                         return
@@ -443,6 +481,7 @@ class EventMerger:
                 try:
                     trace_id = trace.get("trace_id")
                     events = trace.get("events", [])
+                    # 投影查询未带回 events；若开启分块存储则按需回读完整事件
                     if (
                         not events
                         and trace_id
@@ -455,9 +494,11 @@ class EventMerger:
                     if not events:
                         results.append((trace_id, [], [], trace))
                         continue
+                    # 合并是纯 CPU 计算，丢到线程池避免阻塞事件循环
                     merged_events = await run_blocking_io(self._merge_events, events)
                     results.append((trace_id, events, merged_events, trace))
                 except Exception as exc:
+                    # 异常也放进结果列表，由上层统计为错误
                     results.append(exc)
 
         if worker_count:
@@ -478,9 +519,11 @@ class EventMerger:
 
         mergeable = MERGEABLE_EVENT_TYPES
         merged: list[Dict[str, Any]] = []
+        # 当前合并段的 key 与已累积事件；key 变化或遇到不可合并事件时结算
         current_key: Optional[tuple[Any, Any, Any, Any, Any]] = None
         current_group: list[Dict[str, Any]] = []
 
+        # 计算事件的合并键：不可合并类型返回 None，其余按五元组区分
         def merge_key(event: Dict[str, Any]) -> Optional[tuple[Any, Any, Any, Any, Any]]:
             event_type = event.get("event_type")
             if event_type not in mergeable:
@@ -494,6 +537,7 @@ class EventMerger:
                 data.get("text_id"),
             )
 
+        # 结算当前合并段：把累积的事件合成一条追加到结果，并重置状态
         def flush_group() -> None:
             nonlocal current_key, current_group
             if current_group:
@@ -503,15 +547,18 @@ class EventMerger:
 
         for event in events:
             key = merge_key(event)
+            # 不可合并事件：先结算当前段，再原样保留该事件（维持时间线顺序）
             if key is None:
                 flush_group()
                 merged.append(event)
                 continue
+            # key 变化说明进入新的一段，先结算旧段
             if current_group and key != current_key:
                 flush_group()
             current_key = key
             current_group.append(event)
 
+        # 结算末尾残留的合并段
         flush_group()
         return merged
 
@@ -525,16 +572,19 @@ class EventMerger:
         Returns:
             合并后的事件
         """
+        # 单条无需合并，直接返回
         if len(group) == 1:
             return group[0]
 
         # 提取公共字段
+        # 以首条为模板，尾条提供结束时间
         first = group[0]
         last = group[-1]
         event_type = first.get("event_type")
         first_data = first.get("data", {})
 
         # 合并 content（避免创建中间列表）
+        # 逐条拼接文本内容，跳过空 content
         parts: list[str] = []
         for event in group:
             data = event.get("data", {})
@@ -543,6 +593,7 @@ class EventMerger:
                 parts.append(content)
 
         # 构建合并后的事件
+        # 保留首条其余字段，覆盖 content，并记录合并元信息（条数/起止时间）
         merged_data = first_data.copy()
         merged_data["content"] = "".join(parts)
         merged_data["merged"] = True
@@ -558,6 +609,7 @@ class EventMerger:
 
 
 # Singleton
+# 进程级单例，避免重复创建后台合并循环与 Redis 连接
 _event_merger: Optional[EventMerger] = None
 
 
@@ -571,6 +623,7 @@ def get_event_merger(trace_storage) -> EventMerger:
 
 async def close_event_merger() -> None:
     """Stop and release the singleton EventMerger without creating it."""
+    # 优雅关闭单例：先摘除全局引用再 stop，避免关闭过程中被再次取用
     global _event_merger
     merger = _event_merger
     _event_merger = None

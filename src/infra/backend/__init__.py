@@ -35,6 +35,8 @@ __all__ = [
 ]
 
 
+# 延迟导入 skills_store：它依赖 MongoDB 等较重的模块，用模块级 __getattr__ 实现按需加载，
+# 避免 import 本包时就拉起这些依赖（同时规避潜在的循环导入）。
 def __getattr__(name: str):
     if name in {"SkillsStoreBackend", "create_skills_backend"}:
         from .skills_store import SkillsStoreBackend, create_skills_backend

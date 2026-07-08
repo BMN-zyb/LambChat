@@ -21,6 +21,8 @@ from ..task.constants import MODEL_CONFIG_CHANNEL
 logger = get_logger(__name__)
 
 
+# 模型配置变更的 Redis Pub/Sub 监听器：某实例改动配置后发布消息，其他实例收到后清空
+# 本地 LLM 客户端缓存，实现多实例部署下的配置最终一致。
 class ModelConfigPubSub:
     """
     Redis Pub/Sub listener for model config changes.
@@ -62,12 +64,15 @@ class ModelConfigPubSub:
         """Handle an incoming model config change message."""
         try:
             data = await run_blocking_io(json.loads, message["data"])
+            # 跳过本实例自己发布的消息（靠 instance_id 区分），避免自我失效
             # Skip messages published by this instance
             if data.get("instance_id") == self._instance_id:
                 return
 
             logger.info("[ModelConfigPubSub] Received model config change notification")
 
+            # 收到他实例的变更通知 → 清空本地三级缓存 + api_key 缓存 + LLM 客户端缓存；
+            # invalidate_cache(publish=False) 是关键：本地失效但不再转发，防止实例间来回弹跳。
             # Clear the LLM client cache and model caches (no re-publish to avoid bouncing)
             from src.infra.llm.client import LLMClient
             from src.infra.llm.models_service import clear_api_key_cache, invalidate_cache
@@ -108,6 +113,7 @@ class ModelConfigPubSub:
 _model_config_pubsub: Optional[ModelConfigPubSub] = None
 
 
+# 获取全局 ModelConfigPubSub 单例（懒初始化）。
 def get_model_config_pubsub() -> ModelConfigPubSub:
     """Get the global ModelConfigPubSub instance."""
     global _model_config_pubsub
@@ -116,6 +122,8 @@ def get_model_config_pubsub() -> ModelConfigPubSub:
     return _model_config_pubsub
 
 
+# 发布"模型配置已变更"通知：在 create/update/delete/toggle/reorder 等写操作后调用。
+# 消息体带本实例 instance_id，供订阅端识别并跳过自己发的消息。
 async def publish_model_config_changed() -> None:
     """Publish a model config change notification to Redis.
 

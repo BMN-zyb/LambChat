@@ -1,5 +1,9 @@
 """Push 订阅路由"""
 
+# Web Push 订阅路由模块（挂载于 /api/push）
+# 职责：下发 VAPID 公钥、保存/删除浏览器推送订阅，配合服务端向浏览器推送通知
+# VAPID 是 Web Push 的身份标识机制：前端用公钥订阅，服务端用私钥签名推送
+# 除获取公钥外均需登录；订阅端点必须为 https，且需带 p256dh/auth 两个密钥
 from fastapi import APIRouter, Depends, HTTPException, status
 
 from src.api.deps import get_current_user_required
@@ -19,6 +23,8 @@ logger = get_logger(__name__)
 router = APIRouter()
 
 
+# GET /api/push/vapid-public-key —— 返回 VAPID 公钥供前端发起推送订阅（无需鉴权）
+# 若服务端未成功生成 VAPID 密钥，说明推送不可用，返回 503
 @router.get("/vapid-public-key", response_model=VapidPublicKeyResponse)
 async def get_vapid_public_key() -> VapidPublicKeyResponse:
     """Get VAPID public key for push subscription (no auth required)."""
@@ -30,6 +36,9 @@ async def get_vapid_public_key() -> VapidPublicKeyResponse:
     return VapidPublicKeyResponse(public_key=settings.VAPID_PUBLIC_KEY)
 
 
+# POST /api/push/subscribe —— 保存浏览器上报的推送订阅，需登录
+# 请求体 PushSubscriptionCreate（endpoint + keys.p256dh/keys.auth + user_agent）
+# 校验：endpoint 必须以 https:// 开头，且 p256dh/auth 必填，否则 400；订阅绑定到当前用户
 @router.post("/subscribe", response_model=PushSubscription)
 async def subscribe_push(
     data: PushSubscriptionCreate,
@@ -56,6 +65,8 @@ async def subscribe_push(
     return PushSubscription.model_validate(subscription)
 
 
+# POST /api/push/unsubscribe —— 按 endpoint 移除一个推送订阅，需登录
+# 返回 {"status": "unsubscribed", "deleted": <是否删除到记录>}
 @router.post("/unsubscribe")
 async def unsubscribe_push(
     data: UnsubscribeRequest,
@@ -67,6 +78,8 @@ async def unsubscribe_push(
     return {"status": "unsubscribed", "deleted": deleted}
 
 
+# DELETE /api/push/subscriptions —— 删除当前用户的全部推送订阅（如登出所有设备），需登录
+# 返回 {"status": "deleted", "count": <删除数量>}
 @router.delete("/subscriptions")
 async def delete_all_subscriptions(
     user: TokenPayload = Depends(get_current_user_required),

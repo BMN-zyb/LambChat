@@ -13,6 +13,7 @@ from src.infra.logging.context import TraceContext
 
 
 class _TraceLogRecord(Protocol):
+    # 结构化协议:仅用于类型标注,声明经本过滤器注入后 LogRecord 上会具备的追踪相关属性。
     request_id: str
     trace_id: str
     span_id: str
@@ -25,6 +26,8 @@ class _TraceLogRecord(Protocol):
 
 
 def _build_trace_context(parts: dict[str, str]) -> str:
+    # 把非空(且不为占位符 "-")的键值渲染成 "k=v k=v " 形式;全空则返回空串。
+    # 末尾保留一个空格,便于在日志格式里直接拼接而无需额外分隔。
     rendered = [f"{key}={value}" for key, value in parts.items() if value and value != "-"]
     return " ".join(rendered) + " " if rendered else ""
 
@@ -65,6 +68,8 @@ class TraceFilter(logging.Filter):
         trace_record = cast(_TraceLogRecord, record)
 
         # 注入追踪属性
+        # 每个字段都用 or 兜底到 "-",保证日志格式串引用这些属性时永远有值,不会因缺失而抛错;
+        # request_id/trace_id 优先取追踪上下文,缺失时回退到业务请求上下文。
         trace_record.request_id = info.request_id or request_context.request_id or "-"
         trace_record.trace_id = info.trace_id or request_context.trace_id or "-"
         trace_record.span_id = info.span_id or "-"

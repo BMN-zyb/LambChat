@@ -36,10 +36,15 @@ from src.kernel.config import settings
 
 logger = get_logger(__name__)
 
+# 跨 trace 聚合读取会话事件时的分批大小
 _SESSION_EVENTS_BATCH_SIZE = 200
+# 事件类型过滤列表允许的最大长度（去重后截断），防止恶意超长 $in
 SESSION_EVENT_FILTER_LIST_LIMIT = 100
+# 单次读取事件的默认上限
 TRACE_EVENTS_DEFAULT_LIMIT = 1000
+# 单次读取事件的硬上限，防止读超大 trace 拖垮内存
 TRACE_EVENTS_READ_LIMIT = 5000
+# 列出 traces 的分页上限
 TRACE_LIST_LIMIT = 100
 _USAGE_LOGS_ENABLED = True  # 是否在 trace 完成时写入 usage_logs 集合
 
@@ -58,6 +63,7 @@ async def _write_usage_log(trace_id: str) -> None:
             {"_id": 0, "events": 0},
         )
         if trace_doc:
+            # 取该 trace 最后一条 token:usage 事件的数据作为用量来源
             usage_event = await get_trace_storage().get_last_trace_event(
                 trace_id,
                 ["token:usage"],
@@ -72,11 +78,13 @@ async def _write_usage_log(trace_id: str) -> None:
 
 
 def _get_session_event_read_default_limit() -> int:
+    # 会话事件读取默认上限（可配置），但不超过硬上限 TRACE_EVENTS_READ_LIMIT
     configured = max(int(getattr(settings, "SESSION_EVENT_READ_DEFAULT_LIMIT", 1000) or 0), 1)
     return min(configured, TRACE_EVENTS_READ_LIMIT)
 
 
 def _clamp_positive_int(value: int | None, *, default: int, maximum: int) -> int:
+    # 把输入夹到 [1, maximum]；非法值回退默认值
     try:
         candidate = int(value if value is not None else default)
     except (TypeError, ValueError):
@@ -85,6 +93,7 @@ def _clamp_positive_int(value: int | None, *, default: int, maximum: int) -> int
 
 
 def _clamp_event_read_limit(value: int | None, *, default: int) -> int:
+    # 事件读取上限夹取：<=0 返回 0（表示不读），否则封顶到 TRACE_EVENTS_READ_LIMIT
     try:
         candidate = int(value if value is not None else default)
     except (TypeError, ValueError):
@@ -95,6 +104,7 @@ def _clamp_event_read_limit(value: int | None, *, default: int) -> int:
 
 
 def _clamp_nonnegative_int(value: int | None) -> int:
+    # 归一化为非负整数（用于 skip 等）
     try:
         return max(int(value or 0), 0)
     except (TypeError, ValueError):
@@ -102,6 +112,7 @@ def _clamp_nonnegative_int(value: int | None) -> int:
 
 
 def _get_event_chunk_size() -> int:
+    # 每个分块容纳的事件数（可配置，默认 5000）；决定分块边界
     try:
         return max(int(getattr(settings, "SESSION_EVENT_CHUNK_SIZE", 5000) or 0), 1)
     except (TypeError, ValueError):
@@ -109,10 +120,12 @@ def _get_event_chunk_size() -> int:
 
 
 def _event_chunk_index(seq: int) -> int:
+    # 由事件序号 seq（从 1 起）计算其所属分块索引（从 0 起）
     return (max(int(seq), 1) - 1) // _get_event_chunk_size()
 
 
 def _event_preview(event: Dict[str, Any] | None) -> Dict[str, Any] | None:
+    # 提取事件的轻量预览（类型/数据/时间戳/序号），存到主文档供列表页无需读全量事件
     if not event:
         return None
     preview = {
@@ -126,6 +139,7 @@ def _event_preview(event: Dict[str, Any] | None) -> Dict[str, Any] | None:
 
 
 def _event_seq(event: Dict[str, Any], fallback: int) -> int:
+    # 读取事件序号，缺失/非法时用 fallback（通常是数组下标）兜底
     try:
         return int(event.get("seq", fallback))
     except (TypeError, ValueError):
@@ -136,6 +150,7 @@ def _bounded_unique_strings(
     values: Optional[List[str]],
     limit: int = SESSION_EVENT_FILTER_LIST_LIMIT,
 ) -> List[str]:
+    # 过滤出有效、去重、保序的字符串列表，并限制长度上限
     if not values:
         return []
     bounded: List[str] = []
@@ -167,6 +182,7 @@ class TraceStorage(TraceEventChunkMixin):
     @property
     def collection(self):
         """延迟加载 MongoDB 集合"""
+        # 延迟加载 traces 主集合，避免导入期建连接
         if self._collection is None:
             client = get_mongo_client()
             db = client[settings.MONGODB_DB]
@@ -177,6 +193,7 @@ class TraceStorage(TraceEventChunkMixin):
     @property
     def chunks_collection(self):
         """延迟加载 MongoDB trace event chunks 集合"""
+        # 延迟加载事件分块集合（供 TraceEventChunkMixin 使用）
         if self._chunks_collection is None:
             client = get_mongo_client()
             db = client[settings.MONGODB_DB]
@@ -185,9 +202,11 @@ class TraceStorage(TraceEventChunkMixin):
 
     async def ensure_indexes_if_needed(self):
         """确保索引存在（由首次使用时调用）"""
+        # 用实例属性做一次性哨兵：首次调用时后台建索引并启动合并器
         if not hasattr(self, "_indexes_ensured"):
             self._indexes_ensured = True
             task = asyncio.create_task(self._ensure_indexes())
+            # 消费任务异常，避免未 await 的后台任务异常被静默丢弃
             task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
             self._indexes_task = task
             # 启动事件合并器
@@ -195,6 +214,7 @@ class TraceStorage(TraceEventChunkMixin):
 
     async def _ensure_indexes(self):
         """确保必要的索引存在"""
+        # 后台创建 traces 与 chunks 两个集合的各类查询索引（均 background=True）
         collection = self.collection
         try:
             # 复合索引：用于 get_session_events 查询
@@ -264,12 +284,14 @@ class TraceStorage(TraceEventChunkMixin):
 
     def _start_merger(self):
         """启动事件合并器"""
+        # 按配置开关决定是否启用后台事件合并器（多流式事件合并降数量）
         if not settings.ENABLE_EVENT_MERGER:
             logger.info("EventMerger disabled by configuration")
             return
 
         if self._merger is None:
             try:
+                # 延迟导入避免与 event_merger 循环依赖
                 from src.infra.session.event_merger import get_event_merger
 
                 self._merger = get_event_merger(self)
@@ -305,6 +327,7 @@ class TraceStorage(TraceEventChunkMixin):
 
         await self.ensure_indexes_if_needed()
         now = utc_now()
+        # 初始 trace 文档：events 空数组，状态 running，等待后续事件 $push 追加
         doc: Dict[str, Any] = {
             "trace_id": trace_id,
             "session_id": session_id,
@@ -327,6 +350,7 @@ class TraceStorage(TraceEventChunkMixin):
             return True
         except DuplicateKeyError:
             # Trace already exists (e.g., queued path created it before dequeue)
+            # 幂等：trace_id 唯一索引冲突说明已创建过，视为成功
             logger.debug("Trace %s already exists, skipping", trace_id)
             return True
         except Exception as e:
@@ -356,6 +380,7 @@ class TraceStorage(TraceEventChunkMixin):
             是否追加成功
         """
         try:
+            # $push 追加事件、$inc 累加计数、$set 更新时间，一次原子写保证一致
             result = await self.collection.update_one(
                 {"trace_id": trace_id},
                 {
@@ -379,6 +404,7 @@ class TraceStorage(TraceEventChunkMixin):
 
     async def _ensure_token_usage_event(self, trace_id: str) -> None:
         """Insert a zero token usage event before done when a trace has no usage event yet."""
+        # 若 trace 尚无 token:usage 事件，在 done 事件之前补插一条零用量事件，保证统计口径一致
         now = utc_now()
         usage_event = {
             "event_type": "token:usage",
@@ -392,10 +418,12 @@ class TraceStorage(TraceEventChunkMixin):
             "timestamp": now,
         }
         try:
+            # 分块存储路径：读回全部事件，判断是否已有 usage，再在 done 前插入并整体重写分块
             if await self._has_event_chunks(trace_id):
                 events = await self.read_trace_events_compat(trace_id)
                 if any(event.get("event_type") == "token:usage" for event in events):
                     return
+                # 定位 done 事件位置，把用量事件插到它之前；无 done 则追加到末尾
                 done_index = next(
                     (
                         index
@@ -417,6 +445,8 @@ class TraceStorage(TraceEventChunkMixin):
                     await self.replace_trace_events_with_chunks(trace_doc, next_events)
                 return
 
+            # legacy 数组路径：用聚合管道式 update 在库内原子插入，无需把整个数组读到应用层
+            # 条件 events.event_type != token:usage 保证幂等（已存在则不再插）
             await self.collection.update_one(
                 {
                     "trace_id": trace_id,
@@ -427,6 +457,7 @@ class TraceStorage(TraceEventChunkMixin):
                         "$set": {
                             "events": {
                                 "$let": {
+                                    # 先算出 done 事件下标
                                     "vars": {
                                         "done_index": {
                                             "$indexOfArray": ["$events.event_type", "done"]
@@ -434,6 +465,7 @@ class TraceStorage(TraceEventChunkMixin):
                                     },
                                     "in": {
                                         "$cond": [
+                                            # 有 done：拼接 [done之前] + [usage] + [done及之后]
                                             {"$gte": ["$$done_index", 0]},
                                             {
                                                 "$concatArrays": [
@@ -453,6 +485,7 @@ class TraceStorage(TraceEventChunkMixin):
                                                     },
                                                 ]
                                             },
+                                            # 无 done：直接追加到末尾
                                             {"$concatArrays": ["$events", [usage_event]]},
                                         ]
                                     },
@@ -485,6 +518,7 @@ class TraceStorage(TraceEventChunkMixin):
         Returns:
             是否更新成功
         """
+        # 组装终态更新：写入状态、完成时间；额外 metadata 用点号路径合并
         update = {
             "$set": {
                 "status": status,
@@ -498,6 +532,7 @@ class TraceStorage(TraceEventChunkMixin):
 
         try:
             await self.ensure_indexes_if_needed()
+            # 完成前确保存在 token:usage 事件（补零），使用量统计不缺项
             if ensure_token_usage:
                 await self._ensure_token_usage_event(trace_id)
             result = await self.collection.update_one(
@@ -507,6 +542,7 @@ class TraceStorage(TraceEventChunkMixin):
             # 异步写入 usage_logs 集合（fire-and-forget，失败不影响主流程）
             if _USAGE_LOGS_ENABLED and result.modified_count > 0:
                 asyncio.create_task(_write_usage_log(trace_id))
+            # trace 刚完成，触发一次即时事件合并，尽快压缩流式事件
             if result.modified_count > 0 and self._merger is not None:
                 self._merger.schedule_merge_once()
             return result.modified_count > 0
@@ -531,11 +567,13 @@ class TraceStorage(TraceEventChunkMixin):
             trace 文档或 None
         """
         try:
+            # 默认投影排除 events 大数组，只取摘要，避免无谓的大文档传输
             projection = {"_id": 0, "events": 0}
             doc = await self.collection.find_one(
                 {"trace_id": trace_id},
                 projection,
             )
+            # 需要事件时再通过兼容读路径（分块/legacy）单独加载
             if doc is not None and include_events:
                 doc["events"] = await self.read_trace_events_compat(trace_id)
             return doc
@@ -561,6 +599,7 @@ class TraceStorage(TraceEventChunkMixin):
             事件列表
         """
         try:
+            # 统一走兼容读路径：分块存在读分块，否则读 legacy events
             return await self.read_trace_events_compat(
                 trace_id,
                 event_types=event_types,
@@ -576,7 +615,9 @@ class TraceStorage(TraceEventChunkMixin):
         event_types: Optional[List[str]] = None,
     ) -> Optional[Dict[str, Any]]:
         """Fetch the first matching event from one trace without loading the full events array."""
+        # 取某 trace 首条匹配事件，避免把整个 events 数组读进内存
         try:
+            # 分块路径：借助兼容读只取 1 条即可
             if await self._has_event_chunks(trace_id):
                 events = await self.read_trace_events_compat(
                     trace_id,
@@ -588,6 +629,7 @@ class TraceStorage(TraceEventChunkMixin):
             logger.error(f"Failed to get first trace event from chunks for {trace_id}: {e}")
             return None
 
+        # legacy 路径：用聚合 $unwind 展开事件后取第一条匹配，投影只保留必要字段
         pipeline: List[Dict[str, Any]] = [
             {"$match": {"trace_id": trace_id}},
             {
@@ -629,7 +671,9 @@ class TraceStorage(TraceEventChunkMixin):
         event_types: Optional[List[str]] = None,
     ) -> Optional[Dict[str, Any]]:
         """Fetch the latest matching event from one trace without returning the full events array."""
+        # 取某 trace 最后一条匹配事件（如 token:usage），同样避免全量读取
         try:
+            # 分块路径：按 chunk_index 倒序、块内按 seq 倒序，找到首个匹配即为最后一条
             if await self._has_event_chunks(trace_id):
                 bounded_event_types = _bounded_unique_strings(
                     event_types,
@@ -650,6 +694,7 @@ class TraceStorage(TraceEventChunkMixin):
                         if allowed_types and event.get("event_type") not in allowed_types:
                             continue
                         return event
+                # 兜底：分块里没找到时退回兼容读取取末条
                 events = await self.read_trace_events_compat(
                     trace_id,
                     event_types=bounded_event_types,
@@ -660,6 +705,7 @@ class TraceStorage(TraceEventChunkMixin):
             logger.error(f"Failed to get last trace event from chunks for {trace_id}: {e}")
             return None
 
+        # legacy 路径：展开后按 seq/timestamp 倒序取第一条匹配
         pipeline: List[Dict[str, Any]] = [
             {"$match": {"trace_id": trace_id}},
             {
@@ -720,6 +766,7 @@ class TraceStorage(TraceEventChunkMixin):
         Returns:
             trace 列表（不含 events 数组，仅摘要）
         """
+        # 夹紧分页参数并按传入过滤条件动态拼查询
         limit = _clamp_positive_int(limit, default=50, maximum=TRACE_LIST_LIMIT)
         skip = _clamp_nonnegative_int(skip)
         query = {}
@@ -764,6 +811,7 @@ class TraceStorage(TraceEventChunkMixin):
         if trace_id:
             query["trace_id"] = trace_id
 
+        # 只投影摘要字段与预存的首条用户消息预览，避免读取 events 大数组
         projection: Dict[str, Any] = {
             "_id": 0,
             "run_id": 1,
@@ -788,6 +836,7 @@ class TraceStorage(TraceEventChunkMixin):
             for trace in traces:
                 user_message = None
                 preview = trace.get("first_user_message_preview") or {}
+                # 旧数据没有预存预览时，按需回查一条 user:message 事件补上
                 if not preview and trace.get("trace_id"):
                     preview = (
                         await self.get_first_trace_event(
@@ -799,6 +848,7 @@ class TraceStorage(TraceEventChunkMixin):
                 if preview:
                     data = preview.get("data", {})
                     user_message = data.get("content") or data.get("message") or ""
+                    # 摘要用途：过长则截断加省略号
                     if user_message and len(user_message) > 20:
                         user_message = user_message[:17] + "..."
 
@@ -847,10 +897,12 @@ class TraceStorage(TraceEventChunkMixin):
             事件列表，按 run 顺序合并
         """
         try:
+            # 归一化过滤列表（去重+限长），防止超长 $in
             event_types = _bounded_unique_strings(event_types, SESSION_EVENT_FILTER_LIST_LIMIT)
             run_ids = _bounded_unique_strings(run_ids, SESSION_EVENT_FILTER_LIST_LIMIT)
             # 构建查询条件
             match_query: Dict[str, Any] = {"session_id": session_id}
+            # run_ids 优先于单个 run_id
             if run_ids:
                 match_query["run_id"] = {"$in": run_ids}
             elif run_id:
@@ -861,6 +913,7 @@ class TraceStorage(TraceEventChunkMixin):
             if completed_only:
                 match_query["status"] = {"$ne": "running"}
 
+            # 夹紧读取上限；<=0 直接返回空
             if max_events is not None:
                 max_events = _clamp_event_read_limit(
                     max_events,
@@ -870,6 +923,7 @@ class TraceStorage(TraceEventChunkMixin):
             if max_events is not None and max_events <= 0:
                 return []
 
+            # 先按 started_at 升序取出各 trace 的摘要（不含事件），保证 run 间时间顺序
             cursor = self.collection.find(
                 match_query,
                 {
@@ -880,6 +934,7 @@ class TraceStorage(TraceEventChunkMixin):
                 },
             ).sort("started_at", 1)
 
+            # 再逐个 trace 兼容读取其事件并按 run 顺序拼接；带上 max_events 做全局截断
             events: List[Dict[str, Any]] = []
             async for trace in cursor:
                 trace_id = trace.get("trace_id")
@@ -888,9 +943,11 @@ class TraceStorage(TraceEventChunkMixin):
                 trace_events = await self.read_trace_events_compat(
                     trace_id,
                     event_types=event_types,
+                    # 传入剩余可读额度，避免多读
                     max_events=None if max_events is None else max_events - len(events),
                 )
                 for event in trace_events:
+                    # 附上 trace_id/run_id 上下文，便于前端区分事件来源
                     item = {
                         "trace_id": trace_id,
                         "run_id": trace.get("run_id"),
@@ -901,6 +958,7 @@ class TraceStorage(TraceEventChunkMixin):
                     if "seq" in event:
                         item["seq"] = event.get("seq")
                     events.append(item)
+                    # 达到全局上限即提前返回
                     if max_events is not None and len(events) >= max_events:
                         logger.debug(
                             f"Session {session_id} (run_id={run_id}) returned {len(events)} bounded events"
@@ -932,12 +990,14 @@ class TraceStorage(TraceEventChunkMixin):
         Returns:
             事件列表，按写入顺序
         """
+        # 复用 get_session_events，限定单个 run_id
         return await self.get_session_events(session_id, event_types, run_id=run_id)
 
     async def delete_trace(self, trace_id: str) -> bool:
         """删除 trace"""
         try:
             result = await self.collection.delete_one({"trace_id": trace_id})
+            # 主文档删除成功后，连带清理其分块，避免残留孤儿分块
             if result.deleted_count > 0:
                 await self.chunks_collection.delete_many({"trace_id": trace_id})
             return result.deleted_count > 0
@@ -948,6 +1008,7 @@ class TraceStorage(TraceEventChunkMixin):
     async def delete_session_traces(self, session_id: str) -> int:
         """删除会话的所有 traces"""
         try:
+            # 先取出该会话所有 trace_id，用于按 id 精准清理分块
             cursor = self.collection.find(
                 {"session_id": session_id},
                 {"_id": 0, "trace_id": 1},
@@ -957,6 +1018,7 @@ class TraceStorage(TraceEventChunkMixin):
             if trace_ids:
                 await self.chunks_collection.delete_many({"trace_id": {"$in": trace_ids}})
             else:
+                # 没有 trace_id 时退化为按 session_id 清理分块
                 await self.chunks_collection.delete_many({"session_id": session_id})
             result = await self.collection.delete_many({"session_id": session_id})
             return result.deleted_count
@@ -965,6 +1027,7 @@ class TraceStorage(TraceEventChunkMixin):
             return 0
 
     async def close(self) -> None:
+        # 优雅关闭：取消后台建索引任务，重置一次性哨兵与缓存的集合/合并器引用
         task = self._indexes_task
         self._indexes_task = None
         if task is not None and not task.done():
@@ -978,6 +1041,7 @@ class TraceStorage(TraceEventChunkMixin):
 
 
 # Singleton
+# 进程级单例，全局共享同一份集合句柄与后台合并器
 _trace_storage: Optional[TraceStorage] = None
 
 
@@ -991,6 +1055,7 @@ def get_trace_storage() -> TraceStorage:
 
 async def close_trace_storage() -> None:
     """Release the singleton TraceStorage without creating it during shutdown."""
+    # 关闭并释放单例：先摘除全局引用，避免关闭过程中被再次取用
     global _trace_storage
     storage = _trace_storage
     _trace_storage = None

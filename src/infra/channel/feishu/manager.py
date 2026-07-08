@@ -22,12 +22,16 @@ from src.kernel.schemas.feishu import (
 )
 
 logger = get_logger(__name__)
+# 分布式租约/节点相关的 Redis 键前缀与各类 TTL、刷新/再均衡周期（秒）。
+# 集群里每个 app_id 通过"租约"保证仅由一个节点持有并连接，避免重复连线。
 _FEISHU_LEASE_PREFIX = "feishu:lease"
 _FEISHU_NODE_PREFIX = "feishu:nodes"
 _FEISHU_LEASE_TTL_SECONDS = 60
 _FEISHU_NODE_TTL_SECONDS = 60
 _FEISHU_LEASE_REFRESH_INTERVAL = 20
 _FEISHU_REBALANCE_INTERVAL = 20
+# 释放租约的 Lua 脚本：仅当租约仍归本实例（值匹配）时才删除，
+# 用原子操作避免"误删他人租约"的竞态。
 _RELEASE_LEASE_LUA = """
 if redis.call("GET", KEYS[1]) == ARGV[1] then
     return redis.call("DEL", KEYS[1])
@@ -35,6 +39,7 @@ else
     return 0
 end
 """
+# 续约的 Lua 脚本：同样先校验持有者再 EXPIRE 续期，保证只有持有者能续约。
 _REFRESH_LEASE_LUA = """
 if redis.call("GET", KEYS[1]) == ARGV[1] then
     return redis.call("EXPIRE", KEYS[1], ARGV[2])
@@ -59,8 +64,11 @@ class FeishuChannelManager(UserChannelManager):
         self._storage = ChannelStorage()
         self._message_handler: Optional[Callable] = message_handler
         # Track active app_ids to prevent duplicate bot connections
+        # 记录已激活的 app_id -> channel_key，用于防止同一机器人被重复连接。
         self._active_app_ids: dict[str, str] = {}  # app_id -> channel_key
+        # 本节点在集群中的唯一实例 ID（租约/节点成员用它标识归属）。
         self._instance_id = uuid.uuid4().hex
+        # 各 app_id 的租约续期后台任务；独立的租约用 Redis 连接；集群再均衡任务。
         self._lease_tasks: dict[str, asyncio.Task] = {}
         self._lease_redis: Redis | None = None
         self._rebalance_task: asyncio.Task | None = None
@@ -103,6 +111,7 @@ class FeishuChannelManager(UserChannelManager):
 
         self._running = True
 
+        # 启动即做一次"对账"：只启动分配给本节点的配置，并拉起周期性再均衡任务。
         started, skipped = await self._reconcile_enabled_configs()
         self._ensure_rebalance_task()
         logger.info(
@@ -114,6 +123,7 @@ class FeishuChannelManager(UserChannelManager):
     async def stop(self) -> None:
         """Stop all Feishu channels."""
         self._running = False
+        # 先停再均衡任务，避免停机过程中又拉起新连接。
         await self._cancel_rebalance_task()
 
         for user_id, client in list(self._channels.items()):
@@ -122,6 +132,7 @@ class FeishuChannelManager(UserChannelManager):
             except Exception as e:
                 logger.error(f"Error stopping Feishu client for user {user_id}: {e}")
 
+        # 释放本节点持有的所有租约、注销节点成员并关闭独立 Redis 连接，做到干净退出。
         await self._release_all_leases()
         await self._unregister_node()
         await self._close_lease_redis()
@@ -131,9 +142,11 @@ class FeishuChannelManager(UserChannelManager):
 
     async def _reconcile_enabled_configs(self) -> tuple[int, int]:
         """Start only configs assigned to this node and stop unassigned local channels."""
+        # 对账核心：刷新本节点成员心跳，失败则本轮放弃（返回 0,0）。
         if not await self._refresh_node_membership():
             return 0, 0
 
+        # 取当前存活节点列表，并确保包含本节点（用于一致性分配计算）。
         node_ids = await self._list_active_node_ids()
         if self._instance_id not in node_ids:
             node_ids.append(self._instance_id)
@@ -141,6 +154,7 @@ class FeishuChannelManager(UserChannelManager):
 
         started = 0
         skipped = 0
+        # desired_local_keys 记录本轮"应由本节点持有"的渠道键，用于收尾时下线多余连接。
         desired_local_keys: set[str] = set()
 
         async for config_dict in self._storage.iter_enabled_configs(ChannelType.FEISHU):
@@ -154,6 +168,7 @@ class FeishuChannelManager(UserChannelManager):
                 app_id = config_dict.get("app_id") or ""
                 app_secret = config_dict.get("app_secret") or ""
 
+                # 缺 app_id/app_secret 通常意味着解密失败，跳过并提示用户重存配置。
                 if not app_id or not app_secret:
                     logger.warning(
                         f"Skipping Feishu config for user {user_id}: "
@@ -167,6 +182,8 @@ class FeishuChannelManager(UserChannelManager):
                     user_id,
                     config_dict.get("instance_id") or "",
                 )
+                # 一致性分配：仅当该 app_id 的"首选归属节点"是本节点时才在本地启动，
+                # 否则确保本地不残留该渠道（可能是刚从别的节点迁移过来）。
                 if self._preferred_owner(app_id, node_ids) != self._instance_id:
                     await self._stop_channel_by_key(channel_key)
                     skipped += 1
@@ -174,6 +191,7 @@ class FeishuChannelManager(UserChannelManager):
 
                 desired_local_keys.add(channel_key)
                 config = self._dict_to_config(user_id, config_dict)
+                # replace_existing=False：已在健康运行的相同连接不重启，避免抖动。
                 if await self._start_user_client(config, replace_existing=False):
                     started += 1
                 else:
@@ -184,6 +202,7 @@ class FeishuChannelManager(UserChannelManager):
                 )
                 skipped += 1
 
+        # 收尾：本地仍在运行、但本轮不再分配给本节点的连接一律停掉。
         for channel_key in list(self._channels.keys()):
             if channel_key not in desired_local_keys:
                 await self._stop_channel_by_key(channel_key)
@@ -191,6 +210,7 @@ class FeishuChannelManager(UserChannelManager):
         return started, skipped
 
     async def _refresh_node_membership(self) -> bool:
+        # 写入/续期本节点的成员键（带 TTL），作为"本节点仍存活"的心跳。
         try:
             redis = self._get_lease_redis()
             await redis.set(
@@ -204,6 +224,7 @@ class FeishuChannelManager(UserChannelManager):
             return False
 
     async def _list_active_node_ids(self) -> list[str]:
+        # 用 SCAN 遍历所有节点成员键，解析出当前存活的节点 ID 集合（排序后返回）。
         redis = self._get_lease_redis()
         pattern = self._node_key("*")
         cursor: int | str = 0
@@ -215,10 +236,12 @@ class FeishuChannelManager(UserChannelManager):
                 node_id = key_text.rsplit(":", 1)[-1]
                 if node_id:
                     node_ids.add(node_id)
+            # SCAN 游标回到 0 表示遍历结束。
             if int(cursor) == 0:
                 return sorted(node_ids)
 
     async def _unregister_node(self) -> None:
+        # 停机时删除本节点成员键，让其它节点尽快感知并接管其负载。
         try:
             redis = self._get_lease_redis()
             await redis.delete(self._node_key(self._instance_id))
@@ -226,11 +249,13 @@ class FeishuChannelManager(UserChannelManager):
             logger.warning("[Feishu] Failed to unregister node membership: %s", e)
 
     def _ensure_rebalance_task(self) -> None:
+        # 幂等地拉起再均衡后台任务（已在运行则不重复创建）。
         if self._rebalance_task and not self._rebalance_task.done():
             return
         self._rebalance_task = asyncio.create_task(self._rebalance_loop())
 
     async def _rebalance_loop(self) -> None:
+        # 周期性再均衡：节点上下线会改变一致性分配结果，需定期对账把连接迁到正确节点。
         try:
             while self._running:
                 await asyncio.sleep(_FEISHU_REBALANCE_INTERVAL)
@@ -243,6 +268,7 @@ class FeishuChannelManager(UserChannelManager):
             self._rebalance_task = None
 
     async def _cancel_rebalance_task(self) -> None:
+        # 取消并等待再均衡任务结束（吞掉取消异常）。
         task = self._rebalance_task
         self._rebalance_task = None
         if task and not task.done():
@@ -251,14 +277,19 @@ class FeishuChannelManager(UserChannelManager):
 
     @staticmethod
     def _node_key(instance_id: str) -> str:
+        # 拼接节点成员键。
         return f"{_FEISHU_NODE_PREFIX}:{instance_id}"
 
     @staticmethod
     def _channel_key(user_id: str, instance_id: str | None = None) -> str:
+        # 渠道键：有实例 ID 用 "user:instance"，否则退化为裸 user_id。
         return f"{user_id}:{instance_id}" if instance_id else user_id
 
     @staticmethod
     def _preferred_owner(app_id: str, node_ids: list[str]) -> str | None:
+        # 用"最高随机权重（HRW/Rendezvous 哈希）"确定 app_id 的首选归属节点：
+        # 对每个节点计算 sha256(app_id:node) 取最大者。相比取模，节点增减时
+        # 只会迁移少量 app_id，分配也更均匀。
         if not node_ids:
             return None
         return max(
@@ -276,6 +307,8 @@ class FeishuChannelManager(UserChannelManager):
         # Use instance_id if available, otherwise use user_id for backward compatibility
         channel_key = self._channel_key(config.user_id, config.instance_id)
 
+        # 若已存在且不要求替换、且同一 app_id 仍在健康运行，则复用旧连接：
+        # 只刷新回调与租约续期任务，避免无谓的断开重连（对账场景常走这里）。
         existing_channel = self._channels.get(channel_key)
         existing_app_id = (
             getattr(existing_channel.config, "app_id", None) if existing_channel else None
@@ -295,6 +328,7 @@ class FeishuChannelManager(UserChannelManager):
             return True
 
         # Prevent duplicate bot connections: same app_id should only have one active channel
+        # 防重：同一 app_id 只允许一个活跃连接；若已被别的 channel_key 占用则跳过。
         app_id = config.app_id
         if app_id in self._active_app_ids:
             existing_key = self._active_app_ids[app_id]
@@ -305,6 +339,7 @@ class FeishuChannelManager(UserChannelManager):
                 )
                 return False
 
+        # 抢占分布式租约：抢不到说明集群里其它实例正持有该 app_id，本地不启动。
         if not await self._acquire_lease(app_id):
             logger.info(
                 "[Feishu] Lease for app_id=%s is held by another instance, skipping '%s'",
@@ -314,6 +349,7 @@ class FeishuChannelManager(UserChannelManager):
             return False
 
         try:
+            # 替换旧连接前先停掉它，并清理其 app_id 追踪记录。
             if channel_key in self._channels:
                 await self._channels[channel_key].stop()
                 # Clean up old app_id tracking
@@ -321,6 +357,7 @@ class FeishuChannelManager(UserChannelManager):
                 if old_app_id and old_app_id in self._active_app_ids:
                     del self._active_app_ids[old_app_id]
 
+            # 新建并启动飞书客户端；成功则登记并启动租约续期，失败则释放已抢到的租约。
             client = FeishuChannel(config, self._message_handler)
             success = await client.start()
 
@@ -332,6 +369,7 @@ class FeishuChannelManager(UserChannelManager):
             await self._release_lease(app_id)
             return False
         except BaseException:
+            # 启动异常也要归还租约，防止租约泄漏导致该 app_id 永远无人接管。
             await self._release_lease(app_id)
             raise
 
@@ -343,6 +381,7 @@ class FeishuChannelManager(UserChannelManager):
             instance_id: Optional specific instance ID to reload. If None, reloads all instances.
         """
         # If instance_id is provided, stop only that specific instance
+        # 指定了 instance_id：只处理该实例。先停掉本地已有连接。
         if instance_id:
             # Check if this specific instance has an active connection
             channel_key = self._channel_key(user_id, instance_id)
@@ -351,6 +390,8 @@ class FeishuChannelManager(UserChannelManager):
                 logger.info(f"Stopped Feishu client for {channel_key}")
 
             # Check if there's still config for this instance
+            # 若该实例仍存在且启用，则按一致性分配判断是否应由本节点接管；
+            # 不属于本节点则直接返回（交给首选节点去启动）。
             config_dict = await self._storage.get_config(user_id, ChannelType.FEISHU, instance_id)
             if config_dict and config_dict.get("enabled", True):
                 if await self._refresh_node_membership():
@@ -365,14 +406,17 @@ class FeishuChannelManager(UserChannelManager):
             return True
 
         # Legacy behavior: reload all instances for user
+        # 兼容旧行为：未指定实例时，重载该用户所有飞书配置。
         feishu_configs = await self._storage.list_user_configs_by_type(user_id, ChannelType.FEISHU)
 
         # Stop all existing clients
+        # 先停掉该用户所有本地连接（键以 user_id 前缀）。
         for key in list(self._channels.keys()):
             if key.startswith(user_id):
                 await self._stop_channel_by_key(key)
 
         # Start all enabled clients
+        # 再逐个启动启用中的配置，同样先做本节点归属判断。
         for config_dict in feishu_configs:
             if config_dict.get("enabled", True):
                 inst_id = config_dict.get("instance_id")
@@ -498,6 +542,7 @@ class FeishuChannelManager(UserChannelManager):
         self, user_id: str, instance_id: Optional[str] = None
     ) -> bool:
         """Check whether a Feishu bot is connected anywhere in the cluster."""
+        # 先看本地是否连接；本地没有则通过"租约是否被集群任一节点持有"来判断远端连接。
         if self.is_connected(user_id, instance_id):
             return True
 
@@ -505,6 +550,7 @@ class FeishuChannelManager(UserChannelManager):
             config = await self._storage.get_config(user_id, ChannelType.FEISHU, instance_id)
             return await self._has_cluster_lease(config)
 
+        # 未指定实例：遍历该用户所有启用配置，任一本地连接或持有集群租约即视为已连接。
         configs = await self._storage.list_user_configs_by_type(user_id, ChannelType.FEISHU)
         for config in configs:
             if not config.get("enabled", True):
@@ -517,6 +563,7 @@ class FeishuChannelManager(UserChannelManager):
         return False
 
     async def _stop_channel_by_key(self, channel_key: str) -> None:
+        # 按渠道键下线连接：弹出实例、清理 app_id 追踪、停止连接并释放其租约。
         channel = self._channels.pop(channel_key, None)
         if not channel:
             return
@@ -534,6 +581,7 @@ class FeishuChannelManager(UserChannelManager):
             await self._release_lease(old_app_id)
 
     async def _has_cluster_lease(self, config: dict[str, Any] | None) -> bool:
+        # 判断某 app_id 的租约当前是否被集群中任意节点持有（用于跨节点连接探测）。
         if not config or not config.get("enabled", True):
             return False
         app_id = config.get("app_id") or ""
@@ -548,9 +596,11 @@ class FeishuChannelManager(UserChannelManager):
 
     @staticmethod
     def _lease_key(app_id: str) -> str:
+        # 拼接租约键。
         return f"{_FEISHU_LEASE_PREFIX}:{app_id}"
 
     async def _acquire_lease(self, app_id: str) -> bool:
+        # 用 SET NX + EX 原子抢占租约：只有键不存在时才写入成功（即抢到）。
         try:
             redis = self._get_lease_redis()
             claimed = await redis.set(
@@ -565,14 +615,18 @@ class FeishuChannelManager(UserChannelManager):
             return False
 
     def _ensure_lease_refresh_task(self, app_id: str) -> None:
+        # 为某 app_id 启动一个后台续约任务（同一 app_id 只启一个）。
         if app_id in self._lease_tasks:
             return
 
         async def _refresh() -> None:
+            # 定期续约：每隔 REFRESH_INTERVAL 用 Lua 脚本"仅持有者可续期"续 TTL。
+            # 一旦续约失败（说明租约已被他人接管或丢失），立即停掉本地连接以让出所有权。
             try:
                 redis = self._get_lease_redis()
                 while True:
                     await asyncio.sleep(_FEISHU_LEASE_REFRESH_INTERVAL)
+                    # 该 app_id 已不再活跃则结束续约任务。
                     if app_id not in self._active_app_ids:
                         return
                     refreshed = await redis.eval(
@@ -601,6 +655,7 @@ class FeishuChannelManager(UserChannelManager):
         self._lease_tasks[app_id] = asyncio.create_task(_refresh())
 
     async def _stop_channel_after_lost_lease(self, app_id: str) -> None:
+        # 丢失租约后的收尾：找到对应连接并停掉，让出该 app_id 给新的持有节点。
         channel_key = self._active_app_ids.pop(app_id, None)
         if not channel_key:
             return
@@ -625,6 +680,7 @@ class FeishuChannelManager(UserChannelManager):
             )
 
     async def _release_lease(self, app_id: str) -> None:
+        # 释放租约：先取消该 app_id 的续约任务，再用 Lua 脚本"仅持有者可删除"归还租约。
         task = self._lease_tasks.pop(app_id, None)
         if task and not task.done():
             task.cancel()
@@ -639,21 +695,26 @@ class FeishuChannelManager(UserChannelManager):
             logger.warning("[Feishu] Failed to release lease for app_id=%s: %s", app_id, e)
 
     def _cancel_all_lease_tasks(self) -> None:
+        # 取消全部续约任务（不等待，用于快速清理）。
         for app_id in list(self._lease_tasks.keys()):
             task = self._lease_tasks.pop(app_id, None)
             if task and not task.done():
                 task.cancel()
 
     async def _release_all_leases(self) -> None:
+        # 归还本节点持有的所有租约（停机时调用）。
         for app_id in list(self._active_app_ids.keys()):
             await self._release_lease(app_id)
 
     def _get_lease_redis(self):
+        # 惰性创建"独立连接池"的 Redis 客户端：租约相关操作与业务 Redis 隔离，
+        # 避免相互影响（如阻塞命令占用连接）。
         if self._lease_redis is None:
             self._lease_redis = create_redis_client(isolated_pool=True)
         return self._lease_redis
 
     async def _close_lease_redis(self) -> None:
+        # 关闭并释放租约专用 Redis 客户端。
         if self._lease_redis is None:
             return
         try:
@@ -665,6 +726,7 @@ class FeishuChannelManager(UserChannelManager):
 
 
 # Global instance
+# 进程级全局飞书渠道管理器单例。
 _feishu_channel_manager: Optional[FeishuChannelManager] = None
 
 
@@ -678,6 +740,7 @@ def get_feishu_channel_manager() -> FeishuChannelManager:
 
 async def start_feishu_channels(message_handler=None) -> None:
     """Start the Feishu channel manager with all enabled user bots."""
+    # 便捷入口：取全局管理器、注入消息回调并启动。
     manager = get_feishu_channel_manager()
     manager._message_handler = message_handler
     await manager.start()
@@ -685,6 +748,7 @@ async def start_feishu_channels(message_handler=None) -> None:
 
 async def stop_feishu_channels() -> None:
     """Stop the Feishu channel manager."""
+    # 停止并释放全局管理器，并顺带关闭注册流程的 HTTP 会话（清理资源）。
     global _feishu_channel_manager
     if _feishu_channel_manager:
         await _feishu_channel_manager.stop()

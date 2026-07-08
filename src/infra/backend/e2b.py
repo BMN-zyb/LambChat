@@ -54,6 +54,8 @@ logger = get_logger(__name__)
 
 # 默认超时 30 分钟（秒）
 _DEFAULT_TIMEOUT = 30 * 60
+# 各类操作的大小/数量上限：read 直读上限 2MB，下载/上传单文件上限 50MB，
+# 单次批量最多 100 个文件，glob 最多返回 1000 条、命令式 glob 超时 15 秒。
 SANDBOX_READ_MAX_BYTES = 2 * 1024 * 1024
 SANDBOX_DOWNLOAD_MAX_BYTES = 50 * 1024 * 1024
 SANDBOX_UPLOAD_MAX_BYTES = 50 * 1024 * 1024
@@ -62,6 +64,8 @@ SANDBOX_GLOB_MAX_MATCHES = 1000
 SANDBOX_GLOB_TIMEOUT_SECONDS = 15
 
 
+# 按行切片文件内容：优先用 deepagents 的 slice_read_response；旧版库无该函数时（ImportError）
+# 退回手动按行切片，offset 越界则返回带 error 的 ReadResult。
 def _slice_file_data(content: str, offset: int, limit: int):
     try:
         from deepagents.backends.utils import slice_read_response
@@ -76,6 +80,7 @@ def _slice_file_data(content: str, offset: int, limit: int):
         return "".join(lines[offset : offset + limit]) if limit >= 0 else "".join(lines[offset:])
 
 
+# 切片并渲染成"带行号"的文本（供 LLM 阅读）；切片若返回错误则包装成 ReadResult 透传。
 def _slice_text_read(content: str, offset: int, limit: int) -> str | ReadResult:
     if not content:
         return ""
@@ -86,6 +91,7 @@ def _slice_text_read(content: str, offset: int, limit: int) -> str | ReadResult:
     return format_content_with_line_numbers(sliced, start_line=offset + 1)  # type: ignore[arg-type]
 
 
+# 切片但返回原始内容（不加行号），用于填充 file_data.content。
 def _slice_text_content(content: str, offset: int, limit: int) -> str | ReadResult:
     if not content:
         return ""
@@ -116,6 +122,7 @@ class E2BBackend(BaseSandbox):
         self._sandbox = sandbox
         self.env_vars = env_vars or {}
         self._work_dir = work_dir or "/home/user"
+        # 超时优先级：显式传入 > settings.E2B_TIMEOUT > 环境变量 E2B_TIMEOUT > 默认 30 分钟
         self._timeout = (
             timeout or settings.E2B_TIMEOUT or int(os.environ.get("E2B_TIMEOUT", _DEFAULT_TIMEOUT))
         )
@@ -129,12 +136,14 @@ class E2BBackend(BaseSandbox):
         return self._work_dir
 
     def _with_work_dir(self, command: str) -> str:
+        # 给命令套上工作目录：已显式 cd 的命令原样返回，否则先 mkdir -p 再 cd 进 work_dir 执行
         if command.lstrip().startswith("cd "):
             return command
         quoted_work_dir = shlex.quote(self.work_dir)
         return f"mkdir -p {quoted_work_dir} && cd {quoted_work_dir} && {command}"
 
     def _resolve_path(self, path: str) -> str:
+        # 路径归一化：'/' → work_dir；绝对路径原样返回；相对路径拼到 work_dir 下
         if path == "/":
             return self.work_dir
         if path.startswith("/"):
@@ -154,6 +163,7 @@ class E2BBackend(BaseSandbox):
     # =========================================================================
 
     def execute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
+        # 实际超时取 min(请求值, 自身上限)，确保单次调用不会超过后端配置的最大时长
         effective_timeout = min(timeout or self._timeout, self._timeout)
 
         try:
@@ -186,6 +196,7 @@ class E2BBackend(BaseSandbox):
             )
 
     async def aexecute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
+        # 异步执行：线程池跑同步 execute + asyncio.wait_for 在客户端侧兜底超时
         effective_timeout = min(timeout or self._timeout, self._timeout)
         try:
             return await run_blocking_io(
@@ -200,6 +211,7 @@ class E2BBackend(BaseSandbox):
                 truncated=False,
             )
 
+    # 内容搜索用比通用 execute() 更短的默认超时（grep 应快速返回，避免长时间占用沙箱）。
     def grep_raw(
         self,
         pattern: str,
@@ -211,6 +223,7 @@ class E2BBackend(BaseSandbox):
         result = self.execute(build_grep_command(pattern, path, glob), timeout=timeout)
         return parse_grep_response(result, timeout)
 
+    # grep 的异步变体，保留各后端特定的超时处理。
     async def agrep_raw(
         self,
         pattern: str,
@@ -433,6 +446,8 @@ class E2BBackend(BaseSandbox):
             logger.error(f"E2B files.write({file_path}) failed: {e}")
             return WriteResult(path=file_path, error=error)
 
+    # 在沙箱内做 glob：优先 rg（已按 glob 过滤），无 rg 退回 find（列全部再本地正则匹配）；
+    # 首行打印 __LAMBCHAT_GLOB_MODE__ 标记模式。命令失败返回 None，交上层回退到原生 API。
     def _glob_info_via_command(self, pattern: str, search_path: str) -> list[FileInfo] | None:
         """Prefer shell tools for glob search; return None when command search is unavailable."""
         quoted_path = shlex.quote(search_path)
@@ -456,6 +471,7 @@ class E2BBackend(BaseSandbox):
         import re
 
         # glob.translate() is Python 3.13+; this is the 3.12-compatible equivalent.
+        # 手写 glob→正则：** 跨目录（.* 或 (?:|.*/)），* 匹配非 / 段（[^/]*），? 匹配单个非 / 字符
         parts = pattern.split("**")
         segments: list[str] = []
         for idx, part in enumerate(parts):
@@ -519,6 +535,8 @@ class E2BBackend(BaseSandbox):
             _skip_prefixes = ("/proc", "/sys", "/dev")
 
             def _match_glob(entries_list: list[Any], current_path: str, depth: int) -> None:
+                # 递归遍历子目录做 fnmatch 匹配；用 result 数量上限、_max_depth、visited 去重、
+                # 跳过软链等多重防护，避免大目录或循环软链导致长时间阻塞、内存膨胀。
                 if len(result) >= SANDBOX_GLOB_MAX_MATCHES:
                     return
                 if depth > _max_depth:
@@ -573,6 +591,7 @@ class E2BBackend(BaseSandbox):
     # =========================================================================
 
     def upload_files(self, files: list[tuple[str, bytes]]) -> list[FileUploadResponse]:
+        # 数量超限则整体拒绝；单文件超上传上限标记 file_too_large；其余逐个用原生 API 写入
         if len(files) > SANDBOX_BATCH_FILES_LIMIT:
             return [
                 file_upload_response(path=path, error="too_many_files") for path, _content in files
@@ -607,6 +626,7 @@ class E2BBackend(BaseSandbox):
         return await run_blocking_io(self.upload_files, files)
 
     def download_files(self, paths: list[str]) -> list[FileDownloadResponse]:
+        # 数量超限则整体拒绝；单文件超下载上限视为 file_not_found（不返回超大内容）
         if len(paths) > SANDBOX_BATCH_FILES_LIMIT:
             return [
                 file_download_response(path=path, content=None, error="too_many_files")
@@ -641,6 +661,8 @@ class E2BBackend(BaseSandbox):
         return responses
 
     def _file_size(self, path: str) -> int | None:
+        # E2B 用 files.list(父目录) 找到目标项读取其 size（不像其他后端跑 stat）；
+        # 拿不到则返回 None，用作读/下载前的大小预检。
         parent = os.path.dirname(path) or "/"
         try:
             entries = self._sandbox.files.list(path=parent)

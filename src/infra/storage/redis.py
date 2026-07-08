@@ -15,11 +15,14 @@ from src.infra.storage.base import StorageBase
 from src.kernel.config import settings
 
 logger = get_logger(__name__)
+# 哨兵对象：区分"未传参"与"显式传 None"（用于 socket_timeout 可选覆盖）
 _UNSET = object()
+# keys() 用 SCAN 扫描时的返回上限，防止阻塞与内存膨胀
 REDIS_STORAGE_KEYS_LIMIT = 1000
 
 
 def _parse_stream_fields_sync(fields: dict) -> dict:
+    # 把 Stream 条目的字段值尝试按 JSON 反序列化；失败则原样保留
     parsed = {}
     for key, value in fields.items():
         try:
@@ -30,16 +33,19 @@ def _parse_stream_fields_sync(fields: dict) -> dict:
 
 
 def _parse_stream_entries_sync(entries: list[tuple[str, dict]]) -> list[tuple[str, dict]]:
+    # 批量解析一批 (条目id, 字段) 的字段值
     return [(entry_id, _parse_stream_fields_sync(fields)) for entry_id, fields in entries]
 
 
 def _parse_stream_read_result_sync(
     result: list[tuple[str, list[tuple[str, dict]]]],
 ) -> list[tuple[str, list[tuple[str, dict]]]]:
+    # 解析 xread 结果：外层是多个 (流key, 条目列表)
     return [(stream_key, _parse_stream_entries_sync(entries)) for stream_key, entries in result]
 
 
 def _redis_pool_kwargs(*, socket_timeout: Any = _UNSET) -> dict[str, Any]:
+    # 统一的连接池参数：utf-8 解码、连接数上限、读写/连接超时、超时重试等
     kwargs = {
         "encoding": "utf-8",
         "decode_responses": True,
@@ -50,6 +56,7 @@ def _redis_pool_kwargs(*, socket_timeout: Any = _UNSET) -> dict[str, Any]:
     }
     if settings.REDIS_PASSWORD:
         kwargs["password"] = settings.REDIS_PASSWORD
+    # 显式传入 socket_timeout 时覆盖默认（如阻塞读需要更长超时）
     if socket_timeout is not _UNSET:
         kwargs["socket_timeout"] = socket_timeout
     return kwargs
@@ -58,11 +65,13 @@ def _redis_pool_kwargs(*, socket_timeout: Any = _UNSET) -> dict[str, Any]:
 @lru_cache
 def get_redis_connection_pool():
     """Get the shared Redis connection pool for this process."""
+    # lru_cache 保证进程内共享同一个连接池
     return redis.ConnectionPool.from_url(settings.REDIS_URL, **_redis_pool_kwargs())
 
 
 def create_redis_client(*, isolated_pool: bool = False, socket_timeout: Any = _UNSET) -> Redis:
     """Create a Redis client with the project's standard connection settings."""
+    # isolated_pool=True：独立连接池，适合阻塞式监听（如 SSE 长阻塞 XREAD）避免占用共享池连接
     if isolated_pool:
         return Redis(
             connection_pool=redis.ConnectionPool.from_url(
@@ -71,6 +80,7 @@ def create_redis_client(*, isolated_pool: bool = False, socket_timeout: Any = _U
             ),
             auto_close_connection_pool=True,
         )
+    # 默认复用共享连接池
     return Redis(connection_pool=get_redis_connection_pool())
 
 
@@ -82,10 +92,12 @@ def get_redis_client() -> Redis:
 async def close_redis_client() -> None:
     """关闭 Redis 连接池"""
     try:
+        # 从未创建过连接池则直接返回
         if get_redis_connection_pool.cache_info().currsize == 0:
             return
         pool = get_redis_connection_pool()
         await pool.aclose()
+        # 清缓存使下次重新建池
         get_redis_connection_pool.cache_clear()
         logger.info("Redis connection pool closed")
     except Exception as e:

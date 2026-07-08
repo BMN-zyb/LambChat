@@ -41,6 +41,7 @@ __all__ = [
 logger = get_logger(__name__)
 
 
+# 向后兼容别名：早期代码从此处 import _generate_run_id，保留以免破坏引用。
 def _generate_run_id() -> str:
     """Backward-compatible alias for older imports."""
     return generate_run_id()
@@ -58,6 +59,12 @@ class BackgroundTaskManager:
     - 服务关闭时标记未完成任务为失败
     """
 
+    # 构造函数：初始化任务管理器的进程内状态。
+    # 关键内存结构（都以 run_id 为 key，实现多轮对话隔离）：
+    #   _tasks         —— run_id -> 正在运行的 asyncio.Task；
+    #   _run_info      —— run_id -> 运行信息（session/trace/agent/user 等）；
+    #   _pending_tasks —— run_id -> 排队任务上下文（本地分发旧格式的兜底）。
+    # 另持有心跳 / 取消 / pubsub 等子组件，以及可选的 arq 连接池、并发释放任务集合。
     def __init__(self):
         # 使用 run_id 作为 key 管理状态
         self._tasks: Dict[str, asyncio.Task] = {}  # run_id -> Task
@@ -81,12 +88,14 @@ class BackgroundTaskManager:
             self._storage = SessionStorage()
         return self._storage
 
+    # 惰性创建并复用 TaskExecutor：本地分发与崩溃恢复都需要它来真正跑任务。
     def _ensure_executor(self) -> TaskExecutor:
         """Ensure a task executor exists for local dispatch and recovery."""
         if self._executor is None:
             self._executor = TaskExecutor(self.storage, self._run_info, self._heartbeat)
         return self._executor
 
+    # 惰性创建 manager 自持的 arq 连接池（仅 arq 后端会用到），用于向队列 enqueue 任务。
     async def _get_arq_pool(self) -> Any:
         """Return a manager-owned arq pool, creating it lazily."""
         if self._arq_pool is None:
@@ -96,6 +105,7 @@ class BackgroundTaskManager:
             )
         return self._arq_pool
 
+    # 关闭 arq 连接池：兼容 close()/wait_closed() 返回同步或协程两种情况。
     async def _close_arq_pool(self) -> None:
         """Close the manager-owned arq pool if it was created."""
         arq_pool = self._arq_pool
@@ -114,6 +124,9 @@ class BackgroundTaskManager:
             if inspect.isawaitable(result):
                 await result
 
+    # 在后台 worker 启动前，先把用户消息落库并建好 trace。
+    # 用途：某些路径（如定时任务、arq 分发）希望「提交即可见」——用户消息立刻
+    # 出现在会话里，而不必等 worker 真正开跑。返回建好的 trace_id。
     async def _persist_initial_user_message(
         self,
         *,
@@ -148,6 +161,9 @@ class BackgroundTaskManager:
         )
         return presenter.trace_id
 
+    # 以下三个工厂方法把 manager 的内部状态（storage/run_info/heartbeat/各回调）
+    # 注入到拆分出去的子服务里。这样职责分散到 status_queries/recovery/
+    # startup_cleanup 各模块，manager 只做「组装 + 转发」，避免自身臃肿。
     def _status_queries(self) -> TaskStatusQueries:
         return TaskStatusQueries(storage=self.storage, run_info=self._run_info)
 
@@ -188,6 +204,10 @@ class BackgroundTaskManager:
             error_code=error_code,
         )
 
+    # 恢复任务的提交入口，按后端分流（arq vs 本地）。两条路径的参数签名不同，
+    # 因此这里按需从 kwargs 里剔除对方不接受的键：
+    #   - arq：去掉不可序列化的 executor 函数引用，改传 executor_key；
+    #   - 本地：去掉 arq 专用的 trace_id / user_message_written。
     async def _submit_recovery_task(self, **kwargs: Any) -> Tuple[str, str]:
         executor_key = str(kwargs.pop("executor_key", "agent_stream"))
         if settings.TASK_BACKEND == "arq":
@@ -220,6 +240,8 @@ class BackgroundTaskManager:
             reason,
         )
 
+    # 从原始 MongoDB session 文档还原出规范化的 session 模型。兼容两种主键：
+    # 先按 session_id 查，查不到再按 _id 查。供恢复/清理流程复用。
     async def _load_session_record(self, raw_session: dict[str, Any]) -> Any | None:
         """Load a normalized session model from a raw MongoDB session document."""
         session_id = raw_session.get("session_id") or str(raw_session.get("_id"))
@@ -231,6 +253,11 @@ class BackgroundTaskManager:
     async def _release_recovery_lock(self, lock_key: str, token: str) -> None:
         await self._recovery_service().release_recovery_lock(lock_key, token)
 
+    # 【本地分发入口】在「本进程」内提交并运行任务：生成 run_id、确保 session
+    # 存在、置为 PENDING，然后用 asyncio.create_task 就地拉起 executor.run_task，
+    # 登记到 _tasks 并挂 done 回调（回调里清理状态、释放并发槽位）。
+    # 与 submit_arq 的区别：这里任务就在当前进程跑，executor 是可直接调用的函数；
+    # submit_arq 则把上下文写 Redis、投递到独立 worker 进程执行。
     async def submit(
         self,
         session_id: str,
@@ -353,6 +380,10 @@ class BackgroundTaskManager:
         logger.info(f"Task submitted: session={session_id}, run_id={run_id}, agent={agent_id}")
         return run_id, trace_id
 
+    # 【arq 分发入口】把任务交给 arq 队列由独立 worker 执行。步骤：确保 session
+    # 存在、置为 QUEUED，把「可序列化的完整任务上下文」存入 Redis（payload_store），
+    # 再向 arq enqueue 一个只带 run_id 的轻量 job。worker 端凭 run_id 回读 payload
+    # 还原任务。因为函数无法跨进程传递，所以这里用 executor_key 而非 executor 本身。
     async def submit_arq(
         self,
         session_id: str,
@@ -444,6 +475,7 @@ class BackgroundTaskManager:
 
         if arq_pool is None:
             arq_pool = await self._get_arq_pool()
+        # 用 run_id 作为 _job_id，让 arq 天然去重：同一 run 不会被重复入队执行。
         await arq_pool.enqueue_job("run_agent_task", run_id, _job_id=run_id)
 
         logger.info(
@@ -451,6 +483,10 @@ class BackgroundTaskManager:
         )
         return run_id, trace_id
 
+    # 任务完成（无论成功/失败/取消）时由 asyncio done 回调触发：清理 _tasks /
+    # _run_info / _pending_tasks 引用防内存泄漏，并异步释放该用户的并发槽位。
+    # 释放本身是协程，用 create_task 触发并登记进 _release_tasks，避免「悬空任务」
+    # 告警，同时便于 shutdown 时统一 drain。
     def _on_task_done(self, run_id: str, task: asyncio.Task) -> None:
         """任务完成回调"""
         # 清理任务引用
@@ -467,6 +503,8 @@ class BackgroundTaskManager:
             self._release_tasks.add(release_task)
             release_task.add_done_callback(self._on_release_task_done)
 
+    # 并发释放任务的完成回调：从集合移除自身；被取消则忽略，否则读取 result 以
+    # 暴露潜在异常（仅告警，不影响主流程）。
     def _on_release_task_done(self, task: asyncio.Task[None]) -> None:
         self._release_tasks.discard(task)
         if task.cancelled():
@@ -476,6 +514,7 @@ class BackgroundTaskManager:
         except Exception as e:
             logger.warning("Failed to release concurrency slot after task completion: %s", e)
 
+    # 等待所有在途的并发释放任务结束（shutdown 时调用），确保槽位都被干净释放。
     async def _drain_release_tasks(self) -> None:
         tasks = list(self._release_tasks)
         if not tasks:
@@ -512,6 +551,8 @@ class BackgroundTaskManager:
     def get_trace_id(self, run_id: str) -> Optional[str]:
         return self._status_queries().get_trace_id(run_id)
 
+    # 按 session 取消：先从 session.metadata 取出 current_run_id，据此组装 run_info
+    # 再转交 cancel_run。没有正在运行的 run 时返回相应提示。
     async def cancel(self, session_id: str, user_id: Optional[str] = None) -> Dict[str, Any]:
         """
         取消任务（支持分布式）
@@ -561,6 +602,8 @@ class BackgroundTaskManager:
             "message": "取消失败",
         }
 
+    # 从 session 组装取消所需的 run_info（session/trace/agent/user）。trace_id 缺失
+    # 时回查 trace 存储；已有内存 run_info 的非空字段优先保留，并回填进 _run_info。
     async def _build_run_info_from_session(
         self,
         session: Any,
@@ -583,6 +626,7 @@ class BackgroundTaskManager:
         self._run_info.setdefault(run_id, run_info)
         return run_info
 
+    # 从 trace 存储回查某 run 最近一条 trace 的 trace_id（取不到返回 None）。
     async def _lookup_trace_id_for_run(self, run_id: str) -> Optional[str]:
         try:
             from src.infra.session.trace_storage import get_trace_storage
@@ -608,6 +652,8 @@ class BackgroundTaskManager:
     ) -> Dict[str, Any]:
         return await self._recovery_service().resume_session(session_id, reason)
 
+    # 按 run_id 取消：委托 TaskCancellation 执行分布式取消的多级流程；成功后把
+    # 对应 session 状态更新为 CANCELLED。publish 控制是否向其他实例广播取消。
     async def cancel_run(
         self,
         run_id: str,
@@ -709,6 +755,7 @@ class BackgroundTaskManager:
         """
         await self._pubsub.stop_listener()
 
+    # 启动扫描：接管本进程可处理的僵尸/可恢复任务，并回放/清理排队任务。
     async def cleanup_stale_tasks(self) -> None:
         await self._startup_cleanup_service().cleanup_stale_tasks()
 
@@ -730,6 +777,11 @@ class BackgroundTaskManager:
             resume_interrupted_run=self._resume_interrupted_run,
         ).replay_pending_queued_tasks()
 
+    # 服务关闭钩子（崩溃/重启友好）：停掉所有心跳，取消所有在跑任务，并把它们
+    # 标记为「可恢复的失败（server_restart）」，这样下次启动时 startup_cleanup 能
+    # 自动接管恢复。同时释放并发槽位（dequeue=False，关机时不再拉起新任务），
+    # 清空内存状态、drain 释放任务、关闭 arq 连接池，并复位单例。
+    # 用 _gather_limited 分两阶段（先发起取消，再等待退出）并发但限流地收尾。
     async def shutdown(self) -> None:
         """
         服务关闭时调用
@@ -826,6 +878,7 @@ class BackgroundTaskManager:
 _task_manager: Optional[BackgroundTaskManager] = None
 
 
+# 获取进程内 BackgroundTaskManager 单例（首次调用时创建）。
 def get_task_manager() -> BackgroundTaskManager:
     """获取 TaskManager 单例"""
     global _task_manager

@@ -1,3 +1,14 @@
+"""
+技能文件存储层
+
+以单一集合 skill_files 保存所有技能文件，(skill_name, user_id, file_path) 唯一。
+约定：
+- file_path == "__meta__" 的特殊文档保存技能元信息（安装来源等）；
+- 二进制文件实体存于 S3/本地，MongoDB 只存其 JSON 引用（见 binary.py）；
+- 启用/禁用状态不落在本集合，而是记于用户 metadata.disabled_skills；
+- 生效技能结果带 Redis 缓存，写操作后需失效缓存。
+"""
+
 import json
 import re
 from typing import TYPE_CHECKING, Any, Optional
@@ -35,6 +46,7 @@ logger = get_logger(__name__)
 
 
 async def _parse_skill_md_offload(content: str) -> tuple[Optional[str], str, list[str]]:
+    # 将 SKILL.md 解析放线程池执行，避免阻塞事件循环
     from src.infra.skill.parser import parse_skill_md
 
     return await run_blocking_io(parse_skill_md, content)
@@ -42,13 +54,16 @@ async def _parse_skill_md_offload(content: str) -> tuple[Optional[str], str, lis
 
 class SkillStorage:
     def __init__(self):
+        # 客户端与集合延迟初始化
         self._client: Optional["AsyncIOMotorClient"] = None
         self._files_collection: Optional["AsyncIOMotorCollection"] = None
 
+    # 用户置顶/收藏技能的数量上限
     MAX_PINNED = 10
     MAX_FAVORITES = 100
 
     def _get_files_collection(self) -> "AsyncIOMotorCollection":
+        # 惰性获取 skill_files 集合
         if self._files_collection is None:
             self._client = get_mongo_client()
             db = self._client[settings.MONGODB_DB]
@@ -57,6 +72,7 @@ class SkillStorage:
 
     async def ensure_indexes(self) -> None:
         """创建索引"""
+        # (skill_name, user_id, file_path) 唯一复合索引，保证同一文件不重复
         files = self._get_files_collection()
         await files.create_index(
             [("skill_name", 1), ("user_id", 1), ("file_path", 1)],
@@ -72,10 +88,12 @@ class SkillStorage:
         """获取用户某个 Skill 的所有文件（排除 __meta__）"""
         collection = self._get_files_collection()
         files: dict[str, str] = {}
+        # 多取 1 条用于判断是否超限；实际仍按上限截断
         cursor = collection.find({"skill_name": skill_name, "user_id": user_id}).limit(
             SKILL_FILES_PER_SKILL_LIMIT + 1
         )
         async for doc in cursor:
+            # __meta__ 是元信息文档，不作为技能内容返回
             if doc["file_path"] != "__meta__":
                 files[normalize_skill_file_path(doc["file_path"])] = doc["content"]
                 if len(files) >= SKILL_FILES_PER_SKILL_LIMIT:
@@ -93,6 +111,7 @@ class SkillStorage:
                 "file_path": file_path,
             }
         )
+        # 兼容旧数据：找不到标准 SKILL.md 时，用大小写不敏感正则回退匹配 skill.md 等变体
         if not doc and (file_path.endswith("/SKILL.md") or file_path == "SKILL.md"):
             legacy_path_pattern = re.escape(file_path[:-8]) + r"skill\.md"
             doc = await collection.find_one(
@@ -111,6 +130,7 @@ class SkillStorage:
         collection = self._get_files_collection()
         file_path = normalize_skill_file_path(file_path)
         now = utc_now_iso()
+        # upsert：存在则更新内容与 updated_at，不存在则插入并记录 created_at
         await collection.update_one(
             {"skill_name": skill_name, "user_id": user_id, "file_path": file_path},
             {
@@ -131,9 +151,11 @@ class SkillStorage:
         """上传二进制文件到 S3/本地存储，并在 MongoDB 存储引用。"""
         from src.infra.storage.s3.service import get_or_init_storage
 
+        # 未显式指定 MIME 时按文件名猜测
         if not mime_type:
             mime_type = guess_mime_type(file_path)
 
+        # 生成对象存储 key 并上传实体
         storage_key = build_storage_key(user_id, skill_name, file_path)
         storage_service = await get_or_init_storage()
 
@@ -146,6 +168,7 @@ class SkillStorage:
         )
 
         # 构建引用并存入 MongoDB
+        # MongoDB 只存指向对象存储的引用（含 key/类型/大小），不存二进制本体
         ref_content = build_binary_ref_content(storage_key, mime_type, len(data))
         await self.set_skill_file(skill_name, file_path, ref_content, user_id)
 
@@ -173,6 +196,7 @@ class SkillStorage:
         collection = self._get_files_collection()
         file_path = normalize_skill_file_path(file_path)
         now = utc_now_iso()
+        # 把 expected_content 放入过滤条件：内容不匹配则匹配不到文档，更新数为 0
         result = await collection.update_one(
             {
                 "skill_name": skill_name,
@@ -195,6 +219,7 @@ class SkillStorage:
         )
         if doc:
             # 检查是否为二进制引用，如果是则删除 S3 对象
+            # 避免只删 MongoDB 引用而遗留 S3 孤儿对象
             binary_ref = await parse_binary_ref_async(doc.get("content", ""))
             if binary_ref:
                 await self._delete_s3_object(binary_ref.storage_key)
@@ -204,6 +229,7 @@ class SkillStorage:
 
     async def _delete_s3_object(self, storage_key: str) -> None:
         """删除 S3/本地存储中的文件"""
+        # 清理对象存储失败不致命，仅告警（下次仍可重试或由清理任务处理）
         try:
             from src.infra.storage.s3.service import get_or_init_storage
 
@@ -214,9 +240,11 @@ class SkillStorage:
 
     async def sync_skill_files(self, skill_name: str, files: dict[str, str], user_id: str) -> None:
         """批量同步文件（替换所有，但保留 __meta__）。支持文本和二进制引用。"""
+        # 归一化路径；空则不操作（避免误删）
         files = normalize_skill_files(files)
         if not files:
             return
+        # 文件数超限直接拒绝，防止单技能膨胀
         if len(files) > SKILL_FILES_PER_SKILL_LIMIT:
             raise ValueError(f"Skill contains too many files (max {SKILL_FILES_PER_SKILL_LIMIT})")
         collection = self._get_files_collection()
@@ -226,6 +254,7 @@ class SkillStorage:
 
         operations: list = []
 
+        # 需删除的文件 = 既非 __meta__、也不在本次传入集合中的旧文件
         removed_query = {
             "skill_name": skill_name,
             "user_id": user_id,
@@ -233,6 +262,7 @@ class SkillStorage:
         }
 
         # Only scan removed binary references for S3 cleanup; Mongo handles row deletion.
+        # 删除前，先扫出这些旧文件里的二进制引用，收集待清理的 S3 key
         s3_keys_to_delete: list[str] = []
         removed_binary_cursor = collection.find(
             {
@@ -246,8 +276,10 @@ class SkillStorage:
             if binary_ref:
                 s3_keys_to_delete.append(binary_ref.storage_key)
 
+        # 删除旧文件行
         await collection.delete_many(removed_query)
 
+        # 对本次传入的每个文件做 upsert
         for file_path, content in files.items():
             operations.append(
                 UpdateOne(
@@ -260,10 +292,12 @@ class SkillStorage:
                 )
             )
 
+        # 批量写入，减少往返
         if operations:
             await collection.bulk_write(operations, ordered=True)
 
         # 批量删除 S3 对象
+        # 行删除后再清理对象存储，保证引用先失效
         for s3_key in s3_keys_to_delete:
             await self._delete_s3_object(s3_key)
 
@@ -274,6 +308,7 @@ class SkillStorage:
         user_id: str,
     ) -> int:
         """Upsert a bounded batch of text skill files without deleting other paths."""
+        # 与 sync 不同：只新增/更新给定文件，不删除其他既有文件
         files = normalize_skill_files(files)
         if not files:
             return 0
@@ -301,6 +336,7 @@ class SkillStorage:
         collection = self._get_files_collection()
 
         # 先收集所有二进制引用，清理 S3
+        # 遍历非 __meta__ 文件，删除其对应的 S3 对象
         async for doc in collection.find(
             {"skill_name": skill_name, "user_id": user_id, "file_path": {"$ne": "__meta__"}},
             {"content": 1},
@@ -309,6 +345,7 @@ class SkillStorage:
             if binary_ref:
                 await self._delete_s3_object(binary_ref.storage_key)
 
+        # 注意：此处保留 __meta__ 文档（仅删内容文件）
         await collection.delete_many(
             {
                 "skill_name": skill_name,
@@ -320,6 +357,7 @@ class SkillStorage:
         """列出用户某个 Skill 的所有文件路径（排除 __meta__）"""
         collection = self._get_files_collection()
         paths = []
+        # 投影只取 file_path，减少数据传输
         cursor = collection.find(
             {"skill_name": skill_name, "user_id": user_id, "file_path": {"$ne": "__meta__"}},
             {"file_path": 1},
@@ -331,6 +369,7 @@ class SkillStorage:
     async def get_skill_file_stats(self, skill_name: str, user_id: str) -> dict[str, Any]:
         """获取单个 Skill 的文件统计信息（created_at/updated_at 来自文件聚合，排除 __meta__）"""
         collection = self._get_files_collection()
+        # 聚合：统计文件数，并取最早创建/最晚更新时间作为技能的时间戳
         pipeline: list[dict[str, Any]] = [
             {
                 "$match": {
@@ -354,6 +393,7 @@ class SkillStorage:
                 "created_at": doc.get("created_at"),
                 "updated_at": doc.get("updated_at"),
             }
+        # 无文件时返回零值默认
         return {"file_count": 0, "created_at": None, "updated_at": None}
 
     async def list_user_skills(
@@ -375,24 +415,29 @@ class SkillStorage:
             limit: 分页限制
             disabled_skills: 从用户 metadata 中获取的 disabled_skills 列表
         """
+        # 参数缺省归一化为一致的空列表
         if disabled_skills is None:
             disabled_skills = []
         if pinned_skill_names is None:
             pinned_skill_names = []
         if favorite_skill_names is None:
             favorite_skill_names = []
+        # 去重截断，防止超长输入
         disabled_skills = normalize_skill_name_list(disabled_skills)
         pinned_skill_names = normalize_skill_name_list(pinned_skill_names)
         favorite_skill_names = normalize_skill_name_list(favorite_skill_names)
         disabled_set = set(disabled_skills)
         pinned_set = set(pinned_skill_names)
         favorite_set = set(favorite_skill_names)
+        # 是否需要按“置顶/收藏”排序（影响分页在聚合还是内存中进行）
         has_preferences = bool(pinned_set or favorite_set)
 
         collection = self._get_files_collection()
         paged_skill_names: list[str] | None = None
+        # 有搜索/标签过滤时，先算出匹配的技能名集合
         if q or tags:
             matching_skill_names = await self.list_matching_skill_names(user_id, q=q, tags=tags)
+            # 有偏好排序时先取全集（后续在聚合里排序分页），否则此处直接切片分页
             paged_skill_names = (
                 matching_skill_names
                 if has_preferences
@@ -402,6 +447,7 @@ class SkillStorage:
                 return []
 
         # 使用 aggregation 一次获取所有 skill 的统计信息 + 文件路径（排除 __meta__）
+        # 按 skill_name 分组，聚合文件数、路径列表与时间戳
         match: dict[str, Any] = {"user_id": user_id, "file_path": {"$ne": "__meta__"}}
         if paged_skill_names is not None:
             match["skill_name"] = {"$in": paged_skill_names}
@@ -419,6 +465,7 @@ class SkillStorage:
             },
         ]
         if has_preferences:
+            # 有置顶/收藏偏好：在聚合阶段打标并按 置顶 > 收藏 > 更新时间 排序后分页
             pipeline.extend(
                 [
                     {
@@ -443,6 +490,7 @@ class SkillStorage:
                 ]
             )
         else:
+            # 无偏好：按名称排序；若未在前面按过滤名切片，则此处做分页
             pipeline.append({"$sort": {"_id": 1}})
             if paged_skill_names is None:
                 pipeline.extend([{"$skip": skip}, {"$limit": limit}])
@@ -456,6 +504,7 @@ class SkillStorage:
             }
 
         # 批量获取所有 __meta__ 文档
+        # 一次性取回本页技能的元信息，避免逐个查询
         skill_names = list(skill_stats.keys())
         meta_map: dict[str, SkillMeta] = {}
         if skill_names:
@@ -467,9 +516,11 @@ class SkillStorage:
                     data = await run_blocking_io(json.loads, doc["content"])
                     meta_map[doc["skill_name"]] = SkillMeta(**data)
                 except Exception:
+                    # 单个 __meta__ 解析失败不影响整体
                     pass
 
         # 组装结果
+        # 决定输出顺序：过滤且无偏好时沿用过滤名的顺序，否则用聚合结果顺序
         result = []
         ordered_names = list(skill_stats.keys())
         if paged_skill_names is not None and not has_preferences:
@@ -479,6 +530,7 @@ class SkillStorage:
                 continue
             stats = skill_stats[skill_name]
             meta = meta_map.get(skill_name)
+            # enabled 由是否在禁用集合反推
             enabled = skill_name not in disabled_set
 
             result.append(
@@ -499,6 +551,7 @@ class SkillStorage:
         return result
 
     async def _get_user_skill_preference(self, user_id: str) -> dict[str, list[str]]:
+        # 置顶/收藏偏好同样存于用户 metadata，读取时按各自上限归一化
         from src.infra.user.storage import UserStorage
 
         user_doc = await UserStorage().get_by_id(user_id)
@@ -524,10 +577,12 @@ class SkillStorage:
         """Update the current user's favorite/pinned state for a skill."""
         from src.infra.user.storage import UserStorage
 
+        # 读现有偏好并复制成可变列表
         pref = await self._get_user_skill_preference(user_id)
         pinned: list[str] = list(pref["pinned"])
         favorite: list[str] = list(pref["favorite"])
 
+        # 处理置顶：置顶且超上限则直接返回（不置顶），取消置顶则移除
         if update.get("is_pinned") is not None:
             if update["is_pinned"] and skill_name not in pinned:
                 if len(pinned) >= self.MAX_PINNED:
@@ -539,6 +594,7 @@ class SkillStorage:
             elif not update["is_pinned"] and skill_name in pinned:
                 pinned.remove(skill_name)
 
+        # 处理收藏：逻辑同置顶，受 MAX_FAVORITES 限制
         if update.get("is_favorite") is not None:
             if update["is_favorite"] and skill_name not in favorite:
                 if len(favorite) >= self.MAX_FAVORITES:
@@ -550,6 +606,7 @@ class SkillStorage:
             elif not update["is_favorite"] and skill_name in favorite:
                 favorite.remove(skill_name)
 
+        # 写回用户 metadata
         await UserStorage().update_metadata(
             user_id,
             {
@@ -564,6 +621,7 @@ class SkillStorage:
 
     async def remove_user_skill_preference(self, user_id: str, skill_names: list[str]) -> None:
         """Remove deleted skill names from the current user's preference lists."""
+        # 技能被删除后，清理其在置顶/收藏列表中的残留项
         from src.infra.user.storage import UserStorage
 
         remove_names = set(skill_names)
@@ -573,6 +631,7 @@ class SkillStorage:
         pref = await self._get_user_skill_preference(user_id)
         pinned = [name for name in pref["pinned"] if name not in remove_names]
         favorite = [name for name in pref["favorite"] if name not in remove_names]
+        # 无变化则跳过写入，减少无谓更新
         if pinned == pref["pinned"] and favorite == pref["favorite"]:
             return
         await UserStorage().update_metadata(
@@ -590,12 +649,14 @@ class SkillStorage:
         tags: Optional[list[str]] = None,
     ) -> int:
         """Count user skills matching an optional name search."""
+        # 有搜索/标签过滤时直接用匹配名个数（需解析 SKILL.md）
         if q or tags:
             return len(await self.list_matching_skill_names(user_id, q=q, tags=tags))
         collection = self._get_files_collection()
         match: dict[str, Any] = {"user_id": user_id, "file_path": {"$ne": "__meta__"}}
         if q:
             match["skill_name"] = {"$regex": q, "$options": "i"}
+        # 按技能名去重后计数
         pipeline: list[dict[str, Any]] = [
             {"$match": match},
             {"$group": {"_id": "$skill_name"}},
@@ -613,16 +674,19 @@ class SkillStorage:
         tags: Optional[list[str]] = None,
     ) -> int:
         """Count disabled skills that exist in the current list filters."""
+        # 统计“当前过滤条件下”实际存在且被禁用的技能数（用于前端展示禁用计数）
         disabled_skills = normalize_skill_name_list(disabled_skills)
         disabled_set = set(disabled_skills)
         if not disabled_set:
             return 0
 
+        # 有过滤时，取禁用集合与匹配集合的交集大小
         if q or tags:
             matching_names = await self.list_matching_skill_names(user_id, q=q, tags=tags)
             return len(disabled_set.intersection(matching_names))
 
         collection = self._get_files_collection()
+        # 无过滤：统计禁用集合中确实存在文件的技能数
         pipeline: list[dict[str, Any]] = [
             {
                 "$match": {
@@ -640,6 +704,7 @@ class SkillStorage:
 
     async def list_user_skill_tags(self, user_id: str) -> list[str]:
         """List all tags used by a user's skills."""
+        # 复用扫描逻辑，只取其返回的标签集合
         _, tags = await self._list_matching_skill_names_and_tags(user_id)
         return tags
 
@@ -659,12 +724,15 @@ class SkillStorage:
         q: str | None = None,
         tags: Optional[list[str]] = None,
     ) -> tuple[list[str], list[str]]:
+        # 通过扫描各技能的 SKILL.md，解析出描述与标签，做搜索/标签过滤；
+        # 同时收集所有出现过的标签供前端筛选面板使用
         collection = self._get_files_collection()
         q_lower = q.lower() if q else None
         selected_tags = set(tags or [])
         matching_names: list[str] = []
         available_tags: set[str] = set()
 
+        # 限制扫描条数，避免技能数量极大时性能失控
         cursor = collection.find(
             {"user_id": user_id, "file_path": "SKILL.md"},
             {"skill_name": 1, "content": 1},
@@ -675,16 +743,19 @@ class SkillStorage:
             tag_set = set(parsed_tags)
             available_tags.update(tag_set)
 
+            # 搜索词需命中 名称/描述/任一标签，否则跳过
             if q_lower and (
                 q_lower not in skill_name.lower()
                 and q_lower not in (description or "").lower()
                 and not any(q_lower in tag.lower() for tag in parsed_tags)
             ):
                 continue
+            # 标签过滤为“与”语义：所选标签必须全部包含
             if selected_tags and not selected_tags.issubset(tag_set):
                 continue
             matching_names.append(skill_name)
 
+        # 名称与标签都排序，保证结果稳定
         return sorted(matching_names), sorted(available_tags)
 
     async def batch_get_skill_md_contents(
@@ -696,6 +767,7 @@ class SkillStorage:
             return {}
         collection = self._get_files_collection()
         docs = {}
+        # 一次性用 $in 拉取多个技能的主文件内容
         async for doc in collection.find(
             {"skill_name": {"$in": skill_names}, "user_id": user_id, "file_path": "SKILL.md"},
             {"skill_name": 1, "content": 1},
@@ -713,6 +785,7 @@ class SkillStorage:
         collection = self._get_files_collection()
 
         # 去重
+        # (skill_name, user_id) 去重并截断，构造查询子句
         seen: set[tuple[str, str]] = set()
         or_clauses = []
         for skill_name, user_id in skill_keys:
@@ -723,6 +796,7 @@ class SkillStorage:
                 if len(or_clauses) >= SKILL_BATCH_FILE_LOOKUP_LIMIT:
                     break
 
+        # 逐个技能查询其文件（排除 __meta__），按 (name,user) 归组返回
         result: dict[tuple[str, str], dict[str, str]] = {}
         for clause in or_clauses:
             key = (clause["skill_name"], clause["user_id"])
@@ -750,6 +824,7 @@ class SkillStorage:
         )
         if not doc:
             return None
+        # __meta__ 内容是 JSON 字符串，解析为 SkillMeta
         try:
             data = await run_blocking_io(json.loads, doc["content"])
             return SkillMeta(**data)
@@ -766,6 +841,7 @@ class SkillStorage:
         """设置 skill 元数据（存储为 __meta__ 文档）"""
         collection = self._get_files_collection()
         now = utc_now_iso()
+        # 组装并序列化元信息，作为特殊文件 __meta__ upsert
         meta = SkillMeta(
             installed_from=installed_from,
             published_marketplace_name=published_marketplace_name,
@@ -784,6 +860,7 @@ class SkillStorage:
 
     async def delete_skill_meta(self, skill_name: str, user_id: str) -> None:
         """删除 skill __meta__ 文档"""
+        # 仅删除元信息文档，不动技能内容文件
         collection = self._get_files_collection()
         await collection.delete_one(
             {"skill_name": skill_name, "user_id": user_id, "file_path": "__meta__"}
@@ -794,6 +871,7 @@ class SkillStorage:
         collection = self._get_files_collection()
 
         # 先收集所有二进制引用，清理 S3
+        # 彻底删除：先清 S3 对象，再删除该技能的全部文档（含 __meta__）
         async for doc in collection.find(
             {"skill_name": skill_name, "user_id": user_id, "file_path": {"$ne": "__meta__"}},
             {"content": 1},
@@ -830,9 +908,11 @@ class SkillStorage:
         """
         from src.infra.skill.constants import SKILLS_CACHE_KEY_PREFIX, SKILLS_CACHE_TTL
 
+        # 每个用户一个缓存 key
         cache_key = f"{SKILLS_CACHE_KEY_PREFIX}{user_id}"
 
         # 尝试从 Redis 缓存获取
+        # 命中缓存直接返回，避免重复聚合与文件读取（技能加载在对话链路上较热）
         try:
             from src.infra.storage.redis import get_redis_client
 
@@ -843,10 +923,12 @@ class SkillStorage:
         except Exception as e:
             logger.warning(f"[Skills Cache] Redis get failed: {e}")
 
+        # 未传禁用列表时从用户 metadata 读取（保证缓存未命中路径行为一致）
         if disabled_skills is None:
             disabled_skills = await self._get_user_disabled_skills(user_id)
         disabled_skills = normalize_skill_name_list(disabled_skills)
 
+        # 取“启用”的技能名（排除禁用项），并限制加载上限
         enabled_names = await self.get_all_user_skill_names(
             user_id,
             exclude_skill_names=disabled_skills,
@@ -865,6 +947,7 @@ class SkillStorage:
             files = files_map.get((name, user_id), {})
             if files:  # 只包含有文件的 skill
                 # 从 SKILL.md frontmatter 解析 description
+                # 描述用于构建技能提示；解析失败则回退为通用描述
                 description = ""
                 if "SKILL.md" in files:
                     try:
@@ -882,6 +965,7 @@ class SkillStorage:
                 }
 
         # 缓存
+        # 写入 Redis 供后续复用；写操作会通过 invalidate_user_cache 失效此缓存
         try:
             from src.infra.storage.redis import get_redis_client
 
@@ -896,6 +980,7 @@ class SkillStorage:
 
     async def _get_user_disabled_skills(self, user_id: str) -> list[str]:
         """Load disabled skills from user metadata for cache-safe default behavior."""
+        # 从用户 metadata 读取禁用技能；异常时按无禁用处理
         try:
             from src.infra.user.storage import UserStorage
 
@@ -916,6 +1001,7 @@ class SkillStorage:
         """获取用户所有 skill 名称（无论 enabled/disabled，排除 __meta__）"""
         collection = self._get_files_collection()
         match: dict[str, Any] = {"user_id": user_id, "file_path": {"$ne": "__meta__"}}
+        # 可选排除某些技能（如禁用项）
         excluded = normalize_skill_name_list(exclude_skill_names or [])
         if excluded:
             match["skill_name"] = {"$nin": excluded}
@@ -923,6 +1009,7 @@ class SkillStorage:
             {"$match": match},
             {"$group": {"_id": "$skill_name"}},
         ]
+        # limit 同样被夹逼到全局上限，防止一次加载过多
         effective_limit = SKILL_EFFECTIVE_LOAD_LIMIT if limit is None else limit
         bounded_limit = max(0, min(int(effective_limit), SKILL_EFFECTIVE_LOAD_LIMIT))
         pipeline.extend([{"$sort": {"_id": 1}}, {"$limit": bounded_limit}])
@@ -930,6 +1017,7 @@ class SkillStorage:
 
     async def invalidate_user_cache(self, user_id: str) -> None:
         """失效用户缓存"""
+        # 任何写操作后调用，删除该用户的生效技能缓存
         from src.infra.skill.constants import SKILLS_CACHE_KEY_PREFIX
 
         cache_key = f"{SKILLS_CACHE_KEY_PREFIX}{user_id}"
@@ -970,21 +1058,26 @@ class SkillStorage:
         Note: The `enabled` parameter is kept for API compatibility but the actual
         enabled/disabled state is managed in user.metadata.disabled_skills.
         """
+        # 创建技能的统一入口：至少要有一个文件
         if not files and not binary_files:
             raise ValueError("Skill must have at least one file")
 
+        # 1) 同步文本文件
         files = normalize_skill_files(files)
         await self.sync_skill_files(skill_name, files, user_id)
 
         # 上传二进制文件
+        # 2) 逐个上传二进制文件到对象存储（并写入引用）
         if binary_files:
             for file_path, data in binary_files.items():
                 await self.set_skill_binary_file(skill_name, file_path, data, user_id)
 
+        # 3) 写入 __meta__ 元信息；4) 失效缓存使新技能立即生效
         await self.set_skill_meta(skill_name, user_id, installed_from=installed_from)
         await self.invalidate_user_cache(user_id)
 
     async def close(self):
         """关闭连接（仅清理本地引用，不关闭全局 MongoDB 客户端）"""
+        # 全局 Mongo 客户端由框架统一管理，这里只释放本实例的引用
         self._client = None
         self._files_collection = None

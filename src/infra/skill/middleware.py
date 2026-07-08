@@ -35,6 +35,7 @@ class SkillsMiddleware:
         Args:
             user_id: 用户 ID，用于获取用户级别的技能
         """
+        # 记录用户身份，并据此构建技能管理器（决定可见哪些技能）
         self._user_id = user_id
         self._manager = SkillManager(user_id=user_id)
 
@@ -48,8 +49,10 @@ class SkillsMiddleware:
         Returns:
             注入技能后的系统提示
         """
+        # 先加载该用户生效的技能
         skills_content = await self.load_all_skills_async()
 
+        # 无技能则原样返回，不改动系统提示
         if not skills_content:
             return system_prompt
 
@@ -57,19 +60,23 @@ class SkillsMiddleware:
         skills_prompt = await self._build_skills_prompt(skills_content)
 
         # 将技能插入到系统提示中
+        # 优先替换占位符 {skills}，便于模板精确控制注入位置
         if "{skills}" in system_prompt:
             return system_prompt.replace("{skills}", skills_prompt)
         else:
             # 追加到系统提示末尾
+            # 无占位符则直接追加到末尾
             return f"{system_prompt}\n\n{skills_prompt}"
 
     async def load_all_skills_async(self) -> list[dict]:
         """加载所有技能"""
+        # 无用户身份无法确定技能可见范围，直接返回空
         if not self._user_id:
             logger.warning("No user_id provided, cannot load skills")
             return []
 
         try:
+            # 取生效技能并统一转成 dict（兼容模型/对象/dict 三种来源）
             effective = await self._manager.get_effective_skills()
             skills = []
             for skill_name, skill in effective.items():
@@ -78,11 +85,14 @@ class SkillsMiddleware:
                 else:
                     skill_dict = dict(skill) if not isinstance(skill, dict) else skill
                 # 确保 name 字段存在
+                # 名称与 is_system 兜底
                 skill_dict["name"] = skill_dict.get("name", skill_name)
                 skill_dict["is_system"] = skill_dict.get("is_system", True)
                 skills.append(skill_dict)
+            # 仅返回启用的技能
             return [s for s in skills if s.get("enabled", True)]
         except Exception as e:
+            # 加载失败降级为无技能，不阻断对话
             logger.warning(f"Failed to load skills for user {self._user_id}: {e}")
             return []
 
@@ -96,6 +106,7 @@ class SkillsMiddleware:
         if not skills:
             return ""
 
+        # 提示头部：告知技能位置与读取方式，并统一主文件名为 SKILL.md
         lines = ["## Available Skills", ""]
         lines.append(
             "The following skills are available. Read skill files from `/skills/{skill_name}/` "
@@ -108,6 +119,7 @@ class SkillsMiddleware:
         )
         lines.append("")
 
+        # 逐个技能输出名称/描述/路径（描述用于 LLM 判断是否匹配当前任务）
         for skill in skills:
             name = skill.get("name", "unnamed skill")
             description = skill.get("description", "no description")
@@ -117,6 +129,7 @@ class SkillsMiddleware:
             lines.append(f"**Path**: `/skills/{name}/SKILL.md`")
             lines.append("")
 
+        # 附上技能选择策略，引导 LLM 依意图匹配、按需读取、逐步执行
         lines.append("### Skill Selection Strategy")
         lines.append("1. Analyze the user's request for key intent and domain")
         lines.append("2. Match intent with skill descriptions above")
@@ -138,4 +151,5 @@ def get_skills_middleware(
     Args:
         user_id: 用户 ID，用于获取用户级别的技能
     """
+    # 简单工厂：按 user_id 构建中间件实例
     return SkillsMiddleware(user_id=user_id)

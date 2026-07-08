@@ -36,18 +36,28 @@ from src.kernel.schemas.model import ModelConfig
 from src.kernel.schemas.persona_preset import PersonaPresetSnapshot
 from src.kernel.schemas.user import TokenPayload
 
+# 本模块挂载于 /api/chat，是全站最核心的聊天链路，采用"两段式"设计：
+# 1) POST /stream 提交消息后立即返回 session_id/run_id，真正的 agent 推理放到后台任务执行；
+# 2) GET /sessions/{id}/stream 通过 SSE 从 Redis Stream 流式读取该 run 的事件并推送给前端。
+# 两段以 run_id（对话轮次 ID）关联；前端断线后可凭 run_id 重新连接并回放已产生的事件。
 router = APIRouter()
 logger = get_logger(__name__)
 
+# 单条 SSE data 字段允许的最大字节数（256KB）；超限时改发 error 事件，避免超大 payload 拖垮前端或反向代理。
 CHAT_SSE_DATA_MAX_BYTES = 256 * 1024
 
 
+# 把本轮显式选中的技能拼接到用户消息末尾，生成 <required_skills> 提示块，
+# 要求模型在回答前先读取并遵循各技能对应的 SKILL.md；enabled_skills 为空时原样返回。
 def append_required_skills_prompt(message: str, enabled_skills: list[str] | None) -> str:
     """Append a run-scoped instruction for explicitly selected skills."""
+    # 未显式选中任何技能，直接返回原始消息
     if not enabled_skills:
         return message
 
+    # 拼出"- 技能名: /skills/技能名/SKILL.md"清单，供模型定位每个技能的说明文件
     skill_paths = "\n".join(f"- {name}: /skills/{name}/SKILL.md" for name in enabled_skills if name)
+    # 过滤空技能名后若无有效项，同样返回原始消息
     if not skill_paths:
         return message
 
@@ -63,6 +73,7 @@ def append_required_skills_prompt(message: str, enabled_skills: list[str] | None
     )
 
 
+# 把模型的 profile（能力档案，如是否支持视觉）序列化为 dict；无 profile 时返回 None。
 def _model_profile_dict(model: ModelConfig) -> dict | None:
     if not model.profile:
         return None
@@ -71,10 +82,12 @@ def _model_profile_dict(model: ModelConfig) -> dict | None:
     )
 
 
+# 把模型配置序列化为 JSON dict，同时把 api_key 抹成 None，避免密钥泄露到会话元数据/前端。
 def _safe_model_config_dict(model: ModelConfig) -> dict:
     return model.model_copy(update={"api_key": None}).model_dump(mode="json")
 
 
+# 递归估算对象序列化成 JSON 后的字节数，用于在真正编码前快速判断 SSE 数据是否超限（避免无谓的完整编码）。
 def _estimated_json_data_bytes(data: object) -> int:
     if data is None or isinstance(data, (bool, int, float)):
         return len(json.dumps(data, default=str).encode("utf-8"))
@@ -98,11 +111,13 @@ def _estimated_json_data_bytes(data: object) -> int:
     return len(str(data).encode("utf-8")) + 2
 
 
+# 构造一条"数据过大"的 SSE error 事件文本；保留原事件 id，便于前端定位与断点续读。
 def _chat_sse_payload_too_large_event(event_id: object | None) -> str:
     id_line = f"id: {event_id}\n" if event_id is not None else ""
     return f'event: error\ndata: {{"error":"event_payload_too_large"}}\n{id_line}\n'
 
 
+# 带大小上限地把数据编码为 JSON 字符串：先估算、再边编码边累加字节数，任一步超过上限即返回 None。
 def _json_dumps_chat_sse_data_limited(data: object) -> str | None:
     if _estimated_json_data_bytes(data) > CHAT_SSE_DATA_MAX_BYTES:
         return None
@@ -118,6 +133,8 @@ def _json_dumps_chat_sse_data_limited(data: object) -> str | None:
     return "".join(chunks)
 
 
+# 把内部事件 dict 格式化为标准 SSE 帧："event: 类型\ndata: JSON\nid: 事件ID\n\n"。
+# 若数据体带 timestamp，则注入 data 的 _timestamp 字段；数据超限时返回 error 帧。
 def _format_sse_event(event: dict) -> str:
     event_data = event["data"]
     if isinstance(event_data, dict) and event.get("timestamp"):
@@ -128,6 +145,8 @@ def _format_sse_event(event: dict) -> str:
     return f"event: {event['event_type']}\ndata: {data_str}\nid: {event['id']}\n\n"
 
 
+# 把已解析的模型信息（id、value、能力档案、是否支持视觉、兜底模型等）写入 agent_options，
+# 使后台执行器无需再查库即可直接使用；同时缓存 api_key。这些 _resolved_* 字段供下游按需读取。
 async def _attach_resolved_model_options(agent_options: dict, model: ModelConfig) -> None:
     """Persist resolved model details in request options to avoid repeated DB lookups."""
     agent_options["model_id"] = model.id
@@ -158,6 +177,10 @@ async def _attach_resolved_model_options(agent_options: dict, model: ModelConfig
     agent_options["_resolved_model_profile"] = _model_profile_dict(model)
 
 
+# 校验本次请求所选模型的可用性与权限：
+# - 未指定模型时，从用户角色允许的模型里挑第一个启用的作为默认；一个都没有则报 model_disabled；
+# - 指定了模型时，要求该模型存在且启用，且在用户角色允许的白名单内，否则报 model_disabled / model_not_allowed。
+# 校验通过后把解析结果回填到 agent_options。
 async def validate_agent_model_access(
     agent_options: dict | None,
     user: TokenPayload,
@@ -176,9 +199,11 @@ async def validate_agent_model_access(
 
     allowed_model_ids = await resolve_user_allowed_model_ids(user)
 
+    # 请求未指定任何模型：allowed_model_ids 为 None 表示不限制，直接放行（用系统默认）
     if not model_id and not selected_model:
         if allowed_model_ids is None:
             return
+        # 从角色允许列表中选出第一个启用的模型作为本次默认模型
         for allowed_model_id in allowed_model_ids:
             model = await storage.get(allowed_model_id)
             if not model:
@@ -194,9 +219,11 @@ async def validate_agent_model_access(
     elif isinstance(selected_model, str) and selected_model:
         model = await storage.get_by_value(selected_model)
 
+    # 指定的模型不存在或已被禁用
     if not model or not model.enabled:
         raise AuthorizationError("model_disabled")
 
+    # allowed_model_ids 非 None 时执行白名单校验：模型的 id 或 value 命中其一即视为允许
     allowed_model_set = set(allowed_model_ids or [])
     if allowed_model_ids is not None and (
         model.id not in allowed_model_set and model.value not in allowed_model_set
@@ -206,6 +233,8 @@ async def validate_agent_model_access(
     await _attach_resolved_model_options(agent_options, model)
 
 
+# 把本轮对话的完整配置（agent、模型选项、禁用工具/技能、人设、语言等）写入 session 的 metadata，
+# 便于刷新页面或断线重连时恢复对话上下文，也供后台执行器读取。
 async def _update_session_config(
     session_id: str,
     run_id: str,
@@ -227,6 +256,8 @@ async def _update_session_config(
     await session_manager.update_session_metadata(session_id, conversation_config)
 
 
+# 解析本轮请求的 goal（目标/任务规格）。注意：goal 仅作用于当前 run，不从 session 继承
+# （existing_metadata 被显式忽略），从而实现多轮对话之间的目标隔离。
 def resolve_goal_for_request(
     request: AgentRequest,
     existing_metadata: dict | None,
@@ -238,6 +269,7 @@ def resolve_goal_for_request(
     return active_goal, request.message
 
 
+# 从人设快照中提取技能白名单：仅当人设配置了 skill_names 时返回，否则返回 None（表示不限制）。
 def _persona_enabled_skills_from_snapshot(
     snapshot: PersonaPresetSnapshot,
 ) -> list[str] | None:
@@ -247,6 +279,7 @@ def _persona_enabled_skills_from_snapshot(
     return None
 
 
+# 构建写入 session metadata 的对话配置 dict；下面逐字段说明其含义。
 def build_conversation_config(
     run_id: str,
     agent_id: str,
@@ -257,17 +290,28 @@ def build_conversation_config(
 ) -> dict:
     """Build session metadata for conversation configuration."""
     conversation_config = {
+        # 当前对话轮次 ID
         "current_run_id": run_id,
+        # 使用的 Agent ID
         "agent_id": agent_id,
+        # 后台执行器 key，固定为 agent_stream（对应 _execute_agent_stream）
         "executor_key": "agent_stream",
+        # 传给 agent 的自定义选项（含解析后的模型信息）
         "agent_options": request.agent_options or {},
+        # 本轮禁用的内置工具列表
         "disabled_tools": request.disabled_tools or [],
+        # 本轮禁用的技能列表
         "disabled_skills": request.disabled_skills or [],
+        # 本轮显式启用（白名单）的技能列表
         "enabled_skills": request.enabled_skills,
+        # 本轮禁用的 MCP 工具列表
         "disabled_mcp_tools": request.disabled_mcp_tools or [],
+        # 回复使用的语言
         "language": language,
+        # 是否自动模式（无需人工确认即继续执行）
         "auto_mode": request.auto_mode,
     }
+    # 以下均为可选字段，仅在对应值存在时才写入 metadata（trace 追踪、人设、项目、时区、团队等）
     if trace_id:
         conversation_config["trace_id"] = trace_id
     if request.persona_preset_id:
@@ -286,6 +330,8 @@ def build_conversation_config(
     return conversation_config
 
 
+# 解析人设预设：先清空客户端可能自带的 persona_snapshot / persona_system_prompt（防止提示注入），
+# 再按 persona_preset_id 拉取服务端权威快照，并据此覆盖启用技能与系统提示词。
 async def resolve_persona_request(
     request: AgentRequest,
     user: TokenPayload,
@@ -295,9 +341,11 @@ async def resolve_persona_request(
     request.persona_snapshot = None
     request.persona_system_prompt = None
 
+    # 未选择人设预设，直接返回（保持已清空状态）
     if not request.persona_preset_id:
         return
 
+    # 以服务端权威数据为准拉取人设快照（内部会校验归属与管理员权限）
     persona_manager = manager or PersonaPresetManager()
     snapshot = await persona_manager.use_preset(
         request.persona_preset_id,
@@ -309,6 +357,9 @@ async def resolve_persona_request(
     request.persona_system_prompt = snapshot.system_prompt
 
 
+# 后台任务的实际执行体（已注册为 "agent_stream" 执行器）：以异步生成器逐条 yield 事件，
+# 由 TaskManager/Presenter 写入 Redis Stream，再经 SSE 推送到前端。
+# 若带 active_goal，则在开始/结束处补发 goal:start / goal:end 事件用于前端展示目标进度。
 async def _execute_agent_stream(
     session_id: str,
     agent_id: str,
@@ -332,13 +383,16 @@ async def _execute_agent_stream(
 
     run_id = presenter.run_id if presenter else None
 
+    # goal_end_emitted 用于去重：agent 内部可能已发过 goal:end，避免这里重复补发
     started_at: str | None = None
     goal_end_emitted = False
+    # 有目标时，先补发 goal:start 事件并记录开始时间
     if active_goal is not None:
         started_at = datetime.now(timezone.utc).isoformat()
         yield {"event": "goal:start", "data": {"goal": active_goal, "started_at": started_at}}
 
     try:
+        # 按 agent_id 获取 agent 实例，并把它产生的每一个事件透传出去
         agent = await AgentFactory.get(agent_id)
         async for event in agent.stream(
             message,
@@ -358,10 +412,12 @@ async def _execute_agent_stream(
             goal_started_at=started_at,
             recommendation_input=recommendation_input,
         ):
+            # 记录 agent 是否已自行发出 goal:end，避免下面重复补发
             if event.get("event") == "goal:end":
                 goal_end_emitted = True
             yield event
 
+        # 正常结束但 agent 未发过 goal:end 时，这里补一条
         if active_goal is not None and not goal_end_emitted:
             ended_at = datetime.now(timezone.utc).isoformat()
             yield {
@@ -382,10 +438,15 @@ async def _execute_agent_stream(
         raise
 
 
+# 把默认执行器注册到全局，使任意 worker（含 arq 后台进程）都能据 executor_key 派发排队任务
 # Register the default agent-stream executor so any worker can dispatch queued tasks
 register_executor("agent_stream", _execute_agent_stream)
 
 
+# POST /api/chat/stream —— 提交一条聊天消息（两段式的第一段）。
+# 权限：需要 chat:write。请求体为 AgentRequest（message、session_id、attachments、人设、目标等）。
+# 立即返回 session_id/run_id/status，真正的推理在后台任务中执行；前端随后用 SSE 接口取事件。
+# 受基于角色的并发限制：超并发则排队（返回 queued），队列也满则返回 429。
 @router.post("/stream")
 async def chat_stream(
     request: AgentRequest,
@@ -413,7 +474,9 @@ async def chat_stream(
     from src.infra.task.concurrency import ConcurrencyResult, get_concurrency_limiter
     from src.infra.task.manager import _generate_run_id
 
+    # 复用前端传入的 session_id；未传则视为新会话，生成一个新的 UUID
     session_id = request.session_id or str(uuid.uuid4())
+    # team 类型 agent 的额外参数校验（如必须携带 team_id）
     validate_team_agent_request(agent_id, request)
 
     # 如果用户传入了 session_id，验证所有权
@@ -425,12 +488,15 @@ async def chat_stream(
             verify_session_ownership(existing_session, user)
             existing_metadata = existing_session.metadata or {}
 
+    # 解析本轮目标，并取出实际要发给 agent 的消息文本
     active_goal, agent_message = resolve_goal_for_request(request, existing_metadata)
     active_goal_data = active_goal.model_dump() if active_goal else None
     task_manager = get_task_manager()
+    # 从请求头解析用户偏好语言
     preferred_language = _get_language(http_request)
 
     try:
+        # 解析人设预设并校验所选模型的可用性与权限（失败抛业务异常，下面转换为对应 HTTP 错误）
         await resolve_persona_request(request, user)
         if request.agent_options is None:
             request.agent_options = {}
@@ -440,6 +506,7 @@ async def chat_stream(
     except AuthorizationError as e:
         raise HTTPException(status_code=403, detail=str(e))
 
+    # 给用户消息注入本地时间戳，再追加"必须使用的技能"提示块，得到最终发给 agent 的文本
     formatted_message = format_user_message_with_timestamp(
         agent_message,
         request.user_timezone,
@@ -457,6 +524,7 @@ async def chat_stream(
         [a.model_dump() for a in request.attachments] if request.attachments else None
     )
 
+    # 提前构造一个 Presenter 只为拿到 trace_id（追踪 ID），使排队/执行两条路径复用同一 trace
     # Build task context for queued dispatch (stored in Redis, multi-worker safe)
     # trace_id is generated early so it can be passed to the executor for trace reuse
     from src.infra.writer.present import Presenter, PresenterConfig
@@ -473,6 +541,7 @@ async def chat_stream(
     )
     trace_id = _pre_presenter.trace_id
 
+    # 任务上下文：排队时会整体存入 Redis 队列条目，出队后由任意 worker 据此重建执行参数
     task_context = {
         "executor_key": "agent_stream",
         "agent_id": agent_id,
@@ -503,6 +572,7 @@ async def chat_stream(
         task_context=task_context,
     )
 
+    # 活跃数已满且排队队列也满：拒绝并返回 429（附带当前活跃数/上限/队列长度供前端提示）
     if concurrency_result.result == ConcurrencyResult.REJECTED_QUEUE:
         raise HTTPException(
             status_code=429,
@@ -515,6 +585,7 @@ async def chat_stream(
             },
         )
 
+    # 命中并发上限但队列未满：任务进入排队。task_context 已在上面的 acquire() 里存入 Redis
     if concurrency_result.result == ConcurrencyResult.QUEUED:
         # Task context already stored in Redis queue entry by acquire().
         # Ensure executor is initialized and create session immediately.
@@ -524,6 +595,7 @@ async def chat_stream(
             task_manager._executor = TaskExecutor(
                 task_manager.storage, task_manager._run_info, task_manager._heartbeat
             )
+        # 立即创建 session 记录并置为 QUEUED（不等出队），这样前端刷新也能看到该会话
         # Create session record immediately (don't wait for dequeue)
         await task_manager._executor.ensure_session(
             session_id, agent_id, user.sub, project_id=request.project_id
@@ -532,6 +604,7 @@ async def chat_stream(
             session_id, TaskStatus.QUEUED, run_id=run_id
         )
 
+        # 立即把 user:message 事件落库，保证刷新页面时能加载到用户刚发出的消息
         # Write user:message event to MongoDB immediately so page refresh can load it
         presenter = Presenter(
             PresenterConfig(
@@ -553,6 +626,7 @@ async def chat_stream(
             enabled_skills=request.enabled_skills,
         )
 
+        # 标记 user:message 已写入，出队执行时执行器不再重复发送
         # Mark user message as already written so executor skips re-emitting
         task_manager._run_info[run_id] = {
             "session_id": session_id,
@@ -572,6 +646,7 @@ async def chat_stream(
             trace_id=trace_id,
         )
 
+        # 返回排队态：queue_position 为当前排队位置，前端可据此提示"排队中"
         return {
             "session_id": session_id,
             "run_id": run_id,
@@ -580,6 +655,7 @@ async def chat_stream(
             "max_concurrent": concurrency_result.max_concurrent,
         }
 
+    # 未排队，直接提交后台任务。两种后端二选一：arq（分布式队列，多进程）或内置 submit（本进程）
     if settings.TASK_BACKEND == "arq":
         _, _ = await task_manager.submit_arq(
             session_id=session_id,
@@ -640,6 +716,7 @@ async def chat_stream(
         trace_id=trace_id,
     )
 
+    # 返回受理态 pending：任务已在后台开始，前端接着用 SSE 接口按 run_id 拉取事件流
     return {
         "session_id": session_id,
         "run_id": run_id,
@@ -647,6 +724,10 @@ async def chat_stream(
     }
 
 
+# GET /api/chat/sessions/{session_id}/stream —— 两段式的第二段：SSE 事件流。
+# 权限：需登录并拥有该 session。查询参数 run_id 用于隔离并选定要读取的对话轮次。
+# 从 Redis Stream 按 run_id 读取事件；断线重连会从流头回放，保证不丢已产生的事件。
+# 收到 complete 或 error 事件后流自动结束。返回 text/event-stream。
 @router.get("/sessions/{session_id}/stream")
 async def session_stream(
     session_id: str,
@@ -674,12 +755,15 @@ async def session_stream(
 
     logger.info(f"[SSE] New connection: session={session_id}, run_id={run_id}")
 
+    # 双写器：负责从 Redis Stream 读取事件（写入侧由后台任务的 Presenter 完成）
     dual_writer = get_dual_writer()
 
+    # SSE 事件生成器：被 StreamingResponse 迭代，每 yield 一次就向客户端推送一帧
     async def event_generator():
         logger.info(f"[SSE] Generator started for session={session_id}, run_id={run_id}")
         try:
             # 使用 run_id 读取特定轮次的事件
+            # read_from_redis 从该 run 的 Redis Stream 起点开始读，因此断线重连能回放历史事件
             event_count = 0
             async for event in dual_writer.read_from_redis(
                 session_id,
@@ -692,14 +776,17 @@ async def session_stream(
                     continue
 
                 event_count += 1
+                # 普通事件：在线程池中格式化为 SSE 帧后再 yield（格式化可能较重，避免阻塞事件循环）
                 yield await run_blocking_io(_format_sse_event, event)
 
             logger.info(f"[SSE] Stream ended after {event_count} events")
 
+        # 生成过程中出错：向前端补发一条 error 事件，前端据此结束流并提示
         except Exception as e:
             logger.error(f"[SSE] Generator error: {e}")
             yield 'event: error\ndata: {"error": "An internal error occurred"}\n\n'
 
+    # 以 SSE 规范返回：text/event-stream + 关闭缓存 + 保持长连接；X-Accel-Buffering 关掉 nginx 缓冲以实现实时推送
     return StreamingResponse(
         event_generator(),
         media_type="text/event-stream",
@@ -711,6 +798,9 @@ async def session_stream(
     )
 
 
+# GET /api/chat/sessions/{session_id}/status —— 查询任务状态（前端轮询用，作为 SSE 的补充）。
+# 权限：需登录并拥有该 session。带 run_id 查指定轮次，否则查会话当前轮次。
+# 返回该轮的 status（pending/running/completed/error 等）与错误信息。
 @router.get("/sessions/{session_id}/status")
 async def get_session_status(
     session_id: str,
@@ -733,6 +823,7 @@ async def get_session_status(
 
     task_manager = get_task_manager()
 
+    # 指定了 run_id 则查该轮次状态，否则回退到会话级（当前轮次）状态
     if run_id:
         status = await task_manager.get_run_status(session_id, run_id)
         error = await task_manager.get_run_error(run_id)
@@ -748,6 +839,9 @@ async def get_session_status(
     }
 
 
+# POST /api/chat/sessions/{session_id}/cancel —— 取消正在运行或排队中的任务。
+# 权限：需登录并拥有该 session。先尝试在本地取消正在跑的任务；若本地未命中，
+# 再从 Redis 排队队列中移除该会话待执行的任务。返回取消结果。
 @router.post("/sessions/{session_id}/cancel")
 async def cancel_session(
     session_id: str,
@@ -790,6 +884,8 @@ async def cancel_session(
     return result
 
 
+# POST /api/chat/sessions/{session_id}/resume —— 从最近一次 checkpoint 恢复被中断的任务。
+# 权限：需登录并拥有该 session。用于任务因中断/超时停止后从断点继续执行。
 @router.post("/sessions/{session_id}/resume")
 async def resume_session(
     session_id: str,

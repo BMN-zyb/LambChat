@@ -31,6 +31,9 @@ def get_connection_pool() -> ConnectionPool[Connection[dict[str, Any]]]:
     """
     global _connection_pool
     if _connection_pool is None:
+        # min_size/max_size 控制并发连接数上限；max_idle 是连接空闲多久后被回收（秒），
+        # max_lifetime 是单个连接的最长存活时间（秒），到期后即使在用也会被轮换，
+        # 避免长期存活的连接因数据库端超时/网络中断等问题变得不可用
         _connection_pool = ConnectionPool[Connection[dict[str, Any]]](
             settings.postgres_url,
             min_size=settings.POSTGRES_POOL_MIN_SIZE,
@@ -61,6 +64,7 @@ def create_postgres_store() -> PostgresStore:
     """
     pool = get_connection_pool()
     store = PostgresStore(conn=pool)
+    # setup() 会在数据库中创建 PostgresStore 所需的表结构/索引（幂等操作，可重复调用）
     store.setup()
     return store
 
@@ -79,4 +83,5 @@ def close_connection_pool() -> None:
         except Exception as e:
             logger.warning(f"Error closing connection pool: {e}")
         finally:
+            # 无论关闭是否报错，都清空全局引用，避免后续代码继续拿到已关闭的连接池
             _connection_pool = None

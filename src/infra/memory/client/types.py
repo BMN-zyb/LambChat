@@ -12,6 +12,8 @@ from enum import Enum
 class MemoryType(str, Enum):
     """Memory type taxonomy."""
 
+    # 四种记忆类型分别对应：用户画像、反馈规则、项目上下文、外部系统引用；
+    # 该分类同时驱动下面 HIGH_SIGNAL_PATTERNS 的规则归类与检索时的按类型过滤。
     USER = "user"  # User's role, goals, preferences, knowledge
     FEEDBACK = "feedback"  # Guidance on approach — what to avoid and keep doing
     PROJECT = "project"  # Ongoing work, goals, initiatives, bugs, incidents
@@ -22,6 +24,8 @@ class MemoryType(str, Enum):
 # Content filtering — what NOT to auto-retain
 # ---------------------------------------------------------------------------
 
+# 这份正则列表用于识别"不应该被自动记住"的内容：代码片段、命令行操作、错误堆栈、
+# 助手的内心独白/寒暄套话等——这些属于短期上下文噪音，写入长期记忆只会造成污染。
 EXCLUDED_CONTENT_PATTERNS = [
     r"import\s+\w+",
     r"def\s+\w+\s*\(",
@@ -45,6 +49,8 @@ EXCLUDED_CONTENT_PATTERNS = [
 # Signal detection — what TO retain, classified by type
 # ---------------------------------------------------------------------------
 
+# 与上面的排除列表相反，这份表按记忆类型分类列出"高信号"正则：命中即认为该内容值得记住，
+# 同时覆盖中英文两套表达方式（正向确认 + 负向纠正两个方向都要捕捉，因为用户的肯定同样重要）。
 HIGH_SIGNAL_PATTERNS: dict[str, list[str]] = {
     MemoryType.FEEDBACK: [
         # Negative: corrections, rejections
@@ -104,6 +110,8 @@ HIGH_SIGNAL_PATTERNS: dict[str, list[str]] = {
 # System prompt guide for native backend
 # ---------------------------------------------------------------------------
 
+# 这段文本会被拼接进系统提示词，教模型如何正确使用记忆工具（存/查/删）——
+# 何时该记、记什么、何时该查、何时该忘，是模型行为层面的使用说明书，而不是代码逻辑。
 NATIVE_MEMORY_GUIDE = """
 ## Cross-Session Memory
 

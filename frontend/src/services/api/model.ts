@@ -1,5 +1,9 @@
 /**
  * Model API - 模型配置 CRUD
+ *
+ * 模型配置领域客户端。读多用缓存（按 URL 维度、10 秒 TTL、并发去重、随 authScope 失效），
+ * 任何写操作(create/update/delete/toggle/reorder/import…)完成后都会 clearModelListCache()
+ * 使缓存整体失效，保证下次读到最新数据。
  */
 
 import { API_BASE } from "./config";
@@ -15,12 +19,16 @@ interface ModelListCacheEntry<T> {
   promise?: Promise<T>;
 }
 
+// 与 agent.ts 单例缓存不同，这里用 Map 按不同列表 URL（含查询参数）分别缓存。
 const modelListCache = new Map<string, ModelListCacheEntry<unknown>>();
 
+// 写操作后调用：清空全部模型列表缓存，避免读到过期数据。
 function clearModelListCache(): void {
   modelListCache.clear();
 }
 
+// 取（可能缓存的）模型列表：命中未过期且同 authScope 的缓存直接返回；
+// 有进行中的同 scope 请求则复用；否则发起新请求并在成功后写缓存、失败时删除该项。
 function getCachedModelList<T>(url: string): Promise<T> {
   const now = Date.now();
   const authScope = getAccessToken();
@@ -166,6 +174,8 @@ export const modelApi = {
   },
 
   /** 列出所有可用的模型（任何已认证用户） */
+  // 与 list() 的区别：list 是管理端全量（可含禁用），available 面向普通用户，
+  // 只返回启用模型并带 default_model_id，供聊天页模型选择器使用。
   async listAvailable(): Promise<AvailableModelListResponse> {
     return getCachedModelList<AvailableModelListResponse>(
       `${API_BASE}/api/agent/models/available`,
@@ -284,6 +294,7 @@ export const modelApi = {
   },
 
   /** 获取当前用户的置顶模型 ID 列表 */
+  // 置顶模型不是独立资源，而是存放在用户 profile 的 metadata.pinned_model_ids 里。
   async getPinnedModelIds(): Promise<string[]> {
     const user = await authFetch<{
       metadata?: { pinned_model_ids?: string[] };

@@ -4,6 +4,9 @@ import type { MessageAttachment } from "./upload";
 // Message Types
 // ============================================
 
+// 一条聊天消息。role 区分用户/助手/系统；content 为纯文本汇总，
+// 而 parts 才是按到达顺序渲染的「内容块」序列（文本、工具、思考、子 agent、沙箱等）。
+// 其余字段承载工具调用/结果、token 用量、耗时、附件、反馈、取消态与本次启用技能等元信息。
 export interface Message {
   id: string;
   role: "user" | "assistant" | "system";
@@ -33,6 +36,10 @@ export interface Message {
 }
 
 // 消息内容块类型
+// 【消息内容块的可辨识联合】一条 assistant 消息由若干有序 part 组成，按 type 区分渲染方式：
+// text 正文 / tool 工具调用 / artifact 产物 / subagent 子 agent（可嵌套）/ thinking 思考 /
+// sandbox 沙箱状态 / token_usage 用量 / cancelled 取消标记 / todo 待办 / summary 摘要 /
+// recommend_questions 推荐问题。eventProcessor 正是把 SSE 事件转换成这些 part。
 export type MessagePart =
   | TextPart
   | ToolPart
@@ -84,12 +91,14 @@ export interface TodoItem {
   status: TodoStatus;
 }
 
+// 待办清单块：items 为全部待办项，isStreaming 表示仍在更新中。
 export interface TodoPart {
   type: "todo";
   items: TodoItem[];
   isStreaming?: boolean;
 }
 
+// 摘要块：对当前对话/阶段的总结；按 summary_id 区分并可流式累加。
 export interface SummaryPart {
   type: "summary";
   content: string;
@@ -99,11 +108,13 @@ export interface SummaryPart {
   isStreaming?: boolean;
 }
 
+// 单条推荐/追问问题：content 为问题文本，upload 为可选的附带上传配置。
 export interface RecommendQuestion {
   content: string;
   upload?: Record<string, unknown>;
 }
 
+// 推荐问题块：一组可点击的引导/追问问题。
 export interface RecommendQuestionsPart {
   type: "recommend_questions";
   questions: RecommendQuestion[];
@@ -111,6 +122,7 @@ export interface RecommendQuestionsPart {
   agent_id?: string;
 }
 
+// 文本块：助手正文的一段。depth>0 / agent_id 表示它属于某个子 agent。
 export interface TextPart {
   type: "text";
   content: string;
@@ -118,6 +130,7 @@ export interface TextPart {
   agent_id?: string;
 }
 
+// 思考块：模型的推理过程。thinking_id 用于把同一思考的多段增量归并。
 export interface ThinkingPart {
   type: "thinking";
   content: string;
@@ -127,6 +140,8 @@ export interface ThinkingPart {
   isStreaming?: boolean;
 }
 
+// 工具调用块：name/args 为调用信息；result/success/error 为返回；
+// isPending 表示等待结果、cancelled 表示被取消；depth/agent_id 标识归属层级。
 export interface ToolPart {
   type: "tool";
   id?: string;
@@ -143,6 +158,7 @@ export interface ToolPart {
   completedAt?: string;
 }
 
+// 产物的具体载荷：可为单个文件（含预览信息），或整个项目/文件夹（含文件数与预览）。
 export type ArtifactPartArtifact =
   | {
       kind: "file";
@@ -174,6 +190,7 @@ export type ArtifactPartArtifact =
       };
     };
 
+// 产物块：包裹一个 artifact 及其成功/错误态，供 UI 以卡片/预览形式渲染。
 export interface ArtifactPart {
   type: "artifact";
   artifact: ArtifactPartArtifact;
@@ -184,6 +201,8 @@ export interface ArtifactPart {
   completedAt?: string;
 }
 
+// 子 agent 块：表示一次子 agent 调用。depth 为嵌套深度，parts 承载其内部内容（可再嵌套），
+// status 跟踪其生命周期（pending/running/complete/error/cancelled）。
 export interface SubagentPart {
   type: "subagent";
   agent_id: string;
@@ -205,12 +224,14 @@ export interface SubagentPart {
   status?: "pending" | "running" | "complete" | "error" | "cancelled";
 }
 
+// 工具调用（发起时）：id 关联结果，name 工具名，args 入参。
 export interface ToolCall {
   id?: string;
   name: string;
   args: Record<string, unknown>;
 }
 
+// 工具结果（返回时）：通过 id/name 关联对应调用，result 为返回、success 表示成败。
 export interface ToolResult {
   id?: string;
   name: string;
@@ -219,6 +240,7 @@ export interface ToolResult {
 }
 
 // DeepAgents event types
+// DeepAgents 相关的原始消息/事件结构（对接后端 agent 框架的中间数据形态）
 export interface AIMessage {
   content: string;
   tool_calls?: RawToolCall[];
@@ -251,6 +273,7 @@ export interface StreamEventData {
 // Form Field Types (Human Tool)
 // ============================================
 
+// 人工审批表单的字段类型（文本/多行/数字/勾选/下拉/单选/多选）。
 export type FormFieldType =
   | "text"
   | "textarea"
@@ -260,6 +283,7 @@ export type FormFieldType =
   | "radio"
   | "multi_select";
 
+// 单个表单字段定义：名称、标签、类型、占位/默认值、是否必填与可选项等。
 export interface FormField {
   name: string;
   label: string;
@@ -271,6 +295,7 @@ export interface FormField {
   multiple?: boolean;
 }
 
+// 待人工审批项：对应 approval_required 事件，含提示信息、表单字段、状态与过期/超时等。
 export interface PendingApproval {
   id: string;
   message: string;
@@ -283,6 +308,7 @@ export interface PendingApproval {
   metadata?: Record<string, unknown>;
 }
 
+// 旧版/通用流事件结构（非当前 SSE 词汇表，历史/兼容用途）。
 export interface StreamEvent {
   type:
     | "thinking"
@@ -296,6 +322,7 @@ export interface StreamEvent {
   metadata: Record<string, unknown>;
 }
 
+// 一次 agent 运行的汇总响应：成败、总结消息、步数、步骤日志与会话 ID。
 export interface AgentResponse {
   success: boolean;
   message: string;
@@ -304,6 +331,7 @@ export interface AgentResponse {
   session_id: string;
 }
 
+// 单个 agent 步骤：序号、思考、工具调用与结果。
 export interface AgentStep {
   step: number;
   thought?: string;
@@ -315,12 +343,14 @@ export interface AgentStep {
 // SSE Connection Types
 // ============================================
 
+// SSE 连接状态：连接中 / 已连接 / 重连中 / 已断开（驱动连接指示 UI）。
 export type ConnectionStatus =
   | "connecting"
   | "connected"
   | "reconnecting"
   | "disconnected";
 
+// 连接状态快照：当前状态、重试次数与上次连接成功时间。
 export interface ConnectionState {
   status: ConnectionStatus;
   retryCount: number;
@@ -331,6 +361,7 @@ export interface ConnectionState {
 // Run Types (Multi-turn Conversation)
 // ============================================
 
+// 单次运行（一轮问答）的摘要：运行/追踪 ID、起止时间、状态、事件数与触发的用户消息。
 export interface RunSummary {
   run_id: string;
   trace_id: string;

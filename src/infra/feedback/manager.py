@@ -23,6 +23,9 @@ logger = get_logger(__name__)
 class FeedbackManager:
     """用户反馈管理器"""
 
+    # 注：本类没有在此模块内提供进程级单例获取函数，单例缓存由调用方
+    # （src/api/routes/feedback.py 的 lru_cache）负责管理
+
     def __init__(self):
         self.storage = FeedbackStorage()
 
@@ -46,6 +49,7 @@ class FeedbackManager:
         Raises:
             ValueError: 如果已对该 run 提交过反馈
         """
+        # 重复提交的拦截逻辑在 storage.create 内部完成（应用层预检查 + 唯一索引兜底）
         feedback = await self.storage.create(data, user_id, username)
         logger.info(f"Feedback submitted by user {username} for run {data.run_id}")
         return feedback
@@ -119,6 +123,8 @@ class FeedbackManager:
         Returns:
             反馈列表响应
         """
+        # 列表数据、总数、整体统计分别对应三次独立的存储层查询，
+        # 三者互不依赖，一并打包进响应模型返回给前端
         items = await self.storage.list(skip, limit, rating, user_id, session_id)
         total = await self.storage.count(rating, user_id, session_id)
         stats = await self.storage.get_stats(session_id)

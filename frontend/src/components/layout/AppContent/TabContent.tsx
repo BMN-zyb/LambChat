@@ -14,6 +14,7 @@ import {
 import { PanelLoadingState } from "../../common/PanelLoadingState";
 import type { TabType } from "./types";
 
+// 各管理面板按需懒加载（lazy + Suspense）：首屏只加载聊天所需代码，切到对应标签才拉取
 const SkillsHubPanel = lazy(() =>
   import("../../panels/SkillsHubPanel").then((m) => ({
     default: m.SkillsHubPanel,
@@ -82,6 +83,7 @@ const UsagePanel = lazy(() =>
   })),
 );
 
+// 标签 → 面板组件的映射表（TabContent 据此选择渲染哪个懒加载面板）
 const panelMap: Record<
   string,
   React.LazyExoticComponent<React.ComponentType>
@@ -104,6 +106,7 @@ const panelMap: Record<
   usage: UsagePanel,
 };
 
+// 标签 → 加载骨架的映射表（Suspense 回退时展示，缺省时用通用 PanelLoadingState）
 const skeletonMap: Partial<Record<TabType, ReactNode>> = {
   skills: <SkillsPanelSkeleton />,
   marketplace: <MarketplacePanelSkeleton />,
@@ -117,6 +120,8 @@ const skeletonMap: Partial<Record<TabType, ReactNode>> = {
   usage: <UsagePanelSkeleton />,
 };
 
+// 根据 activeTab 渲染对应管理面板：chat 返回 null（由 ChatView 负责），未知标签也返回 null；
+// 否则用 Suspense 包裹懒加载面板，并在加载期间展示对应骨架。
 export function TabContent({ activeTab }: { activeTab: TabType }) {
   if (activeTab === "chat") return null;
 

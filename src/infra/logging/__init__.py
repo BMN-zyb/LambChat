@@ -18,10 +18,13 @@ Usage:
     TraceContext.clear()
 """
 
+# 从各子模块聚合导出日志系统的公共接口:
+# config(get_logger/日志级别解析/初始化)、context(追踪上下文)、filter(把上下文注入日志记录)。
 from src.infra.logging.config import get_logger, parse_log_levels, setup_logging
 from src.infra.logging.context import TraceContext, TraceInfo
 from src.infra.logging.filter import TraceFilter
 
+# __all__ 显式声明本包对外暴露的符号,约束 `from src.infra.logging import *` 的范围。
 __all__ = [
     "TraceContext",
     "TraceInfo",

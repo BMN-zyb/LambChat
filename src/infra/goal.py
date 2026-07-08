@@ -14,11 +14,17 @@ logger = logging.getLogger(__name__)
 class GoalSpec(BaseModel):
     """A run-scoped goal with rubric criteria."""
 
+    # objective: 本次 run 要达成的目标(非空)。
     objective: str = Field(..., min_length=1, description="The goal to pursue")
+    # rubric: 判定「完成」的评分标准/验收准则(非空)，是评审 agent 唯一可信的完成依据。
     rubric: str = Field(..., min_length=1, description="Completion criteria")
+    # max_iterations: rubric 迭代评审的最大轮数(1~20)，防止反复要求修订而无限循环。
     max_iterations: int = Field(3, ge=1, le=20, description="Rubric iteration cap")
 
 
+# 评审 agent(grader)的 system prompt：要求它严格、仅依据 <rubric> 判定完成，
+# 把 transcript/工具输出等一律视为「不可信证据」而非指令(防提示注入)，并保证
+# result 与逐条 passed 的逻辑自洽。请勿改动此字符串内容。
 GOAL_RUBRIC_GRADER_SYSTEM_PROMPT = """You are a strict but consistent rubric grader.
 
 Evaluate whether the work in `<transcript>` satisfies every criterion in
@@ -54,6 +60,7 @@ be clearly reported.
 
 def log_goal_rubric_evaluation(evaluation: Mapping[str, Any]) -> None:
     """Record RubricMiddleware grader verdicts for debugging and metrics."""
+    # 统计本轮评审中「未通过」的准则条数，并连同 run/迭代/结果/说明一起记入日志，便于排障与度量。
     criteria = evaluation.get("criteria") or []
     failed_count = 0
     if isinstance(criteria, list):
@@ -72,6 +79,7 @@ def log_goal_rubric_evaluation(evaluation: Mapping[str, Any]) -> None:
 
 def build_default_rubric(objective: str) -> str:
     """Build a conservative default rubric for a goal objective."""
+    # 当未显式提供 rubric 时，围绕 objective 生成一份保守的默认验收准则(强调证据与如实报告局限)。
     return "\n".join(
         [
             f"- The final result directly satisfies this objective: {objective}",
@@ -84,6 +92,8 @@ def build_default_rubric(objective: str) -> str:
 
 def coerce_goal_spec(value: object) -> GoalSpec | None:
     """Return a GoalSpec from API or metadata data if possible."""
+    # 把来自 API/元数据的输入尽量归一成 GoalSpec：已是实例则原样返回；是 dict 则校验；
+    # 校验失败或类型不符返回 None(交由调用方按「无目标」处理)。
     if isinstance(value, GoalSpec):
         return value
     if isinstance(value, dict):
@@ -96,6 +106,7 @@ def coerce_goal_spec(value: object) -> GoalSpec | None:
 
 def build_goal_prompt_section(goal: dict | GoalSpec | None) -> str:
     """Render the active goal as a system prompt section."""
+    # 把当前目标渲染成一段可拼进 system prompt 的文本；无有效目标则返回空串(不注入任何内容)。
     spec = coerce_goal_spec(goal)
     if spec is None:
         return ""
@@ -114,6 +125,8 @@ def build_goal_prompt_section(goal: dict | GoalSpec | None) -> str:
 
 def _load_rubric_middleware_class():
     """Return DeepAgents RubricMiddleware when installed by the current version."""
+    # 不同 DeepAgents 版本里 RubricMiddleware 所在模块路径不一致，这里按候选路径逐个探测，
+    # 任一命中即返回；全部失败(未安装/版本不含该特性)返回 None。
     for module_name, attr_name in (
         ("deepagents", "RubricMiddleware"),
         ("deepagents.middleware", "RubricMiddleware"),
@@ -159,10 +172,12 @@ def _create_rubric_middleware_with_retry(
         _grader: object | None  # declared for type-checker; set at runtime
 
         def _ensure_grader(self):
+            # 惰性构建评审子 agent；已构建则直接复用。
             if self._grader is not None:
                 return self._grader
 
             # Local import keeps import-time graph minimal
+            # 局部 import：把重依赖推迟到真正需要时，避免模块加载期的连锁导入。
             from deepagents._models import resolve_model  # noqa: PLC0415
             from deepagents.middleware.rubric import (
                 RUBRIC_GRADER_MESSAGE_SOURCE as _GRADER_SRC,
@@ -170,6 +185,8 @@ def _create_rubric_middleware_with_retry(
             from deepagents.middleware.rubric import GraderResponse
             from langchain.agents import create_agent
 
+            # 关键点：给评审子 agent 传入与主 agent 相同的 grader_middleware(重试+回退)，
+            # 使评审调用也享有 429/5xx/超时重试与 400 回退备用模型的能力。
             self._grader = create_agent(
                 model=resolve_model(self._model),
                 system_prompt=self._system_prompt,
@@ -212,6 +229,7 @@ def create_goal_rubric_middleware(
 
     from src.infra.agent.middleware.retry import create_retry_middleware
 
+    # 构建与主 agent 一致的重试/回退中间件栈，稍后注入评审子 agent。
     grader_middleware = create_retry_middleware(
         fallback_model=fallback_model,
         thinking=thinking,
@@ -227,11 +245,13 @@ def create_goal_rubric_middleware(
         )
     except TypeError:
         # Older RubricMiddleware may not accept all kwargs
+        # 兼容旧版本：其构造函数可能不接受上述全部 kwargs，退化为仅传 model。
         try:
             return middleware_cls(model=model)
         except Exception:
             return None
     except Exception:
+        # 其他任何构建异常都视为「不启用 rubric 中间件」，返回 None 而非让整条链路失败。
         return None
 
 
@@ -242,6 +262,7 @@ def build_goal_input(
     rubric_middleware: object | None,
 ) -> dict[str, object]:
     """Build DeepAgent input, adding rubric only when middleware will consume it."""
+    # 仅当既有有效目标、又确实启用了 rubric 中间件时，才把 rubric 放进输入，避免无人消费的冗余字段。
     payload: dict[str, object] = {"messages": [new_message]}
     spec = coerce_goal_spec(goal)
     if spec is not None and rubric_middleware is not None:

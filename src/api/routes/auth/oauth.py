@@ -3,8 +3,10 @@ OAuth authentication routes
 """
 
 import secrets
+# isawaitable：用于兼容 _verify_oauth_state 可能是同步或异步实现的情况
 from inspect import isawaitable
 from typing import Annotated
+# urlencode：把 token 等参数编码进 URL（query 或 fragment）
 from urllib.parse import urlencode
 
 from fastapi import APIRouter, HTTPException, Path, Request, status
@@ -14,6 +16,7 @@ from pydantic import BaseModel, StringConstraints
 from src.infra.auth.turnstile import get_turnstile_service
 from src.infra.logging import get_logger
 from src.kernel.config import settings
+# OAuthProvider：受支持的第三方登录提供商枚举（google/github/apple）
 from src.kernel.schemas.user import OAuthProvider
 
 from .utils import _get_client_ip, _get_frontend_url, _store_oauth_state, _verify_oauth_state
@@ -23,6 +26,7 @@ logger = get_logger(__name__)
 
 
 # OAuth provider path parameter with validation
+# OAuth 提供商路径参数类型：用正则限定取值只能是 google/github/apple，非法值会直接返回 422
 OAuthProviderParam = Annotated[
     str,
     StringConstraints(pattern="^(google|github|apple)$"),
@@ -30,6 +34,8 @@ OAuthProviderParam = Annotated[
 ]
 
 
+# GET /oauth/providers —— 返回已启用的 OAuth 登录选项及认证相关设置
+# 响应体：{ providers: [...], registration_enabled: bool, turnstile: {...} }，供前端渲染登录页
 @router.get("/oauth/providers")
 async def get_oauth_providers():
     """
@@ -42,6 +48,7 @@ async def get_oauth_providers():
         from src.infra.auth.oauth import get_oauth_service
 
         oauth_service = get_oauth_service()
+        # 遍历所有受支持的提供商，仅收集"已在配置中启用"的项返回给前端
         for provider in OAuthProvider:
             if oauth_service.is_provider_enabled(provider):
                 providers.append(
@@ -69,6 +76,9 @@ async def get_oauth_providers():
     }
 
 
+# GET /oauth/{provider} —— 发起第三方 OAuth 授权
+# provider 路径参数受 OAuthProviderParam 约束（google/github/apple）
+# 流程：生成随机 state 存入 Redis（用于 CSRF 防护）→ 拼装 redirect_uri → 直接 302 跳转到提供商授权页
 @router.get("/oauth/{provider}")
 async def oauth_login(request: Request, provider: OAuthProviderParam):
     """
@@ -113,18 +123,23 @@ async def oauth_login(request: Request, provider: OAuthProviderParam):
 class OAuthCallbackRequest(BaseModel):
     """OAuth 回调请求"""
 
+    # 授权码：提供商回调时带回，用于向其换取访问令牌
     code: str
+    # state 随机串：发起授权时生成并存入 Redis，回调时用于 CSRF 校验（防跨站请求伪造）
     state: str
 
 
+# 构造回传给 OAuth 提供商的 redirect_uri（须与发起授权时完全一致，否则提供商会拒绝换取）
 def _oauth_redirect_uri(frontend_url: str, provider: str) -> str:
     return f"{frontend_url}/api/auth/oauth/{provider}/callback"
 
 
+# 构造前端 OAuth 回调处理页地址（换取 token 成功后前端跳转到此页完成登录）
 def _frontend_callback_url(frontend_url: str) -> str:
     return f"{frontend_url}/auth/callback"
 
 
+# 将签发的 token 编码为 URL fragment 参数（放在 # 之后，不随请求发往服务器，也不进日志，更安全）
 def _token_fragment(token) -> str:
     return urlencode(
         {
@@ -135,6 +150,7 @@ def _token_fragment(token) -> str:
     )
 
 
+# 校验 OAuth state：兼容 _verify_oauth_state 返回协程或同步布尔值两种实现
 async def _verify_state(provider: str, state: str, client_ip: str) -> bool:
     coro_or_result = _verify_oauth_state(provider, state, client_ip)
     if isawaitable(coro_or_result):
@@ -144,6 +160,7 @@ async def _verify_state(provider: str, state: str, client_ip: str) -> bool:
     return bool(result)
 
 
+# 用授权码向 OAuth 提供商换取本系统的 JWT token（内部拼接 redirect_uri 并调用 oauth_service）
 async def _exchange_oauth_token(
     request: Request,
     provider: str,
@@ -161,6 +178,10 @@ async def _exchange_oauth_token(
     return frontend_url, token
 
 
+# POST /oauth/{provider}/callback —— 处理 OAuth 回调（用授权码换 token）
+# 兼容两种请求：普通 JSON（前端 AJAX）与 Apple 的 form_post 表单回调
+# JSON 请求成功返回 JWT Token；form_post 请求则 302 跳转到前端回调页，token 放在 URL fragment 中
+# 安全：先用 state 做 CSRF 校验，失败时——表单流重定向报错、JSON 流抛 400
 @router.post("/oauth/{provider}/callback")
 async def oauth_callback(http_request: Request, provider: OAuthProviderParam):
     """
@@ -168,6 +189,7 @@ async def oauth_callback(http_request: Request, provider: OAuthProviderParam):
 
     接收授权码，交换 token。JSON 请求返回 JWT；Apple form_post 请求重定向到前端回调页。
     """
+    # 依据 Content-Type 判断是表单回调（Apple form_post）还是 JSON 回调，二者取参与出参方式不同
     content_type = http_request.headers.get("content-type", "").lower()
     is_form_post = "application/x-www-form-urlencoded" in content_type or (
         "multipart/form-data" in content_type
@@ -205,6 +227,7 @@ async def oauth_callback(http_request: Request, provider: OAuthProviderParam):
             detail="Invalid OAuth state. Please try logging in again.",
         )
 
+    # state 校验通过后，用授权码向提供商换取本系统 token（失败则按请求类型分别处理）
     frontend_url, token = await _exchange_oauth_token(
         http_request,
         provider,
@@ -232,6 +255,9 @@ async def oauth_callback(http_request: Request, provider: OAuthProviderParam):
     return token
 
 
+# GET /oauth/{provider}/callback —— 处理 OAuth 回调（GET 重定向式，供浏览器直接跳转）
+# query 参数：code（授权码）、state（CSRF 校验串）
+# 成功后 302 跳转前端回调页并通过 URL fragment(#) 传递 token；state 校验失败或换取失败则重定向到登录页并带 error
 @router.get("/oauth/{provider}/callback")
 async def oauth_callback_get(request: Request, provider: OAuthProviderParam, code: str, state: str):
     """

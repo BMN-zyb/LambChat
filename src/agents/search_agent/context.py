@@ -47,6 +47,16 @@ class SearchAgentContext:
         disabled_mcp_tools: Optional[List[str]] = None,
         auto_mode: bool = False,
     ):
+        """初始化上下文：记录会话 / 用户标识，以及各类工具、技能的启停配置。
+
+        关键参数：
+            session_id: 会话 ID（缺省时自动生成 uuid），后续用作 checkpoint 的 thread_id。
+            agent_id: agent 标识，默认 "search"。
+            user_id: 用户 ID，用于多租户隔离，以及按用户加载 MCP 工具 / 技能。
+            disabled_tools / disabled_mcp_tools: 需要禁用的工具、MCP 工具名单。
+            disabled_skills / enabled_skills: 技能黑 / 白名单（白名单存在时优先生效）。
+            auto_mode: 自动模式开关，影响工具过滤策略。
+        """
         self.session_id = session_id or str(uuid.uuid4())
         self.agent_id = agent_id
         self.user_id = user_id
@@ -55,16 +65,26 @@ class SearchAgentContext:
         self.enabled_skills = enabled_skills
         self.disabled_mcp_tools = disabled_mcp_tools
         self.auto_mode = auto_mode
+        # 以下为运行期内部状态（非构造参数）：
+        # MCP 客户端管理器，懒加载 MCP 工具后被赋值
         self.mcp_manager: Optional[MCPClientManager] = None
+        # 标记 MCP 工具是否已尝试加载，保证只懒加载一次
         self._mcp_loaded: bool = False
+        # 已装配的工具列表（基础工具 + 内部工具 + MCP 工具等）
         self.tools: List[Any] = []
+        # 已加载的技能元信息列表
         self.skills: List[dict] = []
+        # 技能文件内容映射（路径 -> 数据）
         self.skill_files: Dict[str, Any] = {}
+        # 延迟工具管理器：当工具总数超阈值时，改为按需检索式加载 MCP 工具
         self.deferred_manager: Optional["DeferredToolManager"] = None
 
     def apply_skill_filters(self) -> None:
         """Apply whitelist/blacklist filters to loaded skills and skill files."""
+        # 先算出黑名单集合
         disabled_set = set(self.disabled_skills or [])
+        # 白名单模式（enabled_skills 被显式提供）：只保留白名单内且不在黑名单里的技能；
+        # 白名单优先于黑名单，处理完直接 return，不再走后面的纯黑名单分支
         if self.enabled_skills is not None:
             enabled_set = set(self.enabled_skills)
             self.skills = [
@@ -72,6 +92,7 @@ class SearchAgentContext:
                 for s in self.skills
                 if s.get("name") in enabled_set and s.get("name") not in disabled_set
             ]
+            # skill_files 的 key 是文件路径，取首段目录名当作技能名，用同一套白 / 黑名单过滤
             if self.skill_files:
                 self.skill_files = {
                     path: data
@@ -81,6 +102,7 @@ class SearchAgentContext:
                 }
             return
 
+        # 黑名单模式（未提供白名单）：仅剔除被禁用的技能及其对应文件
         if disabled_set:
             self.skills = [s for s in self.skills if s.get("name") not in disabled_set]
             if self.skill_files:
@@ -92,9 +114,11 @@ class SearchAgentContext:
 
     async def _lazy_load_mcp_tools(self) -> None:
         """懒加载 MCP 工具（仅在首次调用 get_tools 时初始化）"""
+        # 幂等保护：已加载过直接返回，避免重复初始化 MCP
         if self._mcp_loaded:
             return  # 已经尝试过加载
 
+        # 先置位再加载：即便下面加载失败也不再重试，防止每轮调用都反复尝试
         self._mcp_loaded = True
 
         if not settings.ENABLE_MCP:
@@ -105,6 +129,7 @@ class SearchAgentContext:
             logger.info(f"[SearchAgentContext] Lazy loading MCP tools for user {self.user_id}")
             # 使用全局缓存，避免重复初始化
             assert self.user_id is not None  # Already guarded above
+            # 走全局缓存获取该用户的 MCP 工具与管理器，避免重复建立连接
             mcp_tools, self.mcp_manager = await get_global_mcp_tools(self.user_id)
             logger.info(
                 f"[SearchAgentContext] Loaded {len(mcp_tools)} MCP tools (before DB filter)"
@@ -120,10 +145,12 @@ class SearchAgentContext:
 
             from src.agents.core.mcp_tool_exposure import split_mcp_tools_for_exposure
 
+            # 按各 MCP server 的暴露策略，把工具拆成"直接内联"与"延迟加载"两组
             inline_mcp_tools, deferred_mcp_tools = split_mcp_tools_for_exposure(
                 mcp_tools,
                 getattr(self.mcp_manager, "_server_tool_policies", {}),
             )
+            # 内联组无条件并入工具表，模型可直接看到并调用
             if inline_mcp_tools:
                 self.tools.extend(inline_mcp_tools)
                 logger.info(
@@ -145,6 +172,8 @@ class SearchAgentContext:
                 # 恢复上次已发现的工具名（跨 turn 持久化）
                 pre_discovered = await restore_discovered_tools(self.session_id)
 
+                # 工具过多时不全量塞进提示，改由 DeferredToolManager 托管，
+                # 后续通过工具检索（ToolSearchTool / ToolSearchMiddleware）按需暴露
                 self.deferred_manager = DeferredToolManager(
                     all_deferred_tools=deferred_mcp_tools,
                     session_id=self.session_id,
@@ -214,6 +243,7 @@ class SearchAgentContext:
         logger.info("[SearchAgentContext] Added transfer_path tool")
 
         try:
+            # 内部工具：先按用户角色 / 是否管理员解析访问权限，再据此加载该用户可见的内部工具
             from src.infra.mcp.quota import resolve_user_mcp_access
 
             user_roles, is_admin = (
@@ -230,6 +260,7 @@ class SearchAgentContext:
             logger.warning(f"[SearchAgentContext] Failed to load internal tools: {e}")
 
         try:
+            # 环境变量工具：按名称去重，避免与已加入的工具重名
             from src.infra.tool.env_var_tool import get_env_var_tools
 
             existing_tool_names = {getattr(tool, "name", "") for tool in self.tools}
@@ -278,6 +309,7 @@ class SearchAgentContext:
                 self.skills = skill_result["skills"]
 
                 before_count = len(self.skills)
+                # 应用技能黑 / 白名单过滤（详见 apply_skill_filters）
                 self.apply_skill_filters()
                 if self.enabled_skills is not None:
                     logger.info(

@@ -12,6 +12,7 @@ import sys
 from colorama import Fore, Style, init
 
 # 初始化 colorama（Windows 兼容）
+# autoreset=True:每次写入后自动重置颜色,避免颜色码"溢出"影响后续输出。
 init(autoreset=True)
 
 
@@ -39,11 +40,14 @@ class ColoredFormatter(logging.Formatter):
 
     def __init__(self, fmt: str | None = None, datefmt: str | None = None):
         super().__init__(fmt, datefmt)
+        # 启动时判定是否连接到 TTY(终端);非 TTY(如重定向到文件/管道)则不着色,输出纯文本。
         self._is_tty = sys.stdout.isatty()
 
     def format(self, record: logging.LogRecord) -> str:
         """格式化日志记录，添加颜色"""
         # 保存原始 levelname
+        # 只临时给 levelname 包上颜色码用于本次输出,格式化后立即还原,
+        # 避免污染同一 record 被其他 handler 复用时的字段。
         original_levelname = record.levelname
 
         if self._is_tty:

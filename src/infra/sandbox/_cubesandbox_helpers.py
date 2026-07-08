@@ -23,6 +23,8 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
+# 这两个模块级包装通过 session_manager 模块属性做一层间接，便于测试时 monkeypatch 替换
+# （未替换则用真实实现）。mixin 内部统一调用它们，而非直接 import 具体函数。
 def run_blocking_io(*args, **kwargs):
     from src.infra.sandbox import session_manager
 
@@ -35,9 +37,13 @@ def ensure_sandbox_mcp(*args, **kwargs):
     return getattr(session_manager, "ensure_sandbox_mcp", _ensure_sandbox_mcp)(*args, **kwargs)
 
 
+# CubeSandbox 平台的生命周期方法集合，通过多继承混入 SessionSandboxManager。
+# 相比 E2B 多了"列出并复用用户已有沙箱 + 清理重复沙箱"的能力（CubeSandbox 支持按用户列举）。
 class _CubeSandboxMixin:
     """CubeSandbox platform lifecycle methods for SessionSandboxManager."""
 
+    # 仅供类型检查：声明本 mixin 期望宿主类（SessionSandboxManager）提供的属性与方法，
+    # 运行时不生效（避免与真正的实现冲突）。
     if TYPE_CHECKING:
         _cube_adapter: Optional["CubeSandboxAdapter"]
         _cache: OrderedDict[str, tuple[str, CompositeBackend, object | None]]
@@ -69,6 +75,8 @@ class _CubeSandboxMixin:
 
         async def _get_user_env_vars(self, user_id: str) -> dict[str, str]: ...
 
+    # CubeSandbox 版的"获取或创建"，四级回退：缓存命中并健康 → 按绑定重连 →
+    # 列举并复用用户已有沙箱 → 新建。复用/新建后都会异步清理该用户的重复沙箱。
     async def _get_or_create_cubesandbox(
         self, session_id: str, user_id: str
     ) -> tuple[CompositeBackend, str]:
@@ -165,6 +173,8 @@ class _CubeSandboxMixin:
 
             return await self._create_and_bind_cubesandbox(session_id, user_id)
 
+    # 列举该用户在平台上已有的可用沙箱，逐个尝试接管（续期→组装 backend→写绑定→建 work_dir）；
+    # 成功即复用并清理其余重复项。exclude_ids 用于跳过已知不可用的沙箱。都不可用则返回 None。
     async def _find_existing_cubesandbox_for_user(
         self,
         session_id: str,
@@ -217,6 +227,7 @@ class _CubeSandboxMixin:
                 exclude_ids.add(sandbox_id)
         return None
 
+    # 清理该用户除 keep_sandbox_id 之外的所有沙箱（kill）：保证"每用户一沙箱"，回收多余资源。
     async def _cleanup_duplicate_cubesandboxes(
         self,
         user_id: str,
@@ -244,6 +255,8 @@ class _CubeSandboxMixin:
             except Exception as e:
                 logger.warning(f"[CubeSandbox] Failed to clean duplicate sandbox {sandbox_id}: {e}")
 
+    # 后台"发射后不管"地清理重复沙箱：不阻塞主流程；创建 task 失败（无事件循环）则跳过，
+    # 完成回调里只记录异常。
     def _schedule_duplicate_cubesandbox_cleanup(
         self,
         user_id: str,
@@ -267,6 +280,8 @@ class _CubeSandboxMixin:
 
         task.add_done_callback(_log_cleanup_failure)
 
+    # 新建 CubeSandbox 并绑定到用户：注入用户环境变量，创建后写绑定；写绑定失败则回滚（stop）。
+    # 成功后同步清理该用户的重复沙箱。
     async def _create_and_bind_cubesandbox(
         self, session_id: str, user_id: str
     ) -> tuple[CompositeBackend, str]:
@@ -308,6 +323,7 @@ class _CubeSandboxMixin:
         await ensure_sandbox_mcp(scoped_backend, user_id)
         return scoped_backend, scoped_work_dir
 
+    # 用已有 provider 沙箱对象组装 CompositeBackend（默认后端 + /skills/ 路由）。
     def _build_cube_composite_backend(self, provider_obj: object, user_id: str) -> CompositeBackend:
         from src.infra.backend.cubesandbox import CubeSandboxBackend
 

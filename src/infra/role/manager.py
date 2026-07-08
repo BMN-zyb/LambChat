@@ -18,6 +18,7 @@ class RoleManager:
     """
 
     def __init__(self):
+        # 业务门面：所有操作委托给带缓存的 RoleStorage
         self.storage = RoleStorage()
 
     async def create_role(self, role_data: RoleCreate) -> Role:
@@ -111,6 +112,7 @@ class RoleManager:
 
 
 # 单例实例
+# 全进程共享一个 RoleManager，避免重复创建存储层实例
 _role_manager: Optional[RoleManager] = None
 
 
@@ -121,6 +123,7 @@ def get_role_manager() -> RoleManager:
     Returns:
         角色管理器实例
     """
+    # 懒加载单例
     global _role_manager
     if _role_manager is None:
         _role_manager = RoleManager()

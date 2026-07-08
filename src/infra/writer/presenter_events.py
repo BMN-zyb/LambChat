@@ -3,6 +3,15 @@
 所有 present_* 方法均为纯数据构建，无 IO 操作。
 通过 self._build_event() 和 self.config 访问主类状态。
 """
+# 中文补充说明：本文件是"Presenter 事件契约"的核心——每个 present_xxx 方法
+# 对应一种前端可识别的 SSE 事件类型（如 message:chunk、tool:start、done 等），
+# 字段名/结构必须与前端约定严格一致，任何改动都要同步前端解析逻辑。
+# 难点主要有两处：
+#   1）depth/agent_id 语义——depth=0 表示主 Agent，depth>=1 表示子 Agent
+#      （多 Agent/Team 场景下需要前端按层级缩进展示）；
+#   2）超大工具参数/结果的裁剪——LLM 传给工具的参数可能是任意深度的
+#      嵌套结构或超长字符串，_compact_tool_start_arg 负责在事件层面做
+#      防御性截断，避免一次工具调用把整条 SSE 事件撑到过大。
 
 from __future__ import annotations
 
@@ -22,6 +31,9 @@ TOOL_START_ARG_MAX_DEPTH = 8
 
 
 def _compact_tool_start_arg(value: Any, *, depth: int = 0) -> Any:
+    # 中文：递归压缩 tool:start 事件里的参数值——字符串超长截断、
+    # list/dict 超过条目数上限截断，并限制递归深度，防止恶意/异常输入
+    # （例如超深嵌套结构）导致递归过深或事件体过大
     if depth >= TOOL_START_ARG_MAX_DEPTH:
         return "[truncated: max depth exceeded]"
 
@@ -34,6 +46,7 @@ def _compact_tool_start_arg(value: Any, *, depth: int = 0) -> Any:
         )
 
     if isinstance(value, dict):
+        # 用 islice 只取前 N 个键值对递归处理，其余的用 _truncated_keys 计数占位
         compacted: dict[Any, Any] = {}
         for key in islice(value, TOOL_START_ARG_MAX_DICT_ITEMS):
             compacted[key] = _compact_tool_start_arg(value[key], depth=depth + 1)
@@ -43,6 +56,7 @@ def _compact_tool_start_arg(value: Any, *, depth: int = 0) -> Any:
         return compacted
 
     if isinstance(value, (list, tuple)):
+        # 同理，列表只保留前 N 项，末尾追加一个说明省略数量的占位项
         items = [
             _compact_tool_start_arg(item, depth=depth + 1)
             for item in value[:TOOL_START_ARG_MAX_LIST_ITEMS]
@@ -52,6 +66,7 @@ def _compact_tool_start_arg(value: Any, *, depth: int = 0) -> Any:
             items.append({"_truncated_items": omitted})
         return items
 
+    # 其它标量类型（数字、布尔、None 等）原样返回，无需压缩
     return value
 
 
@@ -59,6 +74,8 @@ class EventPresenterMixin:
     """同步事件构建 mixin —— 挂载到 Presenter 后可访问 self.config / self._step_count 等。"""
 
     # Attributes provided by the Presenter host class
+    # 中文：以下属性由宿主类 Presenter（present.py）在 __init__ 中赋值，
+    # 本 Mixin 只声明类型注解，不在此处初始化，避免多重继承下的初始化顺序问题
     config: PresenterConfig
     trace_id: str
     run_id: str
@@ -94,13 +111,18 @@ class EventPresenterMixin:
             depth: 层级深度（0=主代理，1+=子代理）
             agent_id: 代理ID（用于子代理事件）
         """
+        # data 已经是字符串时（如某些直接传纯文本的场景），无需再走 sanitize/depth 处理
         if isinstance(data, str):
             return {"event": event, "data": data}
 
+        # 递归清理一遍，确保 data 中不含无法被 json.dumps 处理的对象
         data = self._sanitize_for_json(data)
         if isinstance(data, dict):
+            # depth > 0 说明这是子 Agent 产生的事件，前端据此做层级缩进展示
             if depth > 0:
                 data["depth"] = depth
+            # agent_id 显式传入时以传入值为准；否则回退到主 Agent 的 agent_id，
+            # 保证每条事件都能标识出自己归属于哪个 Agent
             if agent_id:
                 data["agent_id"] = agent_id
             elif "agent_id" not in data:
@@ -266,6 +288,8 @@ class EventPresenterMixin:
             input_message: 输入消息
             depth: 层级深度（默认为1，因为这是子代理）
         """
+        # 中文：_step_count 是跨越整个对话生命周期的全局步数计数器，
+        # 用于给前端展示"第几步"，子 Agent 调用也计入总步数
         self._step_count += 1
         return self._build_event(
             "agent:call",
@@ -328,7 +352,10 @@ class EventPresenterMixin:
             depth: 层级深度（0=主代理，1+=子代理）
             agent_id: 代理ID（用于子代理事件）
         """
+        # 记录本次工具调用（供 done() 事件里统计 tool_calls 总数）
         self._tool_calls.append({"name": tool_name})
+        # 中文：LLM 传入的 tool_input 可能不是 dict（例如单一字符串参数），
+        # 统一包装成 {"input": ...} 形式，保证前端渲染时字段结构一致
         args = tool_input if isinstance(tool_input, dict) else {"input": tool_input}
         return self._build_event(
             "tool:start",
@@ -449,6 +476,8 @@ class EventPresenterMixin:
         enabled_skills: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """输出用户消息"""
+        # message_id 未显式提供时，用 run_id 派生一个默认值，
+        # 保证同一次运行内用户消息的 id 是确定且可复现的
         resolved_message_id = message_id or f"{self.run_id}:user"
         data: Dict[str, Any] = {
             "content": content,
@@ -456,6 +485,7 @@ class EventPresenterMixin:
             "message_id": resolved_message_id,
             "run_id": self.run_id,
         }
+        # 附件做数量截断（_bounded_attachments），避免一次带过多附件把事件体撑大
         data["attachments"] = _bounded_attachments(attachments)
         if enabled_skills:
             data["enabled_skills"] = enabled_skills
@@ -566,6 +596,8 @@ class EventPresenterMixin:
 
     def done(self) -> Dict[str, Any]:
         """输出流结束标记"""
+        # 中文：携带 trace_id 与本次运行的步数/工具调用次数汇总统计，
+        # 供前端/日志把整条 SSE 流与一次完整的 trace 对应起来
         return self._build_event(
             "done",
             {
@@ -584,6 +616,7 @@ class EventPresenterMixin:
         details: Optional[Dict] = None,
     ) -> Dict[str, Any]:
         """输出错误"""
+        # 同样携带 trace_id，便于排查问题时按 trace 关联到具体这次出错的运行
         return self._build_event(
             "error",
             {

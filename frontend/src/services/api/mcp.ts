@@ -1,5 +1,11 @@
 /**
  * MCP API - MCP Server Management
+ *
+ * MCP（Model Context Protocol）服务器与工具管理。注意两套端点的区分：
+ *   - 用户级：/api/mcp/...（管理自己的服务器、发现/开关工具）
+ *   - 系统级(管理员)：/api/admin/mcp/...（updateSystem/deleteSystem/toggleSystemTool/
+ *     updateToolPolicy 等，影响全局）
+ * 调用方需按当前用户权限选择对应方法。
  */
 
 import type {
@@ -139,6 +145,8 @@ export const mcpApi = {
 
   /**
    * Toggle a specific tool's enabled status
+   * 开关某服务器下的单个工具。level 区分作用域："user" 仅对当前用户生效，
+   * "system" 影响系统级默认（需相应权限）。
    */
   async toggleTool(
     serverName: string,

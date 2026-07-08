@@ -6,6 +6,10 @@
  * - /api/skills/{name}/files/{path} - read/write individual files
  * - /api/skills/{name}/toggle - enable/disable
  * - /api/marketplace/ - browse and install from marketplace
+ *
+ * 说明：一个技能是「一组文件」（至少含 SKILL.md）。因此 create/update 不是单次请求，
+ * 而是对各文件逐个 PUT/DELETE；为尽量保证原子性，create 在中途失败时会回滚已写文件。
+ * 还支持从 ZIP、GitHub 仓库导入以及发布到市场。所有路径段都做了 encodeURIComponent。
  */
 
 import { API_BASE } from "./config";
@@ -31,6 +35,7 @@ export interface SkillListParams {
   tags?: string[];
 }
 
+// 构造技能列表 URL：支持分页(skip/limit)、关键字(q)、以及可重复的多标签(tags)过滤。
 export function buildSkillListUrl(params: SkillListParams = {}): string {
   const searchParams = new URLSearchParams();
   if (params.skip !== undefined) searchParams.set("skip", String(params.skip));
@@ -119,6 +124,8 @@ export const skillApi = {
   /**
    * Create skill - writes all files to /api/skills/{name}/files/{path}
    * Files are written sequentially; on failure, already-written files are rolled back.
+   * 创建技能：把「显式 files 字典」或「单一 content 作为 SKILL.md」逐个文件顺序写入。
+   * 若中途某个文件写失败，则并发删除此前已写成功的文件做回滚，避免留下半成品技能。
    */
   async create(data: SkillCreate): Promise<{ message: string }> {
     // Build files dict from content (SKILL.md) or explicit files
@@ -170,6 +177,8 @@ export const skillApi = {
   /**
    * Update skill metadata and content
    * Files are written/deleted sequentially to avoid partial failure leaving inconsistent state.
+   * 更新技能：兼容旧版单文件模式(仅传 content 时写 SKILL.md)；新版可批量写 files、
+   * 删除 deletedFiles；最后若传了 enabled 再调 toggle 同步启用状态。各步骤顺序执行。
    */
   async update(
     skillName: string,

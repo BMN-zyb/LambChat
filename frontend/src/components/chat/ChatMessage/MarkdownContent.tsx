@@ -22,6 +22,7 @@ import { useSessionImageGallery } from "./sessionImageGallery";
 import { ImageWithSkeleton } from "./ImageWithSkeleton";
 import { normalizeMarkdownCodeFences } from "./markdownCodeFences";
 
+// 递归提取 React 节点里的纯文本（用于生成标题锚点、判断文件链接文本等）
 function extractNodeText(node: React.ReactNode): string {
   if (typeof node === "string" || typeof node === "number") {
     return String(node);
@@ -38,6 +39,7 @@ function extractNodeText(node: React.ReactNode): string {
   return "";
 }
 
+// 为标题生成锚点 id：结合消息/part 上下文与标题文本，供大纲面板定位跳转
 function getHeadingAnchorId({
   children,
   headingAnchorContext,
@@ -62,6 +64,7 @@ function getHeadingAnchorId({
   });
 }
 
+// 代码块组件：mermaid 图表单独渲染；行内代码点击即复制；块级代码带语言标签、复制按钮与 CodeMirror 高亮
 // Code block component with copy button and enhanced styling
 function CodeBlock({
   className,
@@ -159,6 +162,7 @@ function CodeBlock({
   );
 }
 
+// 表格块：带工具栏，可将表格复制为对齐的 Markdown，或导出为 CSV 文件
 // Table block with copy & export toolbar
 function TableBlock({ children }: { children: React.ReactNode }) {
   const { t } = useTranslation();
@@ -272,6 +276,9 @@ function TableBlock({ children }: { children: React.ReactNode }) {
   );
 }
 
+// Markdown 渲染组件（带样式、记忆化）：用 ReactMarkdown + remark/rehype 插件（GFM、换行、数学公式）。
+// 通过 components 覆盖各元素渲染：标题带锚点、代码块/表格用自定义组件、
+// 文件链接拦截为站内预览、图片点击进画廊灯箱。
 // Markdown content rendering component - styled version
 export const MarkdownContent = memo(function MarkdownContent({
   content,
@@ -397,6 +404,7 @@ export const MarkdownContent = memo(function MarkdownContent({
               </div>
             </blockquote>
           ),
+          // 链接：命中「可预览文件」时拦截为站内预览，否则普通新标签打开
           // Links with hover effects
           a: ({ href, children }) => {
             if (href) {
@@ -457,6 +465,7 @@ export const MarkdownContent = memo(function MarkdownContent({
               {children}
             </em>
           ),
+          // 代码：根据是否在 <pre> 内及是否带语言类名判断行内/块级，统一交给 CodeBlock
           // Code blocks
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           code: (props: any) => {
@@ -542,6 +551,7 @@ export const MarkdownContent = memo(function MarkdownContent({
   );
 });
 
+// 按最大长度截断文本并追加省略号
 // eslint-disable-next-line react-refresh/only-export-components
 export function truncateText(text: string, maxLength: number): string {
   if (text.length <= maxLength) return text;

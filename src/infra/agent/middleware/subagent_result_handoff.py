@@ -20,6 +20,7 @@ from src.infra.async_utils import run_blocking_io
 logger = logging.getLogger(__name__)
 
 _REPORT_TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M:%S %z"
+# 从报告文本里提取活动日志路径的正则（活动中间件写入的引用行）
 _ACTIVITY_LOG_RE = re.compile(r"Activity log saved to:\s*([^\]\s]+)")
 
 
@@ -37,12 +38,14 @@ class SubagentResultHandoffMiddleware(AgentMiddleware):
         self._run_id_factory = run_id_factory or (lambda: uuid.uuid4().hex[:8])
 
     def _get_backend(self, runtime: Any) -> Any:
+        # backend 可为实例或按 runtime 解析的工厂
         if callable(self._backend):
             return self._backend(runtime)
         return self._backend
 
     @staticmethod
     async def _content_to_text(content: Any) -> str:
+        # 把消息内容规整为文本（字符串直用，块列表取 text/序列化，其余 JSON/str）
         if isinstance(content, str):
             return content
         if isinstance(content, list):
@@ -65,6 +68,8 @@ class SubagentResultHandoffMiddleware(AgentMiddleware):
 
     @staticmethod
     def _copy_tool_message_with_content(message: ToolMessage, content: str) -> ToolMessage:
+        # 复制 ToolMessage 并替换 content；把原始内容存入 lambchat_original_content
+        # （事件层 subagents.py 会读取该字段还原展示给用户的原文）
         additional_kwargs = dict(message.additional_kwargs)
         additional_kwargs.setdefault("lambchat_original_content", message.content)
         return ToolMessage(
@@ -80,6 +85,7 @@ class SubagentResultHandoffMiddleware(AgentMiddleware):
 
     @staticmethod
     def _extract_command_tool_message(command: Command) -> ToolMessage | None:
+        # 从 Command.update.messages 里取出首条 ToolMessage（子 agent 结果常包在 Command 里）
         update = command.update
         if not isinstance(update, dict):
             return None
@@ -91,6 +97,7 @@ class SubagentResultHandoffMiddleware(AgentMiddleware):
 
     @staticmethod
     def _replace_command_tool_message(command: Command, message: ToolMessage) -> Command:
+        # 用替换后的 ToolMessage 生成新的 Command（保留 graph/resume/goto）
         update = command.update
         if not isinstance(update, dict):
             return command
@@ -103,10 +110,12 @@ class SubagentResultHandoffMiddleware(AgentMiddleware):
 
     @staticmethod
     def _handoff_reference(path: str, report_text: str = "") -> str:
+        # 生成交接引用文案：指向报告文件，并透传其中提到的活动日志路径
         reference = (
             f"Subagent report saved to: {path}\n"
             "Read this file before synthesizing or relying on the subagent result."
         )
+        # 从原报告里抽取活动日志路径去重后一并附上
         activity_paths = _ACTIVITY_LOG_RE.findall(report_text)
         if activity_paths:
             unique_paths = list(dict.fromkeys(activity_paths))
@@ -114,13 +123,16 @@ class SubagentResultHandoffMiddleware(AgentMiddleware):
         return reference
 
     async def _write_report(self, request: Any, message: ToolMessage) -> str | None:
+        # 把子 agent 的最终报告写入交接目录，返回文件路径
         args = getattr(request, "tool_call", {}).get("args", {}) or {}
         subagent_type = args.get("subagent_type", "unknown")
         description = args.get("description", "")
         report_text = (await self._content_to_text(message.content)).strip()
+        # 空报告不落盘
         if not report_text:
             return None
 
+        # 组装含类型/任务/正文的 markdown 报告
         run_id = self._run_id_factory()
         content = (
             f"# Subagent Report (run: {run_id})\n"
@@ -145,11 +157,13 @@ class SubagentResultHandoffMiddleware(AgentMiddleware):
         request: Any,
         handler: Callable[[Any], Awaitable[Any]],
     ) -> Any:
+        # 只处理 task（子 agent）工具的返回结果
         result = await handler(request)
         tool_call = getattr(request, "tool_call", {}) or {}
         if tool_call.get("name") != "task":
             return result
 
+        # 结果为 Command：取出其中的 ToolMessage，写报告后用引用文案替换其内容
         if isinstance(result, Command):
             message = self._extract_command_tool_message(result)
             if message is None:
@@ -165,6 +179,7 @@ class SubagentResultHandoffMiddleware(AgentMiddleware):
                 ),
             )
 
+        # 结果直接是 ToolMessage：同样写报告并替换为引用文案
         if isinstance(result, ToolMessage):
             path = await self._write_report(request, result)
             if not path:

@@ -47,6 +47,9 @@ logger = get_logger(__name__)
 # ============================================================================
 
 
+# @register_agent("search") 把本类登记进全局 Agent 注册表（见 core/base.py），
+# 之后即可用 agent_id "search" 取到它。SearchAgent 继承 BaseGraphAgent，
+# 是 fast / search / team 三个 agent 之一，负责"搜索"（带联网搜索能力）。
 @register_agent("search")
 class SearchAgent(BaseGraphAgent):
     """
@@ -56,8 +59,10 @@ class SearchAgent(BaseGraphAgent):
     可扩展：检索节点、记忆节点、规划节点等。
     """
 
+    # 以下为 Agent 目录元数据：供 AgentFactory.list_agents 汇总、前端渲染与 i18n 使用
     _agent_id = "search"
     _agent_name = "Search Agent"
+    # _name_key / _description_key 是前端国际化用的翻译键
     _name_key = "agents.search.name"
     _description = "基于 LangGraph 的搜索和执行 Agent"
     _description_key = "agents.search.description"
@@ -66,6 +71,8 @@ class SearchAgent(BaseGraphAgent):
     _supports_sandbox = True  # 支持沙箱环境
     # Agent 选项配置（供前端渲染）
     _options = {
+        # 思考强度选项 off/low/medium/high/max：仅对支持思考的模型生效，
+        # 运行时由 nodes.py 的 build_thinking_config 解析成模型的 thinking 配置
         "enable_thinking": {
             "type": "string",
             "default": "off",
@@ -82,6 +89,7 @@ class SearchAgent(BaseGraphAgent):
                 {"value": "max", "label_key": "agentOptions.enableThinking.options.max"},
             ],
         },
+        # 代码解释器开关：在隔离解释器中运行轻量 JS/TS（见 create_code_interpreter_middleware）
         "enable_code_interpreter": {
             "type": "boolean",
             "default": False,
@@ -93,6 +101,7 @@ class SearchAgent(BaseGraphAgent):
         },
     }
 
+    # 声明本 Agent 的外层 State 类型；GraphBuilder / StateGraph 用它作为状态 Schema
     @property
     def state_class(self) -> type:
         return SearchAgentState
@@ -107,8 +116,12 @@ class SearchAgent(BaseGraphAgent):
         - START -> retrieve_node -> agent_node -> END
         - START -> plan_node -> agent_node -> summarize_node -> END
         """
+        # 外层薄壳只挂一个 agent 节点：真正的 ReAct 循环在 agent_node 内部由
+        # deepagents 的内层 graph 承担（见 nodes.py），外层几乎不含业务逻辑
         builder.add_node("agent", agent_node)
+        # 设置入口点（内部会连成 START -> agent）
         builder.set_entry_point("agent")
+        # agent 执行完直接结束（agent -> END）
         builder.add_edge("agent", "END")
 
     async def initialize(self) -> None:
@@ -123,6 +136,8 @@ class SearchAgent(BaseGraphAgent):
         # thread id so it cannot collide with the inner graph's message state.
         builder = GraphBuilder(self.state_class)
         self.build_graph(builder)
+        # checkpointer=None：外层不做持久化，历史全部交给内层 deep agent 的 checkpointer；
+        # recursion_limit 限制单会话最大步数，防止无限循环
         self._graph = builder.compile(
             checkpointer=None,
             recursion_limit=settings.SESSION_MAX_RUNS_PER_SESSION,
@@ -150,6 +165,7 @@ class SearchAgent(BaseGraphAgent):
         if not self._initialized:
             await self.initialize()
 
+        # 设置线程内的用户 / 会话上下文，供后续 backend 与工具读取
         set_user_context(user_id or "default", session_id)
 
         # 如果没有传入 presenter，创建一个仅用于生成事件的
@@ -165,6 +181,7 @@ class SearchAgent(BaseGraphAgent):
             )
 
         # 创建并初始化 SearchAgentContext
+        # 从 kwargs 取出禁用 / 启用配置，构建运行时上下文；setup() 负责装配基础工具与技能
         disabled_tools = kwargs.get("disabled_tools")
         disabled_skills = kwargs.get("disabled_skills")
         enabled_skills = kwargs.get("enabled_skills")
@@ -205,6 +222,8 @@ class SearchAgent(BaseGraphAgent):
             langsmith_context,
         )
 
+        # 构建 RunnableConfig：thread_id 作为 checkpoint 主键；
+        # configurable 里塞入 presenter / context / 各类选项，供 agent_node 及工具读取
         config: RunnableConfig = {
             "configurable": {
                 "thread_id": session_id,
@@ -226,6 +245,7 @@ class SearchAgent(BaseGraphAgent):
         }
 
         # 初始状态
+        # messages 传空：历史由 agent_node 内层 deep_agent 的 checkpointer 维护，避免重复注入
         attachments = kwargs.get("attachments", [])
         initial_state = {
             "input": message,
@@ -242,10 +262,12 @@ class SearchAgent(BaseGraphAgent):
             # 直接执行 graph（用 ainvoke 而非 astream，因为不需要处理流式事件）
             # 事件由 agent_node 内部通过 presenter.emit 直接保存
             graph_task = asyncio.ensure_future(self._graph.ainvoke(initial_state, config))
+            # 登记任务句柄，便于 close() / 取消时能找到并 cancel
             self._stream_tasks[presenter.run_id] = graph_task
 
             await graph_task
 
+        # 请求被取消：确保底层 graph 任务也被取消后再向上抛出
         except asyncio.CancelledError:
             if not graph_task.done():
                 graph_task.cancel()
@@ -255,6 +277,7 @@ class SearchAgent(BaseGraphAgent):
                     pass
             raise
 
+        # 任务被中断（如用户主动停止）：同样先取消底层任务再抛出
         except TaskInterruptedError:
             if not graph_task.done():
                 graph_task.cancel()
@@ -264,6 +287,7 @@ class SearchAgent(BaseGraphAgent):
                     pass
             raise
 
+        # 其他异常：错误事件已在内部处理，这里再补发一条 error 给 manager 后重新抛出
         except Exception as e:
             # 错误事件由 agent_node 内部处理，这里只 yield 给 manager
             yield presenter.error(str(e), type(e).__name__)
@@ -283,6 +307,7 @@ class SearchAgent(BaseGraphAgent):
                         "ended_at": datetime.now(timezone.utc).isoformat(),
                     },
                 }
+            # 无论成功或异常，都要注销任务句柄并关闭上下文
             self._stream_tasks.pop(presenter.run_id, None)
             await context.close()
 

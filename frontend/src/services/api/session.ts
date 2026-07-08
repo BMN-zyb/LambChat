@@ -1,5 +1,8 @@
 /**
  * Session API - 会话管理
+ *
+ * 会话领域客户端：增删改查、事件/运行记录、生成标题、收藏/已读、消息分叉与检查点等。
+ * 所有请求走 authFetch（自动鉴权+刷新）。部分 URL 抽成独立 build* 函数便于复用与测试。
  */
 
 import type {
@@ -43,6 +46,8 @@ export interface RunGoalSpec {
   max_iterations?: number;
 }
 
+// 以下三个 URL 构造函数对应「消息分叉 / 从消息建检查点 / 从检查点分叉」，
+// 用于对话树的分支与回溯能力。
 export function buildMessageForkUrl(
   sessionId: string,
   messageId: string,
@@ -64,11 +69,16 @@ export function buildCheckpointForkUrl(
   return `${API_BASE}/api/sessions/${sessionId}/checkpoints/${checkpointId}/fork`;
 }
 
+// 读取浏览器时区（如 "Asia/Shanghai"）；无法解析时返回 undefined。
+// 随聊天请求上报，供后端做时间相关的本地化处理。
 function getBrowserTimezone(): string | undefined {
   const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
   return typeof timezone === "string" && timezone.trim() ? timezone : undefined;
 }
 
+// 组装「提交聊天」的请求体：把前端各种可选参数（附件、启用/禁用的技能、禁用的 MCP
+// 工具、人设预设、项目/团队、目标 goal 等）映射为后端字段名(snake_case)。
+// 仅在有值时才写入可选字段，避免给后端传一堆 undefined/空值。
 export function buildSubmitChatBody({
   message,
   sessionId,
@@ -168,6 +178,7 @@ export const sessionApi = {
 
   /**
    * Get a session
+   * 获取单个会话；后端 404 时吞掉并返回 null（会话可能已删除），其它错误继续抛出。
    */
   async get(sessionId: string): Promise<BackendSession | null> {
     try {
@@ -300,6 +311,8 @@ export const sessionApi = {
 
   /**
    * Submit a chat message (returns immediately)
+   * 提交一条聊天消息：POST /api/chat/stream。注意这里是「立即返回」run_id/trace_id 等，
+   * 真正的流式增量输出由另外的 SSE/WS 连接消费；自动附带浏览器时区。
    */
   async submitChat(
     agentId: string,

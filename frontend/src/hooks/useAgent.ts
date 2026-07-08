@@ -2,6 +2,11 @@
  * Main useAgent hook
  * Provides agent communication, message management, and SSE streaming
  */
+// 【驱动整个聊天的核心 hook】统一管理：agent 列表与选择、消息状态、SSE 流式收发、
+// 历史加载、目标模式、发送/停止/清空等操作，并把这些能力打包成 UseAgentReturn 提供给 UI。
+// 大量「跨渲染保持的状态」放在 ref 中（如连接控制器、去重集合、子 agent 栈、最新消息镜像），
+// 以便在 SSE 异步回调里读到最新值、且不因每次渲染而重建连接。具体的 SSE 连接、事件处理、
+// 事件→parts 转换、历史重建等已拆分到 ./useAgent/ 下的子模块，本文件负责编排与 React 状态。
 
 import { useState, useCallback, useRef, useEffect } from "react";
 import toast from "react-hot-toast";
@@ -49,14 +54,19 @@ import { translateBackendError } from "../utils/backendErrors";
 import { dispatchSessionTitleUpdated } from "../utils/sessionTitleEvents";
 import { resolveAvailableAgentId } from "./useAgent/agentSelection";
 
+// useAgent：聊天引擎主 hook。options 提供外层注入的回调与取值函数（见 UseAgentOptions），
+// 返回聊天状态与操作集合（见 UseAgentReturn）。
 export function useAgent(options?: UseAgentOptions): UseAgentReturn {
   const { hasAnyPermission } = useAuth();
+  // 是否有权限读取反馈（用于加载历史时附带 like/dislike 状态）
   const canReadFeedback = hasAnyPermission([
     Permission.FEEDBACK_READ,
     Permission.FEEDBACK_WRITE,
   ]);
 
   // State
+  // React 状态：消息列表、加载态、会话/运行标识、agent 列表与选择、连接状态、
+  // 目标模式与沙箱状态等，均驱动 UI 渲染
   const [messages, setMessages] = useState<Message[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [isLoadingHistory, setIsLoadingHistory] = useState(false);
@@ -80,6 +90,7 @@ export function useAgent(options?: UseAgentOptions): UseAgentReturn {
     Record<string, ActiveGoalSpec>
   >({});
   const [goalModeEnabled, setGoalModeEnabled] = useState(false);
+  // 自动模式开关：初始值从 localStorage 恢复（读取失败则默认关闭）
   const [autoModeEnabled, setAutoModeEnabled] = useState(() => {
     try {
       return localStorage.getItem("lamb-chat-auto-mode") === "true";
@@ -89,6 +100,7 @@ export function useAgent(options?: UseAgentOptions): UseAgentReturn {
   });
 
   // Persist autoModeEnabled to localStorage
+  // 自动模式变化时持久化到 localStorage
   useEffect(() => {
     try {
       localStorage.setItem("lamb-chat-auto-mode", String(autoModeEnabled));
@@ -98,6 +110,9 @@ export function useAgent(options?: UseAgentOptions): UseAgentReturn {
   }, [autoModeEnabled]);
 
   // Refs for connection management
+  // 连接管理相关的 ref（跨渲染保持，不触发重渲染）：
+  // 中止控制器、待用/自动展开的项目 ID、连接中/加载历史中/发送中标志、历史加载请求序号、
+  // 重连定时器与重试计数
   const abortControllerRef = useRef<AbortController | null>(null);
   const pendingProjectIdRef = useRef<string | null>(null);
   const autoExpandProjectIdRef = useRef<string | null>(null);
@@ -126,9 +141,11 @@ export function useAgent(options?: UseAgentOptions): UseAgentReturn {
   const isReconnectFromHistoryRef = useRef<boolean>(false);
 
   // Stream version to invalidate stale SSE events after clearMessages
+  // 流版本号：clearMessages 时自增，用于让「清空后仍在途」的旧 SSE 事件失效被丢弃
   const streamVersionRef = useRef(0);
 
   // Keep sessionId/runId in ref for closure access
+  // 把 sessionId/runId/messages 同步进 ref：供 SSE 异步回调读取最新值，规避闭包捕获旧值
   const sessionIdRef = useRef<string | null>(null);
   const currentRunIdRef = useRef<string | null>(null);
   const messagesRef = useRef<Message[]>([]);
@@ -146,6 +163,7 @@ export function useAgent(options?: UseAgentOptions): UseAgentReturn {
   }, [messages]);
 
   // Create event handler context
+  // 构造事件处理上下文：把 options、各 ref 与 state setter 打包，供事件处理器使用
   const createEventHandlerContext = useCallback(
     (): EventHandlerContext => ({
       options,
@@ -167,6 +185,7 @@ export function useAgent(options?: UseAgentOptions): UseAgentReturn {
   );
 
   // Create SSE connection context
+  // 在事件处理上下文之上，再补充 SSE 连接所需的 ref（中止器、重连定时器等）
   const createSSEContext = useCallback(
     (): SSEConnectionContext => ({
       ...createEventHandlerContext(),
@@ -181,12 +200,14 @@ export function useAgent(options?: UseAgentOptions): UseAgentReturn {
   );
 
   // Ref for currentAgent to avoid dependency changes triggering refetch
+  // 用 ref 镜像 currentAgent，避免它作为依赖导致 fetchAgents 反复重建
   const currentAgentRef = useRef(currentAgent);
   useEffect(() => {
     currentAgentRef.current = currentAgent;
   }, [currentAgent]);
 
   // Fetch available agents
+  // 拉取可用 agent 列表与允许的模型；并据当前选择/默认值解析出应选中的 agent
   const fetchAgents = useCallback(async () => {
     setAgentsLoading(true);
     try {
@@ -217,11 +238,13 @@ export function useAgent(options?: UseAgentOptions): UseAgentReturn {
   }, []); // No dependencies - uses ref instead
 
   // Load agents on mount
+  // 挂载时加载一次 agent 列表
   useEffect(() => {
     fetchAgents();
   }, [fetchAgents]);
 
   // Refresh agents when page becomes visible (e.g., switching back to /chat tab)
+  // 页面重新可见时刷新 agent 列表（例如从其它标签页切回 /chat）
   useEffect(() => {
     const handleVisibilityChange = () => {
       if (document.visibilityState === "visible") {
@@ -236,6 +259,7 @@ export function useAgent(options?: UseAgentOptions): UseAgentReturn {
   }, [fetchAgents]);
 
   // Listen for agent preference updates to refresh agents list and apply new default
+  // 监听「agent 偏好已更新」事件：重新拉取列表，并在无进行中会话时应用新的默认 agent
   useEffect(() => {
     const handleAgentPreferenceUpdated = async () => {
       // Fetch fresh agents data
@@ -286,6 +310,7 @@ export function useAgent(options?: UseAgentOptions): UseAgentReturn {
   }, []);
 
   // Cleanup on unmount
+  // 卸载时清理：中止连接并取消待执行的重连定时器
   useEffect(() => {
     return () => {
       if (abortControllerRef.current) {
@@ -296,8 +321,13 @@ export function useAgent(options?: UseAgentOptions): UseAgentReturn {
   }, []);
 
   // Load message history from backend
+  // 从后端加载并重建历史会话消息。
+  // 参数：targetSessionId 会话 ID，可选 targetRunId 指定运行。返回从 metadata 还原的 SessionConfig（供 UI 恢复配置）。
+  // 难点：用递增的 requestId 做「过期请求」保护——切换会话时旧请求的结果会被丢弃；
+  // events/status/feedback 三个请求并行发起以减少等待；若任务仍在运行则重建后再后台重连 SSE。
   const loadHistory = useCallback(
     async (targetSessionId: string, targetRunId?: string) => {
+      // 每次调用自增请求号；后续用 isStaleHistoryLoad() 判断本次结果是否已被更新的加载覆盖
       loadHistoryRequestIdRef.current += 1;
       const requestId = loadHistoryRequestIdRef.current;
       const isStaleHistoryLoad = () =>
@@ -323,6 +353,7 @@ export function useAgent(options?: UseAgentOptions): UseAgentReturn {
       setMessages([]);
       setError(null);
 
+      // 重置去重集合与历史时间戳水位，避免上一个会话的状态串扰
       processedEventIdsRef.current.clear();
       lastHistoryTimestampRef.current = null;
       const markReadPromise = sessionApi
@@ -411,6 +442,7 @@ export function useAgent(options?: UseAgentOptions): UseAgentReturn {
               statusData.status === "running";
           }
 
+          // 有历史事件：重建消息、附加反馈、恢复目标状态
           if (eventsData.events && eventsData.events.length > 0) {
             let reconstructedMessages = reconstructMessagesFromEvents(
               eventsData.events as HistoryEvent[],
@@ -462,6 +494,8 @@ export function useAgent(options?: UseAgentOptions): UseAgentReturn {
             // When the task is still running, target the assistant message for
             // that same run. If history has the user message but no assistant
             // events yet, append a fresh assistant bubble after the latest user.
+            // 任务仍在运行：定位/准备该 run 对应的流式 assistant 消息，随后「发射即忘」地后台重连 SSE，
+            // 让 loadHistory 能立刻返回 sessionConfig，不被长连接阻塞
             if (isTaskRunning && currentRunId) {
               setCurrentRunId(currentRunId);
 
@@ -494,6 +528,7 @@ export function useAgent(options?: UseAgentOptions): UseAgentReturn {
               setMessages(reconstructedMessages);
             }
           } else {
+            // 无历史事件：清空消息与目标；若任务仍在运行则新建流式占位并后台重连 SSE
             setMessages([]);
             setActiveGoal(null);
             setGoalsByRunId({});
@@ -533,6 +568,7 @@ export function useAgent(options?: UseAgentOptions): UseAgentReturn {
         console.error("Failed to load session:", err);
         setError(i18n.t("chat.requestFailed"));
       } finally {
+        // 仅当本次加载未被更新的请求取代时才收尾状态（避免过期请求覆盖最新加载的 UI 态）
         if (!isStaleHistoryLoad()) {
           setIsLoading(false);
           setIsLoadingHistory(false);
@@ -546,6 +582,10 @@ export function useAgent(options?: UseAgentOptions): UseAgentReturn {
   );
 
   // Send message
+  // 发送消息的主流程：
+  // 1) 目标模式命令解析（可能只切换目标而不真正发送）；2) 去抖/中止旧连接；3) 插入乐观消息；
+  // 4) 组装工具/技能/人设/模型等选项并调用 submitChat；5) 用返回的 session_id/run_id 回填消息与会话元数据；
+  // 6) 建立 SSE 连接接收流式回复。参数：content 文本、agentOptions 运行选项、attachments 附件、runOptions 单次技能覆盖。
   const sendMessage = useCallback(
     async (
       content: string,
@@ -554,8 +594,10 @@ export function useAgent(options?: UseAgentOptions): UseAgentReturn {
       runOptions?: { enabledSkills?: string[] },
     ) => {
       if (!content.trim()) return;
+      // 递增历史请求号，使任何进行中的历史加载结果作废（避免与本次发送竞争）
       loadHistoryRequestIdRef.current += 1;
 
+      // 解析目标模式：clear/invalid 等「无需发送」的情况在此直接处理并返回
       const goalPlan = planGoalSubmission(content, goalModeEnabled);
       if (goalPlan.handledWithoutSend) {
         if (goalPlan.errorKey) {
@@ -571,6 +613,7 @@ export function useAgent(options?: UseAgentOptions): UseAgentReturn {
       setGoalModeEnabled(goalPlan.nextGoalModeEnabled);
       setActiveGoal(goalPlan.nextActiveGoal);
 
+      // 发送去重：同一时刻只允许一次发送在途
       if (isSendingRef.current) {
         console.log(
           "[sendMessage] Already sending, ignoring duplicate request",
@@ -589,6 +632,7 @@ export function useAgent(options?: UseAgentOptions): UseAgentReturn {
       processedEventIdsRef.current.clear();
       lastHistoryTimestampRef.current = null;
 
+      // 乐观更新：立即插入用户消息 + 空的流式 assistant 占位，先给出反馈再等后端
       const { messages: optimisticMessages, assistantMessageId } =
         createOptimisticMessagesForSend({
           previousMessages: messagesRef.current,
@@ -619,6 +663,7 @@ export function useAgent(options?: UseAgentOptions): UseAgentReturn {
         const disabledMcpTools = options?.getDisabledMcpTools?.() || [];
 
         // Merge session-level agent options (e.g. model) with ChatInput values
+        // 合并会话级 agent 选项（如模型）与本次输入框传入的选项
         const fullAgentOptions = {
           ...options?.getAgentOptions?.(),
           ...agentOptions,
@@ -626,6 +671,7 @@ export function useAgent(options?: UseAgentOptions): UseAgentReturn {
         const requestTeamId = currentAgent === "team" ? selectedTeamId : null;
         const goalForRun = goalPlan.goal;
 
+        // 提交聊天请求，后端返回本次的 session_id / run_id / 队列状态等
         const submitData = (await sessionApi.submitChat(
           currentAgent,
           content,
@@ -674,6 +720,7 @@ export function useAgent(options?: UseAgentOptions): UseAgentReturn {
         pendingProjectIdRef.current = null;
 
         // Handle queued status — show toast and wait via SSE
+        // 排队状态：提示排队位置，后续通过 SSE 的 queue_update 等待轮到
         if (submitData.status === "queued") {
           toast.loading(
             i18n.t("chat.queued", { position: submitData.queue_position }),
@@ -681,6 +728,7 @@ export function useAgent(options?: UseAgentOptions): UseAgentReturn {
           );
         }
 
+        // 新建会话（首条消息）：记录 session、构建会话元数据（配置快照），并异步生成会话标题
         if (!sessionId && newSessionId) {
           setSessionId(newSessionId);
           const now = new Date().toISOString();
@@ -760,6 +808,7 @@ export function useAgent(options?: UseAgentOptions): UseAgentReturn {
               : null,
           );
         }
+        // 用真实 run_id 替换乐观 assistant 消息的临时 ID，使后续 SSE 事件能匹配到它
         if (newRunId) {
           setCurrentRunId(newRunId);
           setMessages((prev) =>
@@ -785,6 +834,7 @@ export function useAgent(options?: UseAgentOptions): UseAgentReturn {
 
         isReconnectFromHistoryRef.current = false;
         const ctx = createSSEContext();
+        // 建立 SSE 连接，开始接收本次运行的流式回复
         await connectToSSE(
           streamSessionId,
           streamRunId,
@@ -792,6 +842,7 @@ export function useAgent(options?: UseAgentOptions): UseAgentReturn {
           ctx,
         );
       } catch (err) {
+        // 主动中止不算错误；其余错误：写入 assistant 消息、清理 loading 并断开连接
         if (err instanceof Error && err.name === "AbortError") {
           return;
         }
@@ -830,6 +881,7 @@ export function useAgent(options?: UseAgentOptions): UseAgentReturn {
     ],
   );
 
+  // 停止生成：复位发送/加载/沙箱态，清空审批与所有消息的 loading 占位，并调用后端取消接口
   const stopGeneration = useCallback(async () => {
     isSendingRef.current = false;
     setIsLoading(false);
@@ -861,6 +913,7 @@ export function useAgent(options?: UseAgentOptions): UseAgentReturn {
     }
   }, [options]);
 
+  // 清空会话：重置所有消息与连接状态，并自增 streamVersion 使在途 SSE 事件全部作废
   const clearMessages = useCallback(() => {
     loadHistoryRequestIdRef.current += 1;
     streamVersionRef.current += 1;
@@ -889,11 +942,13 @@ export function useAgent(options?: UseAgentOptions): UseAgentReturn {
     clearReconnectTimeout(reconnectTimeoutRef);
   }, []);
 
+  // 清除当前激活目标并关闭目标模式
   const clearActiveGoal = useCallback(() => {
     setGoalModeEnabled(false);
     setActiveGoal(null);
   }, []);
 
+  // 选择 agent：切换后清空当前会话（开启新对话）
   const selectAgent = useCallback(
     (agentId: string) => {
       setCurrentAgent(agentId);
@@ -903,16 +958,19 @@ export function useAgent(options?: UseAgentOptions): UseAgentReturn {
   );
 
   // Switch agent without clearing messages (for mode toggling)
+  // 切换 agent 但不清空消息（用于模式切换，如普通/团队模式来回切）
   const switchAgent = useCallback((agentId: string) => {
     setCurrentAgent(agentId);
   }, []);
 
   // Select a team for team-mode agent
+  // 为「团队模式」选择具体团队
   const selectTeam = useCallback((teamId: string | null) => {
     setSelectedTeamId(teamId);
   }, []);
 
   // Reconnect function (managed by useSSEReconnect hook)
+  // 手动/自动重连函数（由 useSSEReconnect 管理可见性与网络事件触发）
   const handleReconnectSSE = useSSEReconnect({
     createSSEContext,
     sessionIdRef,
@@ -923,6 +981,7 @@ export function useAgent(options?: UseAgentOptions): UseAgentReturn {
     setConnectionStatus,
   });
 
+  // 对外返回聊天状态与操作集合（契约见 UseAgentReturn），供 UI 组件消费
   return {
     messages,
     isLoading,

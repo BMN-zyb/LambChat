@@ -32,33 +32,40 @@ class ChannelCoordinator:
             message_handler: Async callback for incoming messages from all channels.
         """
         self.message_handler = message_handler
+        # 按渠道类型持有各自的 UserChannelManager（每种类型一个）。
         self._managers: dict[ChannelType, UserChannelManager] = {}
         self._running = False
 
     async def start(self) -> None:
         """Start all enabled channel managers."""
+        # 幂等保护：已在运行则直接返回，避免重复启动。
         if self._running:
             return
 
         self._running = True
+        # 从注册表拿到所有已自动发现的渠道管理器类，逐一实例化并启动。
         registry = get_registry()
 
         for channel_type, manager_cls in registry.get_all_managers().items():
             try:
+                # 注册表以字符串登记，这里转回枚举；非法字符串会抛 ValueError。
                 channel_type_enum = ChannelType(channel_type)
                 manager = manager_cls(message_handler=self.message_handler)
                 await manager.start()
                 self._managers[channel_type_enum] = manager
                 logger.info(f"Started {channel_type} channel manager")
             except ValueError:
+                # 注册表里出现了未知/未定义的渠道类型：跳过而非中断整体启动。
                 logger.debug(f"Unknown channel type: {channel_type}")
             except Exception as e:
+                # 单个渠道管理器启动失败不影响其它渠道，仅记录错误。
                 logger.error(f"Failed to start {channel_type} channel manager: {e}")
 
     async def stop(self) -> None:
         """Stop all channel managers."""
         self._running = False
 
+        # 逐个停止各渠道管理器；单个失败不阻断其余，最后统一清空。
         for channel_type, manager in self._managers.items():
             try:
                 await manager.stop()
@@ -107,6 +114,7 @@ class ChannelCoordinator:
         Returns:
             True if sent successfully, False otherwise.
         """
+        # 发送前两级校验：先按类型找到管理器，再按 user_id/instance_id 找到具体渠道实例。
         manager = self._managers.get(channel_type)
         if not manager:
             logger.warning(f"No manager for channel type: {channel_type}")
@@ -143,6 +151,7 @@ class ChannelCoordinator:
 
 
 # Global instance
+# 进程级全局协调器单例（懒创建），使整个应用共享同一套渠道管理状态。
 _coordinator: Optional[ChannelCoordinator] = None
 
 
@@ -156,6 +165,7 @@ def get_channel_coordinator() -> ChannelCoordinator:
 
 async def start_channels(message_handler: Optional[Callable] = None) -> None:
     """Start the channel coordinator with all enabled channels."""
+    # 便捷入口：取全局协调器、注入消息处理回调并启动所有渠道。
     coordinator = get_channel_coordinator()
     coordinator.message_handler = message_handler
     await coordinator.start()
@@ -163,6 +173,7 @@ async def start_channels(message_handler: Optional[Callable] = None) -> None:
 
 async def stop_channels() -> None:
     """Stop the channel coordinator."""
+    # 停止并释放全局协调器（置 None 以便下次可重新创建）。
     global _coordinator
     if _coordinator:
         await _coordinator.stop()

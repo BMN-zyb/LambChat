@@ -12,6 +12,8 @@ class BaseService(ABC):
     所有第三方服务的抽象基类。
     """
 
+    # 抽象方法定义了统一的服务生命周期契约:初始化 -> (使用) -> 关闭,外加健康检查。
+    # 子类必须实现这三个方法;三者均为异步,以适配网络/IO 型第三方服务。
     @abstractmethod
     async def initialize(self) -> None:
         """初始化服务"""

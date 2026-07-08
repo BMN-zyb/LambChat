@@ -7,6 +7,14 @@
  * Side effects like subagent stack push/pop, connection status, etc.
  * are handled by the caller based on event type.
  */
+// 【事件 → 消息 parts 的唯一转换核心】
+// 无论是实时流（eventHandlers）还是历史重建（historyLoader），都调用 processMessageEvent
+// 把一个事件「纯函数式」地合并进消息的 parts / content / toolCalls。它不做任何副作用，
+// 只返回新的状态片段，副作用（子 agent 入栈出栈、连接状态、沙箱状态等）由调用方负责。
+//
+// 贯穿全文件的关键概念——按 depth 路由：
+// - depth > 0：事件来自子 agent，统一用 addPartToDepth 将 part 塞进对应子 agent part 的嵌套 children；
+// - depth === 0：主线消息，按 part 类型做累加（thinking/text/summary 拼接）或替换（sandbox/todo 等 upsert）。
 
 import type {
   MessagePart,
@@ -41,6 +49,7 @@ import type { ThinkingPart } from "../../types";
 /**
  * Convert backend attachment format to frontend format.
  */
+// 把后端附件字段（snake_case）转换为前端使用的驼峰命名结构；入参为空则返回 undefined。
 export function convertAttachments(
   attachments?: Array<{
     id: string;
@@ -70,6 +79,8 @@ export function convertAttachments(
 /**
  * Result of processing a message event.
  */
+// 处理单个事件后返回的状态片段：更新后的 parts、正文 content、工具调用列表，
+// 以及可选的工具结果 / token 用量 / 耗时 / 是否被取消（由调用方回写到消息上）。
 export interface ProcessMessageEventResult {
   parts: MessagePart[];
   content: string;
@@ -83,6 +94,10 @@ export interface ProcessMessageEventResult {
 /**
  * Unified message event processor.
  */
+// 统一事件处理器（纯函数）。
+// 参数：eventType 事件类型、data 事件载荷、parts/content/toolCalls 当前消息状态、
+// depth 嵌套深度、subagentStack 子 agent 栈、isStreaming 是否流式中、messageId 消息 ID。
+// 返回：合并事件后的新状态片段（见 ProcessMessageEventResult），不改动入参。
 export function processMessageEvent(
   eventType: string,
   data: EventData,
@@ -94,12 +109,14 @@ export function processMessageEvent(
   isStreaming: boolean,
   messageId?: string,
 ): ProcessMessageEventResult {
+  // 以当前状态为基础构造结果对象，后续按事件类型就地覆盖对应字段后返回
   const result: ProcessMessageEventResult = { parts, content, toolCalls };
   const agentId = data.agent_id;
 
   switch (eventType) {
     // ---- Agent events ----
 
+    // 子 agent 调用开始：创建 subagent part，并按 depth 塞入嵌套结构（记录到子 agent 栈）
     case "agent:call": {
       const subagentPart = createSubagentPart(
         agentId || "unknown",
@@ -120,6 +137,7 @@ export function processMessageEvent(
       break;
     }
 
+    // 子 agent 调用结束：把结果/成功态/错误写回对应的 subagent part
     case "agent:result": {
       result.parts = updateSubagentResult(
         parts,
@@ -135,6 +153,7 @@ export function processMessageEvent(
 
     // ---- Thinking events ----
 
+    // 思考事件：depth>0 归入子 agent；depth===0 时按 thinking_id 找到同一思考块累加文本，否则新建
     case "thinking": {
       const thinkingContent = data.content || "";
       if (!thinkingContent) break;
@@ -161,6 +180,7 @@ export function processMessageEvent(
         let existingIndex = -1;
 
         // Reverse scan: matching thinking part is usually at the end
+        // 从尾部倒序查找同一思考块（流式追加时目标通常就在末尾），命中则累加、否则新增
         for (let i = newParts.length - 1; i >= 0; i--) {
           const p = newParts[i];
           if (p.type === "thinking") {
@@ -193,6 +213,8 @@ export function processMessageEvent(
 
     // ---- Message chunk events ----
 
+    // 正文增量：depth>0 归入子 agent；depth===0 时若上一个是顶层 text part 则拼接，
+    // 否则新建 text part，并同步把增量累加到消息 content
     case "message:chunk": {
       const chunkContent = data.content || "";
       if (!chunkContent) break;
@@ -231,6 +253,7 @@ export function processMessageEvent(
 
     // ---- Tool events ----
 
+    // 工具调用开始：构造 toolCall 与 tool part；depth>0 入嵌套，否则追加到顶层并登记 toolCalls
     case "tool:start": {
       const toolCallId = data.tool_call_id as string | undefined;
       const toolCall: ToolCall = {
@@ -263,6 +286,8 @@ export function processMessageEvent(
       break;
     }
 
+    // 工具结果：有 tool_call_id 或 depth>0 时按 ID 精确回填对应工具 part；
+    // 否则回填「第一个同名且仍 pending」的工具 part，并产出 toolResult 供调用方收集
     case "tool:result": {
       const toolCallId = data.tool_call_id as string | undefined;
       const toolName = data.tool || "";
@@ -316,6 +341,7 @@ export function processMessageEvent(
 
     // ---- Artifact events ----
 
+    // 产物结果：构造 artifact part（含成功态/错误），按 depth 入嵌套或追加到顶层
     case "artifact:result": {
       const artifact = data.artifact as ArtifactPartArtifact | undefined;
       if (!artifact) break;
@@ -347,6 +373,7 @@ export function processMessageEvent(
 
     // ---- Sandbox events ----
 
+    // 沙箱启动中：以单例形式 upsert 一个 sandbox part（保留原有 startedAt）
     case "sandbox:starting": {
       const sandboxPart: SandboxPart = {
         type: "sandbox",
@@ -357,6 +384,7 @@ export function processMessageEvent(
       break;
     }
 
+    // 沙箱就绪：更新 sandbox part 为 ready 状态，带上沙箱 ID 与工作目录
     case "sandbox:ready": {
       const readyPart: SandboxPart = {
         type: "sandbox",
@@ -370,6 +398,7 @@ export function processMessageEvent(
       break;
     }
 
+    // 沙箱错误：更新 sandbox part 为 error 状态并记录错误信息
     case "sandbox:error": {
       const errorPart: SandboxPart = {
         type: "sandbox",
@@ -384,6 +413,7 @@ export function processMessageEvent(
 
     // ---- Token usage ----
 
+    // token 用量：写入 tokenUsage 统计；duration 由后端的秒转为毫秒
     case "token:usage": {
       result.tokenUsage = {
         type: "token_usage",
@@ -403,6 +433,7 @@ export function processMessageEvent(
 
     // ---- Todo events ----
 
+    // 待办更新：depth>0 入嵌套；否则整体替换（待办清单在一条消息中为单例 part）
     case "todo:updated": {
       const todos = (data.todos || []) as TodoPart["items"];
       if (!todos.length) break;
@@ -424,6 +455,7 @@ export function processMessageEvent(
 
     // ---- Summary events ----
 
+    // 摘要：depth>0 入嵌套；否则按 summary_id 找到同一摘要块累加文本，否则新建
     case "summary": {
       const summaryContent = data.content || "";
       if (!summaryContent) break;
@@ -472,6 +504,7 @@ export function processMessageEvent(
 
     // ---- Recommended follow-up questions ----
 
+    // 推荐/追问问题：规范化问题列表后，depth>0 入嵌套，否则整体替换（单例 part）
     case "recommend:questions":
     case "followup:questions": {
       const questions = normalizeRecommendQuestions(data.questions);
@@ -501,6 +534,7 @@ export function processMessageEvent(
 
     // ---- Completion ----
 
+    // 完成：清除所有 loading 占位态（把仍在 pending 的部件收尾）
     case "complete":
     case "done": {
       result.parts = clearAllLoadingStates(parts);
@@ -509,6 +543,7 @@ export function processMessageEvent(
 
     // ---- Error ----
 
+    // 错误：翻译后端错误信息；若为取消则标记 cancelled，否则把正文替换为错误提示
     case "error": {
       const errorMsg = data.error
         ? translateBackendError(data.error, i18n.t.bind(i18n))
@@ -533,6 +568,7 @@ export function processMessageEvent(
 /** Replace existing sandbox part or append if none exists.
  *  Preserves `startedAt` from the previous part so the original
  *  starting timestamp survives across status transitions. */
+// 沙箱 part 单例化：已存在则替换（并沿用旧的 startedAt，使状态切换时保留最初开始时间），否则追加。
 function upsertSandboxPart(
   parts: MessagePart[],
   sandboxPart: SandboxPart,
@@ -556,6 +592,7 @@ function upsertSandboxPart(
 }
 
 /** Replace existing todo part or append if none exists. */
+// 待办 part 单例化：已存在则整体替换为最新待办，否则追加。
 function upsertTodoPart(
   parts: MessagePart[],
   todoPart: TodoPart,
@@ -565,6 +602,8 @@ function upsertTodoPart(
     : [...parts, todoPart];
 }
 
+// 规范化推荐/追问问题：兼容「纯字符串」与「对象（content/text/title + 上传配置）」两种形态，
+// 统一转成 { content, upload? } 并过滤掉空内容项。
 function normalizeRecommendQuestions(
   questions: EventData["questions"],
 ): RecommendQuestion[] {
@@ -593,6 +632,7 @@ function normalizeRecommendQuestions(
     .filter((question): question is RecommendQuestion => question !== null);
 }
 
+// 推荐问题 part 单例化：已存在则替换，否则追加。
 function upsertRecommendQuestionsPart(
   parts: MessagePart[],
   recommendPart: Extract<MessagePart, { type: "recommend_questions" }>,

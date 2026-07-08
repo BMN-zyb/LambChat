@@ -1,3 +1,12 @@
+"""任务恢复与会话续跑（resume）流程。
+
+负责在「进程崩溃 / 服务重启 / 实例失联」后，把中断的任务安全地拉起为新一轮
+run，接着上次的检查点继续。核心难点：
+  - 分布式安全：用 Redis 锁保证同一个中断 run 只被一个实例接管，避免重复恢复；
+  - 名额处理：恢复不应额外占用并发名额，用 claim_recovery_slot「换名」旧 run；
+  - 幂等与回滚：若并未真正启动恢复，要把状态回退成「可恢复的失败」以便后续重试。
+"""
+
 from __future__ import annotations
 
 import asyncio
@@ -23,10 +32,14 @@ from .status import TaskStatus
 
 logger = get_logger(__name__)
 
+# 分布式恢复锁的 key 前缀与 TTL：同一 (session, source_run) 的恢复只允许一个
+# 实例进行，TTL 保证持锁实例崩溃后锁也能自动过期释放。
 RECOVERY_LOCK_PREFIX = "task:recovery:"
 RECOVERY_LOCK_TTL_SECONDS = 300
 
 
+# 从 session.metadata 里解析 enabled_skills：区分「显式空白名单 []」与「缺失/None
+# 表示走全局默认」——只有当 key 存在且确为 list 时才当作白名单，否则返回 None。
 def _get_enabled_skills_from_metadata(session_metadata: dict[str, Any]) -> list[str] | None:
     """Preserve [] as an explicit empty whitelist while treating missing/None as global."""
     if "enabled_skills" not in session_metadata:
@@ -35,6 +48,7 @@ def _get_enabled_skills_from_metadata(session_metadata: dict[str, Any]) -> list[
     return enabled_skills if isinstance(enabled_skills, list) else None
 
 
+# 返回当前已注册的 agent id 集合；注册表为空时先触发一次 discover_agents。
 def _registered_agent_ids() -> set[str]:
     from src.agents import discover_agents
     from src.agents.core import base as agent_base
@@ -44,6 +58,9 @@ def _registered_agent_ids() -> set[str]:
     return set(agent_base._AGENT_REGISTRY)
 
 
+# 解析恢复时应使用的 agent id：优先用会话原本的 agent；若它已不再注册（如被下线），
+# 按 DEFAULT_AGENT -> fast/search/team -> 任意已注册项 的顺序回退，保证恢复不因
+# agent 缺失而失败。
 def _resolve_recovery_agent_id(session_metadata: dict[str, Any], session: Any) -> str:
     candidate = str(
         session_metadata.get("agent_id") or getattr(session, "agent_id", "") or ""
@@ -75,6 +92,9 @@ def _resolve_recovery_agent_id(session_metadata: dict[str, Any], session: Any) -
 class TaskRecoveryService:
     """Coordinates task recovery and session resume flows."""
 
+    # 依赖注入（由 manager 组装）：storage / 共享 run_info / heartbeat / 惰性
+    # executor 工厂，以及提交任务、标记失败等回调。submit_recovery_task 未显式
+    # 提供时退化为 submit_task，便于测试与不同后端复用。
     def __init__(
         self,
         *,
@@ -95,6 +115,8 @@ class TaskRecoveryService:
         self._mark_run_failed = mark_run_failed
         self._state_machine = TaskStateMachine()
 
+    # 解析恢复提示语要用的语言：优先取用户 metadata.language，其次会话 metadata，
+    # 都归一化到受支持的恢复语言。
     async def get_preferred_language(self, user_id: str | None, session: Any) -> str:
         """Resolve the preferred language for recovery messages."""
         if user_id:
@@ -110,6 +132,7 @@ class TaskRecoveryService:
         session_metadata = getattr(session, "metadata", None) or {}
         return normalize_recovery_language(session_metadata.get("language"))
 
+    # 加载用户当前角色，供分布式并发决策（恢复时重新按角色算限额）使用。
     async def get_user_roles(self, user_id: str | None) -> list[str]:
         """Load current user roles for distributed concurrency decisions."""
         if not user_id:
@@ -121,6 +144,9 @@ class TaskRecoveryService:
             logger.warning("Failed to load user roles for recovery: %s", e)
             return []
 
+    # 把陈旧 run 及其 trace 标记为失败（恢复前置步骤）：会话状态落 FAILED，并写入
+    # task_recoverable=True / error_code=server_restart / interrupted_run_id，随后把
+    # 对应 trace 也补成 error 终态，避免遗留「永远 running」的悬挂 trace。
     async def mark_run_failed(self, run_id: str, reason: str, session: Any) -> None:
         """Mark a stale run and its trace as failed before recovery."""
         executor = self._ensure_executor()
@@ -157,6 +183,8 @@ class TaskRecoveryService:
         except Exception as e:
             logger.warning("Failed to mark trace failed for run %s: %s", run_id, e)
 
+    # 把任务落为「可自动恢复的失败」状态（如收到 server shutdown）。与 mark_run_failed
+    # 类似，但不触碰 trace，仅写会话 metadata，标记后由启动恢复流程接管。
     async def mark_run_recoverable_failure(
         self,
         session_id: str,
@@ -183,6 +211,13 @@ class TaskRecoveryService:
             ),
         )
 
+    # 提交一轮「续跑」新 run，从最近检查点接着处理。流程：
+    #   1) 解析 executor_key / agent / 语言，构造一条本地化恢复提示（作为 user 消息）；
+    #   2) 用 claim_recovery_slot 占位（把旧 run 换成新 run，不额外占并发名额）；
+    #   3) 若得到 STARTED：直接提交新任务执行（失败则回滚释放槽位）；
+    #      若被排队：预写 QUEUED 状态、建 trace 并落 user 消息，登记 run_info；
+    #   4) 最后把会话 metadata 全量刷新为新 run 的上下文，并记录 recovery_of_run_id
+    #      等审计字段。返回是否成功及提示。
     async def submit_recovery_run(
         self,
         session: Any,
@@ -360,6 +395,7 @@ class TaskRecoveryService:
             else "任务恢复已加入队列",
         }
 
+    # 恢复提交失败后的回滚：把该 run 恢复成「可恢复的失败」状态，以便后续重试。
     async def _restore_recoverable_failure(
         self,
         session_id: str,
@@ -380,6 +416,14 @@ class TaskRecoveryService:
             ),
         )
 
+    # 分布式安全地恢复一个中断 run：
+    #   - 先用 Redis SET NX 抢 (session, source_run) 维度的恢复锁；抢不到说明已有
+    #     其他实例在恢复，直接返回；
+    #   - 校验该 run 仍是会话当前 run（否则说明已被别的流程接管）；
+    #   - 标记旧 run 失败 -> 置为 RECOVERING -> 调 submit_recovery_run 拉起新 run；
+    #   - 若恢复未成功，回滚为「可恢复的失败」。
+    # 注意锁的释放策略：成功路径不显式释放（靠 TTL 过期，避免恢复期间被他人抢跑）；
+    # 只有在「让出/异常」等需要允许立即重试的分支才主动释放。
     async def resume_interrupted_run(
         self,
         session: Any,
@@ -464,6 +508,8 @@ class TaskRecoveryService:
                 "message": f"恢复任务失败: {e}",
             }
 
+    # 用 Lua「比对 token 一致才删除」原子释放恢复锁，避免误删他人锁。仅在可安全
+    # 立即重试的分支调用（成功恢复时不主动释放，让锁随 TTL 自然过期）。
     async def release_recovery_lock(self, lock_key: str, token: str) -> None:
         """Release a distributed recovery lock when immediate retry is safe."""
         try:
@@ -480,6 +526,11 @@ class TaskRecoveryService:
         except Exception as e:
             logger.warning("Failed to release recovery lock %s: %s", lock_key, e)
 
+    # 用户手动「继续」会话的入口。做一系列前置校验后再走 resume_interrupted_run：
+    #   - 会话不存在 / 无 current_run_id：无可恢复；
+    #   - 任务已 COMPLETED：无需恢复；
+    #   - 明确不可恢复或已被用户取消（error_code=cancelled）：拒绝；
+    #   - 仍有心跳（在其他实例运行中）：拒绝，避免打断正在跑的任务。
     async def resume_session(
         self,
         session_id: str,

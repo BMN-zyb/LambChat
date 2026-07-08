@@ -15,6 +15,8 @@ import { isMobileDevice } from "../../../utils/mobile";
 import type { Project, VersionInfo } from "../../../types";
 import type { TabType } from "./types";
 
+// 判断当前聚焦元素是否为可编辑控件（input/textarea/select 或 contentEditable）。
+// 用于移动端软键盘弹出时决定是否需要调整视口高度。
 function isEditableElementFocused(): boolean {
   if (typeof document === "undefined") return false;
   const activeElement = document.activeElement;
@@ -31,6 +33,7 @@ function isEditableElementFocused(): boolean {
   );
 }
 
+// 判断是否运行在 PWA 独立/全屏显示模式（iOS standalone 或 display-mode 匹配）
 function isStandaloneDisplayMode(): boolean {
   if (typeof window === "undefined" || typeof navigator === "undefined") {
     return false;
@@ -47,6 +50,8 @@ function isStandaloneDisplayMode(): boolean {
   );
 }
 
+// AppShell 的 props：外壳所需的全部信息——顶栏数据、侧栏节点、子内容，
+// 以及模型选择、分享、大纲切换等要透传给 Header 的可选能力。
 export interface AppShellProps {
   activeTab: TabType;
   showProfileModal: boolean;
@@ -78,6 +83,9 @@ export interface AppShellProps {
   onToggleOutline?: () => void;
 }
 
+// 应用外壳框架组件：所有标签页共用的骨架。
+// 结构为「个人资料弹窗 +（侧栏 | 顶栏 Header + 主内容 children）」的横向布局，
+// 并集中处理移动端浏览器地址栏、软键盘与视口高度相关的 CSS 变量。
 export function AppShell({
   activeTab,
   showProfileModal,
@@ -102,6 +110,8 @@ export function AppShell({
   const appSafeAreaBottom =
     "var(--app-safe-area-bottom-active, max(var(--app-safe-area-bottom, 0px), var(--app-fullscreen-safe-area-bottom, 0px)))";
 
+  // 移动端浏览器地址栏「轻推」：主动滚动一点以尽量收起地址栏、扩大可视区。
+  // 仅在满足条件（移动设备、非独立显示、支持 visualViewport）时启用。
   useEffect(() => {
     if (typeof window === "undefined") return undefined;
 
@@ -145,6 +155,8 @@ export function AppShell({
     };
   }, []);
 
+  // 跟踪可视视口（visualViewport）变化，把视口高度、顶部偏移、键盘内边距等
+  // 写入 CSS 变量，供布局使用比 100dvh 更精确的高度，并处理移动端软键盘遮挡。
   useEffect(() => {
     if (typeof window === "undefined") return undefined;
 
@@ -278,6 +290,8 @@ export function AppShell({
     };
   }, []);
 
+  // 外壳布局：全局个人资料弹窗 + 横向 flex（侧栏 + 主列）；
+  // 主列内部依次为顶栏 Header 与传入的 children（各标签页实际内容）。
   return (
     <>
       <ProfileModal
@@ -297,9 +311,11 @@ export function AppShell({
           transform: "translate3d(0, var(--app-viewport-offset-top, 0px), 0)",
         }}
       >
+        {/* 左侧栏：由具体页面通过 sidebar prop 注入 */}
         {sidebar}
 
         <div className="relative z-0 flex flex-1 min-w-0 flex-col overflow-hidden">
+          {/* 顶栏：透传模型选择、分享、大纲切换等能力 */}
           <Header
             activeTab={activeTab}
             setMobileSidebarOpen={setMobileSidebarOpen}
@@ -315,6 +331,7 @@ export function AppShell({
             onToggleOutline={onToggleOutline}
           />
 
+          {/* 主内容区：各标签页实际渲染的内容 */}
           {children}
         </div>
       </div>

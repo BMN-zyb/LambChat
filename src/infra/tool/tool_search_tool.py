@@ -25,6 +25,8 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
+# 返回的参数 schema 压缩阈值：数组最多保留 200 项、字符串最多 2000 字符，
+# 超出则截断并注明省略数量，避免庞大 schema 撑爆 LLM 上下文
 TOOL_SEARCH_SCHEMA_MAX_ARRAY_ITEMS = 200
 TOOL_SEARCH_SCHEMA_MAX_STRING_CHARS = 2000
 
@@ -52,6 +54,7 @@ class ToolSearchTool(BaseTool):
     """
 
     name: str = "search_tools"
+    # description 直接面向 LLM，详细说明 search_tools 的适用范围与查询语法
     description: str = (
         "Fetches full schema definitions for deferred tools so they can be called. "
         'Deferred tools appear by name in the "Available MCP Tools (Deferred)" section below. '
@@ -71,10 +74,12 @@ class ToolSearchTool(BaseTool):
     args_schema: type[BaseModel] = ToolSearchInput
 
     # 注入的依赖（非 Pydantic 字段）
+    # _manager：延迟工具管理器，负责实际的发现/提升；_search_limit：单次最多返回数
     _manager: Optional["DeferredToolManager"] = None
     _search_limit: int = 25
 
     class Config:
+        # 允许非 Pydantic 类型（DeferredToolManager）作为私有属性存在
         arbitrary_types_allowed = True
 
     def __init__(
@@ -88,6 +93,7 @@ class ToolSearchTool(BaseTool):
         self._search_limit = search_limit
 
     def _run(self, query: str) -> str:
+        # 本工具仅支持异步执行；同步入口直接报错，避免被误用
         raise NotImplementedError("Use async _arun")
 
     async def _arun(
@@ -96,15 +102,18 @@ class ToolSearchTool(BaseTool):
         config: Optional[RunnableConfig] = None,
         run_manager: Optional[Any] = None,
     ) -> str:
+        # 未注入 manager 时视为配置错误，返回可读错误串（不抛异常）
         if not self._manager:
             return "Error: search_tools is not configured properly."
 
+        # 分别取已发现/未发现工具：两者都参与搜索，但未发现工具优先
         discovered = self._manager.get_discovered_tools()
         undiscovered = self._manager.get_undiscovered_tools()
         all_tools = discovered + undiscovered
         if not all_tools:
             return "No deferred tools are available for search."
 
+        # 搜索与格式化是 CPU 密集的纯计算，放到线程池执行避免阻塞事件循环
         results, parts = await run_blocking_io(
             _search_and_format_tool_results,
             query,
@@ -120,11 +129,14 @@ class ToolSearchTool(BaseTool):
             )
 
         # 提升匹配的工具
+        # 把命中的工具从延迟状态提升为"已发现"，使其在后续对话中可直接调用
         matched_names = [r.name for r in results]
         newly_discovered = self._manager.discover_tools(matched_names)
         newly_discovered_names = {tool.name for tool in newly_discovered}
+        # 已发现集合与本次结果之差即为"此前已可用"的数量
         already_available_count = len(results) - len(newly_discovered)
 
+        # 组装状态说明：区分"新加载"与"此前已可用"，便于 LLM 理解结果
         status = ""
         if newly_discovered and already_available_count:
             status = (
@@ -140,6 +152,7 @@ class ToolSearchTool(BaseTool):
             f"Found {len(results)} tool(s){status}. These tools are now available for use. "
             "If the tool you need appears below, call it directly next.\n\n"
         )
+        # 回填每个结果的状态占位符（新加载/已可用）——占位符在格式化阶段预留
         formatted_parts = [
             part.replace(
                 "__TOOL_STATUS__",
@@ -157,11 +170,13 @@ def _search_and_format_tool_results(
     search_limit: int,
 ) -> tuple[list[ToolSearchResult], list[str]]:
     # 优先返回未加载工具，避免较小的 result limit 被已可用工具占满。
+    # 先在未发现工具中搜索并占用名额
     undiscovered_results = search_tools_with_keywords(
         query=query,
         tools=undiscovered,
         max_results=search_limit,
     )
+    # 剩余名额再用于已发现工具，保证新工具的曝光优先级
     remaining_slots = max(search_limit - len(undiscovered_results), 0)
     discovered_results = (
         search_tools_with_keywords(
@@ -177,15 +192,18 @@ def _search_and_format_tool_results(
 
 
 def _format_tool_result(result: ToolSearchResult) -> str:
+    # 把单个搜索结果格式化为带完整参数 schema 的 Markdown 片段
     tool = result.tool
     schema: dict[str, Any] = {}
     args_schema = getattr(tool, "args_schema", None)
     if args_schema is not None:
+        # 生成 JSON Schema 失败时降级为空 schema，不影响其余结果
         try:
             schema = args_schema.model_json_schema()
         except Exception:
             pass
 
+    # 对 properties / required 做体积压缩，防止超大 schema 撑爆上下文
     props = _compact_schema_value(schema.get("properties", {}))
     required = _compact_schema_value(schema.get("required", []))
 
@@ -195,6 +213,7 @@ def _format_tool_result(result: ToolSearchResult) -> str:
         indent=2,
     )
 
+    # __TOOL_STATUS__ 为占位符，由 _arun 根据是否新发现回填
     return (
         f"## {result.name} (score: {result.score:.1f})\n"
         "Status: __TOOL_STATUS__\n"
@@ -204,17 +223,21 @@ def _format_tool_result(result: ToolSearchResult) -> str:
 
 
 def _compact_schema_value(value: Any) -> Any:
+    # 递归压缩 schema：对 dict 逐键递归；对超长数组/字符串截断并注明省略量
     if isinstance(value, dict):
         return {key: _compact_schema_value(child) for key, child in value.items()}
     if isinstance(value, list):
+        # 数组未超限则整体递归压缩
         if len(value) <= TOOL_SEARCH_SCHEMA_MAX_ARRAY_ITEMS:
             return [_compact_schema_value(child) for child in value]
+        # 超限：仅保留前 N 项并追加一条省略说明
         omitted = len(value) - TOOL_SEARCH_SCHEMA_MAX_ARRAY_ITEMS
         compacted = [
             _compact_schema_value(child) for child in value[:TOOL_SEARCH_SCHEMA_MAX_ARRAY_ITEMS]
         ]
         compacted.append(f"... schema truncated, {omitted} more item(s) omitted")
         return compacted
+    # 超长字符串：截断并注明省略字符数
     if isinstance(value, str) and len(value) > TOOL_SEARCH_SCHEMA_MAX_STRING_CHARS:
         omitted = len(value) - TOOL_SEARCH_SCHEMA_MAX_STRING_CHARS
         return (

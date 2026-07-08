@@ -22,10 +22,12 @@ from src.kernel.schemas.team import (
 if TYPE_CHECKING:
     from motor.motor_asyncio import AsyncIOMotorCollection
 
+# 团队列表分页查询单页最多返回的条数上限
 TEAM_LIST_LIMIT_MAX = 200
 
 
 def _bounded_list_limit(limit: int) -> int:
+    # 收敛 limit 到 [1, TEAM_LIST_LIMIT_MAX] 区间，防御非法输入
     return min(max(int(limit), 1), TEAM_LIST_LIMIT_MAX)
 
 
@@ -39,6 +41,7 @@ class TeamStorage:
     @property
     def collection(self) -> "AsyncIOMotorCollection[Any]":
         """Lazy MongoDB collection."""
+        # 团队主集合：存放团队本身（成员组成、指令、可见性等）
         if self._collection is None:
             from src.infra.storage.mongodb import get_mongo_client
 
@@ -50,6 +53,8 @@ class TeamStorage:
     @property
     def user_collection(self) -> "AsyncIOMotorCollection[Any]":
         """Lazy MongoDB users collection for per-user team preferences."""
+        # 复用全局 users 集合：用户对团队的"置顶/收藏"偏好存在 users.metadata 里，
+        # 而不是单独开一张偏好表，减少一次集合关联
         if self._user_collection is None:
             from src.infra.storage.mongodb import get_mongo_client
 
@@ -58,11 +63,14 @@ class TeamStorage:
             self._user_collection = db["users"]
         return self._user_collection
 
+    # 单个用户最多可置顶 / 收藏的团队数量，避免偏好列表无限增长
     MAX_PINNED = 10
     MAX_FAVORITES = 100
 
     @staticmethod
     def _user_query_id(user_id: str) -> ObjectId | str:
+        # users 集合的 _id 通常是 ObjectId，但兼容历史/测试数据里可能是字符串的情况：
+        # 转换失败时原样返回字符串，让查询自然匹配不到（而不是抛异常中断流程）
         try:
             return ObjectId(user_id)
         except Exception:
@@ -70,6 +78,8 @@ class TeamStorage:
 
     @staticmethod
     def _bounded_unique_ids(values: Any, limit: int) -> list[str]:
+        # 将任意输入规整为"去重、去空白、裁剪到 limit 条"的字符串 id 列表，
+        # 用于清洗从 Mongo 读出的 pinned_team_ids / favorite_team_ids 原始数据
         result: list[str] = []
         seen: set[str] = set()
         if not isinstance(values, list):
@@ -89,6 +99,8 @@ class TeamStorage:
     @staticmethod
     def _member_doc(member: dict[str, Any]) -> dict[str, Any]:
         """Convert client/member data to a storage member document."""
+        # 若未提供 member_id 则生成一个短随机 id（m- 前缀 + 12 位 hex），
+        # 保证团队内每个成员都有稳定唯一的标识，供 default_member_id 等引用
         return {
             "member_id": member.get("member_id") or f"m-{uuid.uuid4().hex[:12]}",
             "persona_preset_id": member.get("persona_preset_id", ""),
@@ -105,6 +117,7 @@ class TeamStorage:
     @staticmethod
     def _starter_prompt_docs(prompts: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
         """Normalize team starter prompts before persistence."""
+        # 裁剪到最大条数上限，并用 PersonaStarterPrompt 校验/规整每条 prompt 的结构
         result: list[dict[str, Any]] = []
         for prompt in (prompts or [])[:TEAM_STARTER_PROMPTS_MAX]:
             result.append(PersonaStarterPrompt(**prompt).model_dump(mode="json"))
@@ -113,6 +126,7 @@ class TeamStorage:
     @staticmethod
     def _tags_doc(tags: list[str] | None) -> list[str]:
         """Normalize team tags before persistence."""
+        # 去重、去空白，并裁剪到 TEAM_TAGS_MAX，保持写入前的标签列表干净可控
         seen: set[str] = set()
         result: list[str] = []
         for tag in tags or []:
@@ -128,6 +142,7 @@ class TeamStorage:
     @staticmethod
     def _member_docs(members: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
         """Normalize team members before persistence."""
+        # 裁剪到 TEAM_MEMBERS_MAX 条，逐个走 _member_doc 规整
         return [TeamStorage._member_doc(member) for member in (members or [])[:TEAM_MEMBERS_MAX]]
 
     @staticmethod
@@ -136,6 +151,8 @@ class TeamStorage:
         requested_default_member_id: str | None,
     ) -> str | None:
         """Keep a valid default member id, defaulting to the first member."""
+        # 校验期望的默认成员 id 是否仍然存在于当前成员列表中（成员可能已被移除/替换），
+        # 若不存在或未指定，则兜底取第一个成员作为默认发言人
         if not members:
             return None
 
@@ -169,6 +186,7 @@ class TeamStorage:
                 )
             )
         result["members"] = members
+        # 对历史数据中可能缺失的字段挨个兜底默认值，保证老团队文档也能正常构造出响应模型
         result.setdefault("description", "")
         result.setdefault("avatar", None)
         result.setdefault("tags", [])
@@ -184,6 +202,7 @@ class TeamStorage:
     # ── User preference helpers (stored in user metadata) ──
 
     async def _get_user_team_preference(self, user_id: str) -> dict[str, list[str]]:
+        # 只投影出偏好相关的两个字段，避免把整个用户文档都拉回来
         doc = await self.user_collection.find_one(
             {"_id": self._user_query_id(user_id)},
             {"metadata.pinned_team_ids": 1, "metadata.favorite_team_ids": 1},
@@ -205,6 +224,7 @@ class TeamStorage:
         user_id: str,
         pref: dict[str, list[str]],
     ) -> None:
+        # 整体覆盖写入 pinned/favorite 两个列表（调用方需先读出旧值再修改再整体写回）
         await self.user_collection.update_one(
             {"_id": self._user_query_id(user_id)},
             {
@@ -224,6 +244,7 @@ class TeamStorage:
         update: dict[str, Any],
     ) -> dict[str, Any]:
         """Update the current user's favorite/pinned state for a team."""
+        # 读-改-写模式：先取出该用户当前的置顶/收藏列表，按需增删 team_id 后整体写回
         pref = await self._get_user_team_preference(user_id)
         pinned: list[str] = list(pref["pinned"])
         favorite: list[str] = list(pref["favorite"])
@@ -231,6 +252,8 @@ class TeamStorage:
         if update.get("is_pinned") is not None:
             if update["is_pinned"] and team_id not in pinned:
                 if len(pinned) >= self.MAX_PINNED:
+                    # 已达置顶数量上限：静默拒绝本次置顶请求，返回当前实际状态
+                    # （is_pinned 保持 False）而不是抛异常打断整个请求
                     return {
                         "is_favorite": team_id in favorite,
                         "is_pinned": False,
@@ -243,6 +266,7 @@ class TeamStorage:
         if update.get("is_favorite") is not None:
             if update["is_favorite"] and team_id not in favorite:
                 if len(favorite) >= self.MAX_FAVORITES:
+                    # 同上，收藏数量达上限时同样静默拒绝，不影响置顶状态的返回
                     return {
                         "is_favorite": False,
                         "is_pinned": team_id in pinned,
@@ -261,6 +285,8 @@ class TeamStorage:
 
     async def _remove_team_from_all_user_preferences(self, team_id: str) -> None:
         """Remove a deleted team id from user preference lists."""
+        # 团队被删除后，需要在全体用户的置顶/收藏列表里清除对它的引用，
+        # 否则会出现"偏好里存在但团队已不存在"的悬空 id
         await self.user_collection.update_many(
             {},
             {
@@ -276,6 +302,7 @@ class TeamStorage:
         user_id: str,
         teams: list[TeamResponse],
     ) -> list[TeamResponse]:
+        # 把该用户的置顶/收藏偏好回填到一批团队响应对象上（用于非聚合查询路径的场景）
         if not teams:
             return teams
         pref = await self._get_user_team_preference(user_id)
@@ -294,6 +321,7 @@ class TeamStorage:
 
     @staticmethod
     def _preference_sort_key(team: TeamResponse) -> tuple:
+        # 排序优先级：置顶 > 收藏 > 更新时间新 > 创建时间新（数值越小越靠前）
         updated = team.updated_at
         created = team.created_at
         return (
@@ -319,6 +347,8 @@ class TeamStorage:
         starter_prompts: list[dict[str, Any]] | None = None,
     ) -> TeamResponse:
         """Create a new team."""
+        # 新团队默认可见性为 PRIVATE（仅创建者可见），置顶/收藏等偏好属于用户维度，
+        # 不在团队文档里存储，因此创建时不涉及 user_collection
         now = utc_now()
         members_docs = self._member_docs(members)
         doc: dict[str, Any] = {
@@ -349,10 +379,12 @@ class TeamStorage:
         owner_user_id: str,
     ) -> Optional[TeamResponse]:
         """Get a team by ID, scoped to owner."""
+        # team_id 格式非法（无法转换为 ObjectId）时直接返回 None，不抛异常
         try:
             query_id = ObjectId(team_id)
         except Exception:
             return None
+        # 查询条件带上 owner_user_id，天然做到"用户只能查到自己拥有的团队"的越权保护
         doc = await self.collection.find_one({"_id": query_id, "owner_user_id": owner_user_id})
         if not doc:
             return None
@@ -373,6 +405,8 @@ class TeamStorage:
         limit = _bounded_list_limit(limit)
         query: dict[str, Any] = {"owner_user_id": owner_user_id}
         if favorite is True or pinned is True:
+            # 若请求要求"只看收藏"或"只看置顶"，先取出该用户的偏好 id 集合，
+            # 再把查询范围收窄到这些 id；两者任一为真就取并集（该团队被置顶或收藏均命中）
             pref = await self._get_user_team_preference(owner_user_id)
             target_ids: set[str] = set()
             if pinned:
@@ -387,6 +421,7 @@ class TeamStorage:
                 return [], 0
 
         if q:
+            # 关键字搜索命中名称/描述/标签/成员角色名/成员角色标签，且忽略大小写
             needle = q.strip().lower()
             if needle:
                 pattern = re.escape(needle)
@@ -402,6 +437,7 @@ class TeamStorage:
             if tag_filter:
                 query["tags"] = tag_filter
 
+        # 总数统计与用户偏好读取互不依赖，用 gather 并发执行以减少一次往返等待
         total, pref = await asyncio.gather(
             self.collection.count_documents(query),
             self._get_user_team_preference(owner_user_id),
@@ -411,6 +447,8 @@ class TeamStorage:
 
         pinned_ids = pref["pinned"]
         favorite_ids = pref["favorite"]
+        # 用聚合管道在数据库层面直接算出每条团队是否置顶/收藏并参与排序，
+        # 避免先取回全部数据再在应用层排序（尤其是分页场景下排序必须先于 skip/limit）
         pipeline: list[dict[str, Any]] = [
             {"$match": query},
             {
@@ -447,10 +485,13 @@ class TeamStorage:
         except Exception:
             return None
 
+        # 过滤掉值为 None 的字段，表示"调用方未提供该字段"，避免误将其清空
         update = {k: v for k, v in update.items() if v is not None}
         update["updated_at"] = utc_now()
 
         # Full replacement semantics for members: regenerate member_ids
+        # 成员列表是整体替换语义（不支持局部增删单个成员字段），
+        # 所以每次更新成员都要重新走一遍规整流程，并重新校验默认成员 id 是否仍然有效
         if "members" in update:
             new_members = self._member_docs(update["members"])
             update["members"] = new_members
@@ -466,6 +507,8 @@ class TeamStorage:
             update["tags"] = self._tags_doc(update["tags"])
 
         if not update:
+            # 只剩 updated_at 一个字段，说明本次调用没有实际要更新的内容，
+            # 直接返回当前团队数据即可，不必发起一次空更新
             return await self.get_team(team_id, owner_user_id=owner_user_id)
 
         doc = await self.collection.find_one_and_update(
@@ -490,6 +533,7 @@ class TeamStorage:
             return False
         result = await self.collection.delete_one({"_id": query_id, "owner_user_id": owner_user_id})
         if result.deleted_count > 0:
+            # 团队确实被删除后，联动清理全体用户偏好列表里对该团队的引用
             await self._remove_team_from_all_user_preferences(team_id)
         return result.deleted_count > 0
 
@@ -506,6 +550,8 @@ class TeamStorage:
             return None
 
         # Serialize members back to dicts with new member_ids
+        # 克隆时不带 member_id，交给 create_team -> _member_docs 重新生成，
+        # 避免克隆出的新团队与原团队共享同一批 member_id
         members_data = []
         for m in original.members:
             members_data.append(

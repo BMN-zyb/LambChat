@@ -17,6 +17,7 @@ from src.kernel.config import settings
 from src.kernel.exceptions import NotFoundError, ValidationError
 from src.kernel.schemas.user import User, UserCreate, UserInDB, UserUpdate
 
+# 列表接口单次返回上限，防止一次拉取过多数据
 USER_LIST_LIMIT_MAX = 100
 
 
@@ -31,6 +32,7 @@ def _escape_regex(text: str) -> str:
         转义后的安全正则表达式字符串
     """
     # 转义所有正则表达式特殊字符
+    # 用户输入直接拼进 MongoDB $regex 可能被构造成恶意正则（ReDoS），故先转义
     return re.escape(text)
 
 
@@ -53,10 +55,12 @@ def _safe_search_pattern(text: str) -> str:
 
 
 def _bounded_list_limit(limit: int) -> int:
+    # 将 limit 夹逼到 [1, USER_LIST_LIMIT_MAX] 区间，避免非法或过大取值
     return min(max(int(limit), 1), USER_LIST_LIMIT_MAX)
 
 
 def _validate_metadata_update_key(key: Any) -> str:
+    # metadata key 会拼进 MongoDB 的点路径更新，含 "." 或 "$" 会造成注入/歧义，故严格校验
     if not isinstance(key, str) or not key or "." in key or "$" in key:
         raise ValidationError(f"Invalid metadata key: {key!r}")
     return key
@@ -69,16 +73,19 @@ class UserStorage:
     使用 MongoDB 存储用户数据。
     """
 
+    # 以下三个类级变量用于“全进程只建一次索引”的并发协调
     _indexes_done = False
     _indexes_lock: asyncio.Lock | None = None
     _indexes_task: asyncio.Task | None = None
 
     def __init__(self):
+        # 集合对象延迟初始化，首次访问 collection 属性时才连接
         self._collection = None
 
     @property
     def collection(self):
         """延迟加载 MongoDB 集合"""
+        # 惰性获取 users 集合：避免在导入/构造阶段就依赖数据库连接
         if self._collection is None:
             from src.infra.storage.mongodb import get_mongo_client
 
@@ -90,25 +97,31 @@ class UserStorage:
 
     async def ensure_indexes_if_needed(self):
         """确保索引存在（由首次使用时调用）"""
+        # 双重检查 + 锁 + 共享 Task：保证并发首次调用时索引只创建一次
         cls = type(self)
         if cls._indexes_done:
             return
 
+        # 惰性创建锁（不能在类定义处创建，否则会绑定到导入时的事件循环）
         if cls._indexes_lock is None:
             cls._indexes_lock = asyncio.Lock()
 
         async with cls._indexes_lock:
+            # 拿到锁后再次检查，避免重复建索引
             if cls._indexes_done:
                 return
+            # 复用同一个建索引 Task，多个协程共享其结果
             if cls._indexes_task is None or cls._indexes_task.cancelled():
                 cls._indexes_task = asyncio.create_task(self._ensure_indexes())
             task = cls._indexes_task
 
+        # 在锁外 await，避免长时间持锁阻塞其他协程
         succeeded = await task
         if succeeded is not False:
             cls._indexes_done = True
             return
 
+        # 建索引失败：清理 Task 引用，允许后续调用重试
         async with cls._indexes_lock:
             if cls._indexes_task is task:
                 cls._indexes_task = None
@@ -118,10 +131,13 @@ class UserStorage:
         try:
             collection = self.collection  # 使用属性而不是直接访问 _collection
             # 创建唯一索引防止并发竞态条件
+            # username/email 唯一索引是“直接插入 + 捕获重复键”并发策略的基础
             await collection.create_index("username", unique=True, background=True)
             await collection.create_index("email", unique=True, background=True)
             # 其他常用查询索引
+            # OAuth 登录、找回密码、邮箱验证等查询路径的加速索引
             await collection.create_index("oauth_provider", background=True)
+            # sparse=True：仅对存在该字段的文档建索引，节省空间
             await collection.create_index("reset_token", background=True, sparse=True)
             await collection.create_index("verification_token", background=True, sparse=True)
 
@@ -135,6 +151,7 @@ class UserStorage:
 
     async def _migrate_legacy_users(self):
         """迁移旧用户数据：将 email_verified 和 is_active 从 None 改为 True"""
+        # 早期用户可能这两个字段为 None，统一补成 True，保证语义一致
         try:
             # 迁移 email_verified: None -> True
             result1 = await self.collection.update_many(
@@ -181,6 +198,7 @@ class UserStorage:
 
         now = utc_now()
         # For OAuth users, generate a random password if not provided
+        # OAuth 用户不会设置密码，为满足存储需要，随机生成一个高强度密码占位
         password = user_data.password
         is_oauth_user = bool(user_data.oauth_provider and user_data.oauth_id)
         if not password and is_oauth_user:
@@ -193,6 +211,7 @@ class UserStorage:
         user_dict: dict[str, Any] = {
             "username": user_data.username,
             "email": user_data.email,
+            # 密码在阻塞线程池中做 bcrypt 哈希，避免阻塞事件循环；无密码则存 None
             "password_hash": await run_blocking_io(hash_password, password) if password else None,
             "roles": user_data.roles if user_data.roles else [],  # 使用提供的角色，否则为空
             "avatar_url": user_data.avatar_url,  # Data URI for avatar
@@ -209,11 +228,13 @@ class UserStorage:
         }
 
         try:
+            # 并发安全策略：直接插入，靠唯一索引拦截重复，而非“先查后插”
             result = await self.collection.insert_one(user_dict)
             user_dict["id"] = str(result.inserted_id)
             return UserInDB(**user_dict)
         except DuplicateKeyError as e:
             # 解析哪个字段重复
+            # 从错误信息判断是用户名还是邮箱冲突，给出精确提示
             error_msg = str(e)
             if "username" in error_msg or "username_1" in error_msg:
                 raise ValidationError(f"用户名 '{user_data.username}' 已存在")
@@ -237,6 +258,7 @@ class UserStorage:
         from bson.errors import InvalidId
 
         try:
+            # user_id 需转成 MongoDB ObjectId 才能查询
             user_dict = await self.collection.find_one({"_id": ObjectId(user_id)})
         except InvalidId:
             # 无效的 ObjectId 格式
@@ -245,6 +267,7 @@ class UserStorage:
         if not user_dict:
             return None
 
+        # MongoDB 内部主键 _id 统一映射为业务字段 id（字符串）
         user_dict["id"] = str(user_dict.pop("_id"))
         return UserInDB(**user_dict)
 
@@ -258,6 +281,7 @@ class UserStorage:
         Returns:
             用户对象或 None
         """
+        # 按唯一用户名精确查询
         user_dict = await self.collection.find_one({"username": username})
 
         if not user_dict:
@@ -276,6 +300,7 @@ class UserStorage:
         Returns:
             用户对象或 None
         """
+        # 按唯一邮箱精确查询
         user_dict = await self.collection.find_one({"email": email})
 
         if not user_dict:
@@ -295,6 +320,7 @@ class UserStorage:
         Returns:
             用户对象或 None
         """
+        # provider + oauth_id 组合唯一确定一个 OAuth 绑定用户
         user_dict = await self.collection.find_one(
             {
                 "oauth_provider": oauth_provider,
@@ -324,6 +350,7 @@ class UserStorage:
         """
         from pymongo.errors import DuplicateKeyError
 
+        # 只更新调用方显式提供的字段；updated_at 每次都刷新
         update_dict: dict = {"updated_at": utc_now()}
 
         if user_data.username is not None:
@@ -333,12 +360,14 @@ class UserStorage:
             update_dict["email"] = user_data.email
 
         if user_data.password is not None:
+            # 改密同样走线程池哈希
             update_dict["password_hash"] = await run_blocking_io(
                 hash_password,
                 user_data.password,
             )
 
         # Check if avatar_url was explicitly set (even to None) using model_fields_set
+        # 用 model_fields_set 区分“未传”与“显式传 None”，从而支持将头像清空
         if "avatar_url" in user_data.model_fields_set:
             update_dict["avatar_url"] = user_data.avatar_url
 
@@ -349,6 +378,7 @@ class UserStorage:
             update_dict["is_active"] = user_data.is_active
 
         # 支持邮箱验证和密码重置字段
+        # 这些字段为可选扩展，用 hasattr 兼容不同版本的 UserUpdate 模型
         if hasattr(user_data, "email_verified") and user_data.email_verified is not None:
             update_dict["email_verified"] = user_data.email_verified
 
@@ -367,6 +397,7 @@ class UserStorage:
         from bson import ObjectId
 
         try:
+            # find_one_and_update + return_document=True：原子更新并返回更新后的文档
             result = await self.collection.find_one_and_update(
                 {"_id": ObjectId(user_id)},
                 {"$set": update_dict},
@@ -377,6 +408,7 @@ class UserStorage:
                 raise NotFoundError(f"用户 '{user_id}' 不存在")
 
             result["id"] = str(result.pop("_id"))
+            # 用户信息变化后清理鉴权缓存，使权限/资料立即生效（失败可忽略）
             try:
                 from src.api.deps import clear_auth_cache
 
@@ -386,6 +418,7 @@ class UserStorage:
             return User(**result)
         except DuplicateKeyError as e:
             # 解析哪个字段重复
+            # 改名/改邮箱可能撞到他人的唯一值
             error_msg = str(e)
             if "username" in error_msg or "username_1" in error_msg:
                 raise ValidationError(f"用户名 '{user_data.username}' 已存在")
@@ -408,6 +441,7 @@ class UserStorage:
         from bson import ObjectId
 
         result = await self.collection.delete_one({"_id": ObjectId(user_id)})
+        # 删除成功后同样清理鉴权缓存
         if result.deleted_count > 0:
             try:
                 from src.api.deps import clear_auth_cache
@@ -436,21 +470,26 @@ class UserStorage:
         Returns:
             用户列表
         """
+        # 收敛 limit 上限
         limit = _bounded_list_limit(limit)
         query: dict = {}
+        # 可选按激活状态过滤
         if is_active is not None:
             query["is_active"] = is_active
         if search:
             # 使用安全的搜索模式防止 ReDoS 攻击
+            # 对用户名/邮箱做大小写不敏感的模糊匹配（$or 任一命中）
             escaped_search = _safe_search_pattern(search)
             query["$or"] = [
                 {"username": {"$regex": escaped_search, "$options": "i"}},
                 {"email": {"$regex": escaped_search, "$options": "i"}},
             ]
 
+        # skip/limit 实现分页
         cursor = self.collection.find(query).skip(skip).limit(limit)
         users = []
 
+        # 异步游标逐条读取并转换
         async for user_dict in cursor:
             user_dict["id"] = str(user_dict.pop("_id"))
             users.append(User(**user_dict))
@@ -472,6 +511,7 @@ class UserStorage:
         Returns:
             匹配的用户总数
         """
+        # 与 list_users 使用一致的过滤条件，仅做计数（用于分页总数）
         query: dict = {}
         if is_active is not None:
             query["is_active"] = is_active
@@ -498,6 +538,7 @@ class UserStorage:
         Returns:
             验证成功返回用户对象，否则返回 None
         """
+        # 支持用户名或邮箱二选一登录：用 $or 同时匹配两个字段
         user_dict = await self.collection.find_one(
             {
                 "$or": [
@@ -514,6 +555,7 @@ class UserStorage:
 
         # 只验证密码，不检查 is_active
         # is_active 检查由 UserManager.login() 处理，以便返回正确的错误信息
+        # 密码比对同样放线程池执行；不匹配返回 None
         if not await run_blocking_io(verify_password, password, user.password_hash):
             return None
 
@@ -529,6 +571,7 @@ class UserStorage:
         Returns:
             用户对象或 None
         """
+        # 按重置令牌查找待重置密码的用户（令牌过期校验在业务层完成）
         user_dict = await self.collection.find_one({"reset_token": token})
         if not user_dict:
             return None
@@ -550,8 +593,10 @@ class UserStorage:
             return None
 
         # 检查令牌是否过期（如果有设置过期时间）
+        # 与 reset_token 不同，验证令牌的过期在此处直接判定
         expires = user_dict.get("verification_token_expires")
         if expires is not None:
+            # 从 Mongo 取出的时间可能无时区信息，统一按 UTC 处理再比较
             if expires.tzinfo is None:
                 expires = expires.replace(tzinfo=timezone.utc)
             if utc_now() > expires:
@@ -573,11 +618,13 @@ class UserStorage:
         """
         from bson import ObjectId
 
+        # 单独更新邮箱验证标记（如用户点击验证链接后）
         result = await self.collection.update_one(
             {"_id": ObjectId(user_id)},
             {"$set": {"email_verified": verified, "updated_at": utc_now()}},
         )
         if result.modified_count > 0:
+            # 验证状态影响可用能力，清理鉴权缓存
             try:
                 from src.api.deps import clear_auth_cache
 
@@ -600,6 +647,7 @@ class UserStorage:
         """
         from bson import ObjectId
 
+        # 发起找回密码时写入令牌与过期时间
         result = await self.collection.update_one(
             {"_id": ObjectId(user_id)},
             {
@@ -624,6 +672,7 @@ class UserStorage:
         """
         from bson import ObjectId
 
+        # 密码重置完成或作废时清空令牌，防止令牌被复用
         result = await self.collection.update_one(
             {"_id": ObjectId(user_id)},
             {
@@ -649,6 +698,8 @@ class UserStorage:
         """
         from bson import ObjectId
 
+        # 将 metadata 各键映射为 "metadata.<key>" 的点路径，实现字段级合并而非整体覆盖
+        # 每个 key 都经过校验，防止点路径注入
         update_fields = {
             f"metadata.{_validate_metadata_update_key(key)}": value
             for key, value in metadata.items()
@@ -665,6 +716,7 @@ class UserStorage:
             raise NotFoundError(f"用户 '{user_id}' 不存在")
 
         result["id"] = str(result.pop("_id"))
+        # metadata 变更后刷新鉴权缓存
         try:
             from src.api.deps import clear_auth_cache
 

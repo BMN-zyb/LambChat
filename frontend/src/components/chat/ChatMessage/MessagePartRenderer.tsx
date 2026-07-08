@@ -37,6 +37,9 @@ import type { RevealPreviewRequest } from "./items/revealPreviewData";
 import type { RevealPreviewOpenSource } from "./items/revealPreviewState";
 import { createToolPartAnchorId } from "./messagePartAnchors";
 
+// 消息「块」分发器：把单个 MessagePart 按 type 路由到对应渲染组件（主 agent 与子 agent 共用）。
+// type 包括 text/artifact/tool/thinking/subagent/sandbox/todo/summary/recommend_questions/cancelled；
+// 其中 tool 再按具体工具名细分到各专用展示组件，未命中则回退到通用 ToolCallItem。
 // Render single message part (shared by main agent and subagent)
 export function MessagePartRenderer({
   part,
@@ -70,6 +73,7 @@ export function MessagePartRenderer({
       ? createToolPartAnchorId(messageId, partIndex)
       : undefined;
 
+  // 文本块：走 Markdown 渲染（末块且流式时启用打字机效果）
   if (part.type === "text") {
     return (
       <MarkdownContent
@@ -87,6 +91,7 @@ export function MessagePartRenderer({
     );
   }
 
+  // 产物锚点：零高度占位元素，仅供外部导航高亮定位使用
   if (part.type === "artifact") {
     return (
       <span
@@ -97,6 +102,7 @@ export function MessagePartRenderer({
     );
   }
 
+  // 工具调用块：先按具体工具名匹配专用展示组件，未命中则回退到通用 ToolCallItem
   if (part.type === "tool") {
     // Detect Read tool, use dedicated component (strips line numbers, shows file path)
     if (part.name === "read_file") {
@@ -474,6 +480,7 @@ export function MessagePartRenderer({
         />
       );
     }
+    // 未匹配任何专用组件的工具：使用通用工具调用展示
     return (
       <ToolCallItem
         id={part.id}
@@ -489,6 +496,7 @@ export function MessagePartRenderer({
     );
   }
 
+  // 思考块：可折叠展示模型的思考过程
   if (part.type === "thinking") {
     return (
       <ThinkingBlock
@@ -499,6 +507,7 @@ export function MessagePartRenderer({
     );
   }
 
+  // 子 agent 块：展示被委派子 agent 的输入/产出，其内部 parts 递归渲染
   if (part.type === "subagent") {
     return (
       <SubagentBlock
@@ -518,6 +527,7 @@ export function MessagePartRenderer({
     );
   }
 
+  // 沙盒状态块：显示沙盒的创建/就绪/错误等状态
   // Sandbox status block
   if (part.type === "sandbox") {
     return (
@@ -531,6 +541,7 @@ export function MessagePartRenderer({
     );
   }
 
+  // 待办清单块：展示任务待办列表及完成进度
   // Todo task list block
   if (part.type === "todo") {
     return (
@@ -541,6 +552,7 @@ export function MessagePartRenderer({
     );
   }
 
+  // 摘要块：长对话或子 agent 的阶段性小结
   // Summary block
   if (part.type === "summary") {
     const panelKey = `summary:${part.agent_id || "root"}:${part.depth || 0}:${
@@ -555,6 +567,7 @@ export function MessagePartRenderer({
     );
   }
 
+  // 推荐追问块：流式期间不展示；完成后渲染为一组可点击的问题按钮
   if (part.type === "recommend_questions") {
     if (isStreaming) {
       return null;
@@ -581,6 +594,7 @@ export function MessagePartRenderer({
     );
   }
 
+  // 已取消块：显示「已中断」标记，若提供回调则附带「重试回答」按钮
   if (part.type === "cancelled") {
     return (
       <div

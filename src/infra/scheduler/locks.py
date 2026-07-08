@@ -11,6 +11,12 @@ from src.infra.storage.redis import get_redis_client
 
 logger = get_logger(__name__)
 
+# 多实例部署下，同一个定时任务会在每个实例都被 APScheduler 触发，这里用两种
+# Redis 锁做去重：
+#   - 执行锁（task_lock）：任务开跑时抢，跑完后释放。同一时刻只允许一个实例执行；
+#   - slot 锁（task_slot）：针对某个「具体触发时刻」的占用，抢到后【故意不释放】，
+#     用来挡住「延迟到达的其他实例」——即便第一个实例已跑完并释放了执行锁，慢半
+#     拍的实例也不会把同一触发时刻的任务再跑一遍。
 _LOCK_PREFIX = "scheduler:task_lock:"
 _SLOT_PREFIX = "scheduler:task_slot:"
 _LOCK_TTL = 600  # 10 min default TTL

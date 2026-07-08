@@ -30,6 +30,8 @@ import { Permission } from "../../../types";
 import type { TabType } from "./types";
 import type { Project } from "../../../types";
 
+// Header 的 props：activeTab 决定左侧内容（聊天页显示模型选择/项目，其他页显示返回+标题），
+// 其余为分享、大纲切换、模型选择等能力入口
 interface HeaderProps {
   activeTab: TabType;
   setMobileSidebarOpen: (open: boolean) => void;
@@ -53,6 +55,8 @@ interface HeaderProps {
   showOutlineButton?: boolean;
 }
 
+// 顶栏组件：左侧随标签变化（聊天页 = 移动菜单按钮 + 模型选择器 + 项目标签；
+// 其他页 = 返回按钮 + 标题），右侧为统一的「更多」溢出菜单（大纲/新建/分享/通知/主题/语言）与用户菜单。
 export function Header({
   activeTab,
   setMobileSidebarOpen,
@@ -80,6 +84,7 @@ export function Header({
   const mobileMenuBtnRef = useRef<HTMLButtonElement>(null);
   const mobileMenuPanelRef = useRef<HTMLDivElement>(null);
 
+  // 计算溢出菜单/语言菜单的固定定位（贴着触发按钮的右下方）
   const menuPosition = useStickyDropdownPosition(
     mobileMenuBtnRef,
     mobileMenuOpen || langMenuOpen,
@@ -89,6 +94,7 @@ export function Header({
     }),
   );
 
+  // 拉取当前活跃通知数量，用于「更多」菜单里的未读小红点
   const refreshNotifCount = () => {
     notificationApi
       .getActive()
@@ -99,6 +105,7 @@ export function Header({
     refreshNotifCount();
   }, []);
 
+  // 打开溢出菜单后，点击菜单外部自动关闭（延时挂载监听，避免同一次点击立即触发关闭）
   // Close mobile menu on outside click
   useEffect(() => {
     if (!mobileMenuOpen) return;
@@ -122,6 +129,7 @@ export function Header({
     };
   }, [mobileMenuOpen]);
 
+  // 是否显示分享按钮：需存在会话且当前用户拥有分享权限
   const hasSharePermission = user?.permissions?.includes(
     Permission.SESSION_SHARE,
   );
@@ -135,6 +143,7 @@ export function Header({
       <header className="relative z-50 flex items-center px-3 sm:px-5 py-3 shrink-0 rounded-bl-xl">
         {/* Left */}
         <div className="flex items-center gap-2 flex-shrink-0">
+          {/* 左侧区域：聊天页与其他标签页展示不同内容 */}
           {activeTab === "chat" ? (
             <>
               <button
@@ -157,6 +166,7 @@ export function Header({
                 </svg>
               </button>
 
+              {/* 模型选择器：仅当有可选模型且提供了选择回调时显示 */}
               {availableModels &&
                 availableModels.length > 0 &&
                 onSelectModel && (
@@ -169,6 +179,7 @@ export function Header({
                   />
                 )}
 
+              {/* 当前项目标签：会话归属于某项目时展示项目名 */}
               {currentProjectId &&
                 (() => {
                   const project = projectManager.projects.find(
@@ -225,6 +236,7 @@ export function Header({
             >
               <MoreHorizontal size={20} />
             </button>
+            {/* 「更多」菜单面板：用 portal 挂到 body，避免被容器裁剪 */}
             {mobileMenuOpen &&
               createPortal(
                 <div
@@ -331,6 +343,7 @@ export function Header({
               )}
           </div>
 
+          {/* 语言切换二级菜单 */}
           {langMenuOpen &&
             createPortal(
               <div
@@ -414,6 +427,7 @@ export function Header({
   );
 }
 
+// 溢出菜单里的单个菜单项按钮（统一样式）
 function HeaderMenuItem({
   onClick,
   children,
@@ -431,6 +445,7 @@ function HeaderMenuItem({
   );
 }
 
+// 溢出菜单项左侧的固定宽度图标容器
 function HeaderMenuIcon({ children }: { children: ReactNode }) {
   return (
     <span className="flex items-center justify-center w-5 shrink-0">

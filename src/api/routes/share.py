@@ -31,9 +31,12 @@ from src.kernel.schemas.share import (
 from src.kernel.schemas.user import TokenPayload
 from src.kernel.types import Permission
 
+# 会话分享路由（挂载于 /api/share）：创建/更新/列出/删除分享，以及公开访问分享内容。
+# 公开访问接口按 visibility 决定是否需要登录（public 允许匿名访问，此时 user 为 None）
 router = APIRouter()
 logger = get_logger(__name__)
 
+# 部分分享(PARTIAL)最多允许指定的 run_id 数量上限
 SHARE_PARTIAL_RUN_IDS_LIMIT = 100
 
 
@@ -51,6 +54,8 @@ def _require_share_permission(user: TokenPayload) -> None:
         )
 
 
+# 校验部分分享(PARTIAL)的 run_ids：非部分分享直接放行；
+# 部分分享必须提供 run_ids，且数量不得超过上限，否则返回 400
 def _validate_share_run_ids(share_data: ShareCreate | ShareUpdate) -> None:
     if share_data.share_type != ShareType.PARTIAL:
         return
@@ -66,20 +71,25 @@ def _validate_share_run_ids(share_data: ShareCreate | ShareUpdate) -> None:
         )
 
 
+# 读取分享内容时对 run_ids 做上限截断，防止历史数据超量导致一次拉取过多事件
 def _bounded_partial_run_ids(run_ids: list[str] | None) -> list[str] | None:
     if not run_ids:
         return None
     return run_ids[:SHARE_PARTIAL_RUN_IDS_LIMIT]
 
 
+# 解析分享展示用的团队头像：优先团队头像，其次默认成员，
+# 再次任一启用成员，最后取第一个成员的角色头像；都没有则返回 None
 def _resolve_shared_team_avatar(team) -> str | None:
     if team.avatar:
         return team.avatar
 
+    # 优先取团队指定的默认成员
     default_member = next(
         (member for member in team.members if member.member_id == team.default_member_id),
         None,
     )
+    # 依次回退：默认成员 -> 任一启用成员 -> 第一个成员
     fallback_member = (
         default_member
         or next((member for member in team.members if member.enabled), None)
@@ -94,12 +104,14 @@ async def _attach_shared_team_metadata(
     share,
 ) -> None:
     """Attach safe team display metadata for shared team sessions."""
+    # 仅当会话是团队(agent_id=="team")且带 team_id 时才附加团队信息
     metadata = session.metadata or {}
     team_id = metadata.get("team_id") if session.agent_id == "team" else None
     if not team_id:
         return
 
     session_info["team_id"] = team_id
+    # 加载团队名称与头像（只暴露安全的展示字段）；失败仅告警，不影响分享内容返回
     try:
         team = await TeamStorage().get_team(
             str(team_id),
@@ -132,18 +144,21 @@ async def create_share(
     if not session:
         raise HTTPException(status_code=404, detail="会话不存在")
 
+    # 只能分享自己的会话
     if session.user_id != user.sub:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="只能分享自己的会话",
         )
 
+    # 部分分享需校验 run_ids 合法
     _validate_share_run_ids(share_data)
 
     # 创建分享
     storage = ShareStorage()
     shared_session = await storage.create(share_data, owner_id=user.sub)
 
+    # 返回体带上前端可直接使用的公开访问路径 /shared/{share_id}
     return SharedSessionResponse(
         id=shared_session.id,
         share_id=shared_session.share_id,
@@ -168,12 +183,15 @@ async def list_shares(
     返回当前用户创建的所有分享记录。
     """
     storage = ShareStorage()
+    # 分页获取当前用户创建的分享记录
     shares, total = await storage.list_by_owner(user.sub, skip=skip, limit=limit)
 
     # 获取会话名称（批量查询）
+    # 去重收集涉及的会话 ID，一次性批量查出会话用于填充名称
     session_ids = list({share.session_id for share in shares})
     session_map = await SessionManager().get_sessions(session_ids) if session_ids else {}
 
+    # 逐条组装列表项；会话可能已被删除，此时名称为 None
     result_shares = []
     for share in shares:
         session = session_map.get(share.session_id)
@@ -211,6 +229,7 @@ async def update_share(
     if not share:
         raise HTTPException(status_code=404, detail="分享不存在")
 
+    # 只能编辑自己创建的分享
     if share.owner_id != user.sub:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -228,6 +247,7 @@ async def update_share(
             detail="只能分享自己的会话",
         )
 
+    # 增量更新：未显式提供的字段沿用原分享的值
     next_share_type = share_data.share_type or share.share_type
     next_visibility = share_data.visibility or share.visibility
     next_run_ids = share_data.run_ids if share_data.run_ids is not None else share.run_ids
@@ -236,7 +256,9 @@ async def update_share(
         run_ids=next_run_ids,
         visibility=next_visibility,
     )
+    # 用合并后的最终值校验 run_ids 合法性
     _validate_share_run_ids(normalized_update)
+    # 非部分分享则清空 run_ids（全量分享不需要指定轮次）
     if next_share_type != ShareType.PARTIAL:
         next_run_ids = None
 
@@ -278,6 +300,7 @@ async def list_session_shares(
     if not session:
         raise HTTPException(status_code=404, detail="会话不存在")
 
+    # 只能查看自己会话的分享
     if session.user_id != user.sub:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -323,6 +346,7 @@ async def delete_share(
     if not share:
         raise HTTPException(status_code=404, detail="分享不存在")
 
+    # 只能删除自己创建的分享
     if share.owner_id != user.sub:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -355,12 +379,14 @@ async def get_shared_content(
     - authenticated: 需要登录才能查看
     """
     storage = ShareStorage()
+    # 用对外公开的 share_id 查询分享记录（区别于内部主键 id）
     share = await storage.get_by_share_id(share_id)
 
     if not share:
         raise HTTPException(status_code=404, detail="分享不存在或已过期")
 
     # 检查访问权限
+    # public 可匿名访问（user 允许为 None）；authenticated 则必须已登录
     if share.visibility == ShareVisibility.AUTHENTICATED:
         if not user:
             raise HTTPException(
@@ -377,9 +403,11 @@ async def get_shared_content(
     # 获取会话事件
     dual_writer = get_dual_writer()
 
+    # 部分分享：只取被分享的 run（并做数量上限截断）；全量分享则为 None
     partial_run_ids = (
         _bounded_partial_run_ids(share.run_ids) if share.share_type == ShareType.PARTIAL else None
     )
+    # 只读取已完成的事件；带 limit 时多取一条用于探测是否被截断
     read_events_kwargs: dict[str, Any] = {"completed_only": True}
     if event_limit is not None:
         read_events_kwargs["max_events"] = event_limit + 1
@@ -396,11 +424,13 @@ async def get_shared_content(
             share.session_id,
             **read_events_kwargs,
         )
+    # 实际数量超过 limit 则标记已截断并裁剪回 limit 条
     events_limited = event_limit is not None and len(events) > event_limit
     if events_limited and event_limit is not None:
         events = events[:event_limit]
 
     # 获取分享者信息
+    # 展示分享者用户名与头像；用户不存在时回退为 Unknown
     user_storage = UserStorage()
     owner = await user_storage.get_by_id(share.owner_id)
     owner_info = SharedContentOwner(
@@ -409,6 +439,7 @@ async def get_shared_content(
     )
 
     # 构建会话信息（只返回安全的字段）
+    # 尽量解析出更友好的 Agent 展示名，失败则回退为 agent_id
     agent_name = session.agent_id
     try:
         agent_cls = get_agent_class(session.agent_id)
@@ -416,6 +447,7 @@ async def get_shared_content(
     except (ValueError, AttributeError):
         pass
 
+    # 从会话元数据中取所用模型（可能不存在）
     model = (session.metadata or {}).get("agent_options", {}).get("model")
 
     # Extract persona info from session metadata (stored at top level)
@@ -424,6 +456,7 @@ async def get_shared_content(
     persona_preset_name = metadata.get("persona_preset_name")
     persona_avatar = metadata.get("persona_avatar")
 
+    # 只挑选可安全公开的字段构建 session_info（裁剪掉敏感/内部数据）
     session_info = {
         "id": session.id,
         "name": session.name,
@@ -444,8 +477,10 @@ async def get_shared_content(
         session_info["persona_preset_name"] = persona_preset_name
     if persona_avatar:
         session_info["persona_avatar"] = persona_avatar
+    # 若为团队会话，附加安全的团队展示信息（名称/头像）
     await _attach_shared_team_metadata(session_info, session, share)
 
+    # 组装公开返回体：会话信息、事件、分享者、分享类型与 run_ids、截断标记
     return SharedContentResponse(
         session=session_info,
         events=events,

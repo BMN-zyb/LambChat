@@ -1,9 +1,12 @@
+// Vite 构建/开发配置：React 插件、PWA(injectManifest 自定义 SW)、Node polyfill 别名、
+// 生产去除 console、vendor 分包(manualChunks)、以及开发期代理到后端 8000（聊天流 24h 超时）。
 import fs from "node:fs";
 import path from "node:path";
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import { VitePWA } from "vite-plugin-pwa";
 
+// 可用的 Agent ID（需与后端保持一致）：下方据此为每个 /{agent_id} 生成 dev proxy 规则。
 // Available agents (sync with backend)
 const AGENT_IDS = ["default", "api", "data_pipeline", "simple_workflow"];
 const ICONS_DIR = path.resolve(__dirname, "public/icons");
@@ -19,6 +22,8 @@ function getStaticIconContentType(filePath: string): string {
   return "application/octet-stream";
 }
 
+// 自定义 dev 中间件插件：开发期直接以「一年不可变」强缓存响应 /icons/ 下的静态图标，
+// 避免频繁重复请求。仅处理 GET/HEAD，且做了路径穿越(..)防护，只读真实存在的文件。
 const cacheStableIconsPlugin = {
   name: "cache-stable-icons",
   configureServer(server: {
@@ -81,6 +86,9 @@ const cacheStableIconsPlugin = {
 export default defineConfig({
   plugins: [
     react(),
+    // PWA：采用 injectManifest 策略——用我们自己写的 src/sw.ts 作为 Service Worker 源，
+    // Vite 仅把预缓存清单(__WB_MANIFEST)注入进去。manifest:false 表示不生成 webmanifest，
+    // injectRegister:false 因为注册在 pwa.ts 中手动做；devOptions.enabled:false 关闭开发期 SW。
     VitePWA({
       strategies: "injectManifest",
       srcDir: "src",
@@ -101,6 +109,7 @@ export default defineConfig({
     cacheStableIconsPlugin,
   ],
   resolve: {
+    // 把部分 Node 内置模块/库映射到浏览器可用实现（polyfill），供依赖它们的库在前端运行。
     alias: [
       {
         find: /^opentype\.js$/,
@@ -128,11 +137,14 @@ export default defineConfig({
     ],
   },
   esbuild: {
+    // 生产构建时移除所有 console.* 与 debugger，减小体积并避免泄露调试信息。
     drop: process.env.NODE_ENV === "production" ? ["console", "debugger"] : [],
   },
   build: {
     rollupOptions: {
       output: {
+        // 手动分包：把体积大、变动少的第三方库按功能拆成独立 vendor chunk，
+        // 提升浏览器缓存命中率（业务代码更新时这些 chunk 无需重新下载）。
         manualChunks: {
           "vendor-react": ["react", "react-dom", "react-router-dom"],
           "vendor-codemirror": [
@@ -165,8 +177,12 @@ export default defineConfig({
   server: {
     host: true, // 监听所有地址 (0.0.0.0)，允许 127.0.0.1 和 localhost 访问
     port: 3001,
+    // 开发代理：把后端相关路径转发到本地后端 http://127.0.0.1:8000，规避跨域。
+    // 关键点：聊天流式接口(SSE/WebSocket)需开启 ws 并把超时拉到 24 小时，
+    // 否则长连接会被默认超时中断；普通 API 用 5 分钟超时即可。
     proxy: {
       // Long-running chat event stream
+      // 会话流式端点：正则精确匹配 /api/chat/sessions/{id}/stream，24h 超时承接长连接。
       "^/api/chat/sessions/[^/]+/stream$": {
         target: "http://127.0.0.1:8000",
         changeOrigin: true,
@@ -176,6 +192,8 @@ export default defineConfig({
         proxyTimeout: 86400000, // 24 hours proxy timeout
       },
       // API routes (including /api/chat for SSE)
+      // 通用 /api 代理：configure 里把原始 Host 透传为 X-Forwarded-Host，
+      // 供后端拼接正确的 OAuth redirect_uri（否则回调地址会指向后端而非前端）。
       "/api": {
         target: "http://127.0.0.1:8000",
         changeOrigin: true,
@@ -194,6 +212,7 @@ export default defineConfig({
         },
       },
       // Agent routes (/{agent_id}/chat, /{agent_id}/stream, /{agent_id}/skills)
+      // 为每个 Agent ID 动态生成一条代理规则（同样 24h 超时以支持流式）。
       ...Object.fromEntries(
         AGENT_IDS.map((id) => [
           `/${id}`,

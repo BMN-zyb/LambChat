@@ -65,16 +65,21 @@ UPLOAD_CONCURRENCY = 4
 
 # 同名项目最大保留版本数，超出时清理最旧的
 MAX_PROJECT_VERSIONS = 5
+# 项目文件上传临时缓冲的内存阈值：超过才落盘
 PROJECT_UPLOAD_SPOOL_MEMORY_LIMIT = 2 * 1024 * 1024
+# 单次 reveal 扫描/上传的文件数上限，防御超大目录
 MAX_PROJECT_FILES = 200
+# 旧版本清理任务的尽力执行限流器（后台跑，不阻塞主流程，最多 4 个并发）
 _project_cleanup_tasks = BestEffortTaskLimiter("project cleanup", max_tasks=4)
 
 
 async def drain_project_cleanup_tasks() -> None:
+    # 优雅停机时等待后台清理任务完成
     await _project_cleanup_tasks.drain()
 
 
 async def _json_dumps_result(data: dict[str, Any]) -> str:
+    # JSON 序列化放到线程池，避免阻塞事件循环
     return await run_blocking_io(json.dumps, data, ensure_ascii=False)
 
 
@@ -82,10 +87,12 @@ logger = get_logger(__name__)
 
 
 def _get_project_scan_limit() -> int:
+    # 扫描上限，至少为 1
     return max(int(MAX_PROJECT_FILES), 1)
 
 
 def _get_storage_internal_upload_max_size(storage: Any) -> int:
+    # 从存储配置读取内部上传大小上限，取不到则回退 50MB，且至少为 1
     config = getattr(storage, "_config", None)
     configured = (
         getattr(config, "internal_max_upload_size", 50 * 1024 * 1024)
@@ -96,6 +103,7 @@ def _get_storage_internal_upload_max_size(storage: Any) -> int:
 
 
 def _coerce_file_size(value: Any) -> int | None:
+    # 把后端返回的大小值安全转为非负 int；bool/None/非法值返回 None
     if isinstance(value, bool) or value is None:
         return None
     try:
@@ -106,6 +114,7 @@ def _coerce_file_size(value: Any) -> int | None:
 
 
 async def _get_backend_file_size(backend: Any, file_path: str) -> int | None:
+    # 逐一尝试后端可能提供的取大小方法（异步 -> 同步 -> 私有），用于下载前拦截大文件
     async_method = getattr(backend, "aget_file_size", None)
     if callable(async_method):
         try:
@@ -134,9 +143,11 @@ async def _get_backend_file_size(backend: Any, file_path: str) -> int | None:
 
 
 def _append_capped(files: list[str], file_path: str | None, seen: set[str] | None = None) -> bool:
+    # 受上限约束地追加文件路径，可选去重；返回是否已达扫描上限（用于提前 break）
     if not file_path:
         return len(files) >= _get_project_scan_limit()
     if seen is not None:
+        # 去重：已见过则不重复追加
         if file_path in seen:
             return len(files) >= _get_project_scan_limit()
         seen.add(file_path)
@@ -145,13 +156,17 @@ def _append_capped(files: list[str], file_path: str | None, seen: set[str] | Non
 
 
 def _is_single_file_project_path(project_path: str, all_files: list[str]) -> bool:
+    # 判断"项目路径其实指向单个文件"的特殊场景（仅 1 个文件且就是 project_path 本身）
     return len(all_files) == 1 and os.path.normpath(all_files[0]) == os.path.normpath(project_path)
 
 
 def _to_project_rel_path(project_path: str, file_path: str, *, single_file_path: bool) -> str:
+    # 把绝对文件路径转换为 manifest 用的项目内相对路径（以 / 开头）
     if single_file_path:
+        # 单文件场景：直接用文件名作为根路径
         return f"/{os.path.basename(file_path)}"
 
+    # 去掉项目路径前缀得到相对路径，并确保以 / 开头
     rel_path = file_path[len(project_path) :] if file_path.startswith(project_path) else file_path
     if not rel_path.startswith("/"):
         rel_path = "/" + rel_path
@@ -167,11 +182,13 @@ async def _get_storage():
 
 def _is_sandbox_backend(backend: Any) -> bool:
     """判断 backend 是否为沙箱类型（支持 shell 命令执行）"""
+    # 具备 execute/aexecute 的后端即沙箱；据此选择文件列举策略（find vs glob）
     return hasattr(backend, "execute") or hasattr(backend, "aexecute")
 
 
 async def _download_file_from_backend(backend: Any, file_path: str) -> Optional[bytes]:
     """通过 download_files 获取原始文件内容（沙箱/非沙箱均适用，无行号）"""
+    # 优先异步接口，回退同步接口（后者放线程池）
     if hasattr(backend, "adownload_files"):
         try:
             responses = await backend.adownload_files([file_path])
@@ -193,6 +210,7 @@ async def _download_file_from_backend(backend: Any, file_path: str) -> Optional[
 
 async def _execute_command(backend: Any, command: str) -> Optional[str]:
     """在沙箱 backend 中执行 shell 命令并返回 stdout，非沙箱返回 None"""
+    # 优先异步 aexecute，回退同步 execute；兼容返回对象(.output)或直接字符串
     if hasattr(backend, "aexecute"):
         try:
             result = await backend.aexecute(command)

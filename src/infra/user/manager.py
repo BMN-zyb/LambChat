@@ -15,10 +15,12 @@ from src.infra.user.storage import UserStorage
 from src.kernel.config import settings
 from src.kernel.schemas.user import Token, User, UserCreate, UserListResponse, UserUpdate
 
+# 尽力而为的后台任务限流器：删除用户时异步清理 S3 文件，最多并发 4 个，失败不影响主流程
 _s3_cleanup_tasks = BestEffortTaskLimiter("user S3 cleanup", max_tasks=4)
 
 
 async def drain_s3_cleanup_tasks() -> None:
+    # 供关停/测试时等待所有后台 S3 清理任务完成
     await _s3_cleanup_tasks.drain()
 
 
@@ -30,6 +32,7 @@ class UserManager:
     """
 
     def __init__(self):
+        # 业务门面：编排用户存储与角色存储两个数据层
         self.storage = UserStorage()
         self.role_storage = RoleStorage()
 
@@ -44,6 +47,7 @@ class UserManager:
             创建的用户
         """
         # 如果没有指定角色，检查是否是第一个用户
+        # 首个注册用户自动成为管理员，实现“开箱即用”的初始管理员
         if not user_data.roles:
             # 检查是否已有用户
             existing_users = await self.storage.list_users(limit=1)
@@ -56,6 +60,7 @@ class UserManager:
                 default_role = settings.DEFAULT_USER_ROLE
                 user_data.roles = [default_role or "user"]
 
+        # 落库并转换为对外的 User 模型（剥离敏感字段）
         user = await self.storage.create(user_data)
         return User.model_validate(user.model_dump())
 
@@ -73,12 +78,14 @@ class UserManager:
         Raises:
             EmailNotVerifiedError: 邮箱未验证（当 REQUIRE_EMAIL_VERIFICATION=true 时）
         """
+        # 先校验密码；storage.authenticate 不检查激活/验证状态
         user = await self.storage.authenticate(username_or_email, password)
         if not user:
             return None
 
         # 检查邮箱验证状态
         # 迁移脚本已将旧用户的 None 改为 True，所以只检查 is False
+        # 显式与 False 比较：区分“未验证(False)”与“旧数据未知(None)”，仅前者拦截
         if settings.REQUIRE_EMAIL_VERIFICATION and user.email_verified is False:
             from src.kernel.exceptions import EmailNotVerifiedError
 
@@ -92,6 +99,7 @@ class UserManager:
             raise AccountNotActiveError("账户未激活，请验证邮箱后登录", user.email)
 
         # 创建 token（用户信息从 API 动态获取）
+        # 校验通过后签发访问令牌与刷新令牌
         access_token = create_access_token(user_id=user.id)
 
         refresh_token = create_refresh_token(
@@ -118,6 +126,7 @@ class UserManager:
         user = await self.storage.get_by_id(user_id)
         if not user:
             return None
+        # 转换为对外模型，隐藏 password_hash 等敏感字段
         return User.model_validate(user.model_dump())
 
     async def update_user(self, user_id: str, user_data: UserUpdate) -> Optional[User]:
@@ -146,6 +155,7 @@ class UserManager:
 
         async def cleanup_s3_files(uid: str):
             """Background task to delete user's S3 files"""
+            # 删除用户前先异步清理其在 S3 上的文件，作为“尽力而为”的后台任务
             try:
                 if not get_s3_enabled():
                     return
@@ -157,6 +167,7 @@ class UserManager:
                 # Ignore S3 deletion errors - may not be configured
                 pass
 
+        # 提交后台清理任务（不阻塞删除），随后同步删除用户记录
         _s3_cleanup_tasks.create_task(cleanup_s3_files(user_id))
 
         return await self.storage.delete(user_id)
@@ -180,6 +191,7 @@ class UserManager:
         Returns:
             分页用户列表响应
         """
+        # 并发拉取“当前页数据”和“总条数”，减少一次串行等待
         users, total = await asyncio.gather(
             self.storage.list_users(skip, limit, is_active, search),
             self.storage.count_users(search, is_active),
@@ -189,5 +201,6 @@ class UserManager:
             total=total,
             skip=skip,
             limit=limit,
+            # 是否还有下一页：当前偏移+页大小仍小于总数
             has_more=skip + limit < total,
         )

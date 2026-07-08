@@ -46,6 +46,7 @@ import { buildEffectiveSkills, countEnabledSkills } from "./skillAvailability";
 const SCHEDULED_TASK_DEFAULTS_KEY = "lambchat_scheduled_task_defaults";
 const CHAT_SKILL_LIST_PARAMS = { limit: 100 };
 
+// ChatAppContent 的 props：外壳共享状态（个人资料弹窗、侧栏折叠、移动侧栏）由父级 AppContent 传入
 export interface ChatAppContentProps {
   showProfileModal: boolean;
   onCloseProfileModal: () => void;
@@ -57,6 +58,9 @@ export interface ChatAppContentProps {
   onShowProfile: () => void;
 }
 
+// 聊天标签页的状态编排容器（Container 组件）：集中调用所有聊天相关 hooks
+//（会话/消息、工具、技能、人设预设、Agent、审批、通知等），把整理后的数据与
+// 回调透传给展示层 ChatView；自身几乎不含视觉结构，只包裹 AppShell 与拖拽遮罩。
 export function ChatAppContent({
   showProfileModal,
   onCloseProfileModal,
@@ -73,9 +77,11 @@ export function ChatAppContent({
   const { enableSkills, availableModels, defaultModel } = useSettingsContext();
   const { hasPermission, isAuthenticated } = useAuth();
 
+  // 整页拖拽上传：捕获拖到窗口任意处的文件，作为待发送附件
   const { isPageDragging, pageDragAttachments, setPageDragAttachments } =
     useDragAndDrop();
 
+  // 工具调用审批：收集需要用户确认的请求，并提供响应/新增/清空方法
   const {
     approvals,
     respondToApproval,
@@ -84,6 +90,7 @@ export function ChatAppContent({
     isLoading: approvalLoading,
   } = useApprovals({ sessionId: null });
 
+  // 可用工具列表及其加载/开关状态（含「按当前 Agent 刷新工具」）
   const {
     tools,
     isLoading: toolsLoading,
@@ -92,6 +99,7 @@ export function ChatAppContent({
     refreshToolsForAgent,
   } = useTools();
 
+  // 技能列表（受全局 enableSkills 开关控制）
   const {
     skills,
     isLoading: skillsLoading,
@@ -100,6 +108,7 @@ export function ChatAppContent({
     fetchSkills,
   } = useSkills({ enabled: enableSkills, listParams: CHAT_SKILL_LIST_PARAMS });
 
+  // 人设预设的读写权限，以及分页/搜索/标签筛选状态（列表参数随之变化）
   const canReadPersonaPresets = hasPermission(Permission.PERSONA_PRESET_READ);
   const canManagePersonaPresets =
     hasPermission(Permission.PERSONA_PRESET_WRITE) ||
@@ -154,6 +163,7 @@ export function ChatAppContent({
 
   const projectManager = useProjectManager();
 
+  // 用 ref 保存「本次会话配置」快照，供 useAgent 的各 getter 在发送时同步读取最新值
   const sessionConfigRef = useRef({
     disabledSkills: [] as string[],
     enabledSkills: undefined as string[] | undefined,
@@ -162,6 +172,8 @@ export function ChatAppContent({
     agentOptions: {} as Record<string, boolean | string | number>,
   });
 
+  // 核心会话 hook：持有消息流、当前会话/运行、连接状态、Agent/团队选择、目标模式等，
+  // 并暴露发送/停止/清空/切换 Agent 等操作；通过传入的回调接管审批与技能新增事件。
   const {
     messages,
     sessionId,
@@ -232,6 +244,7 @@ export function ChatAppContent({
     },
   });
 
+  // 使用人设预设前，若当前处于「团队」模式则切回普通 Agent 模式（人设不作用于团队）
   const switchToPersonaAgentMode = useCallback(() => {
     if (currentAgent !== "team") return;
     const nextAgentId = resolvePersonaAgentId(currentAgent, undefined, agents);
@@ -241,6 +254,7 @@ export function ChatAppContent({
     selectTeam(null);
   }, [agents, currentAgent, selectTeam, switchAgent]);
 
+  // Agent 发生切换时刷新其可用工具集
   const prevAgentRef = useRef(currentAgent);
   useEffect(() => {
     if (prevAgentRef.current !== currentAgent) {
@@ -249,6 +263,7 @@ export function ChatAppContent({
     }
   }, [currentAgent, refreshToolsForAgent]);
 
+  // 按当前 Agent 允许的模型 id 过滤可选模型（null 表示不限制，[] 表示无可用模型）
   const filteredModels = useMemo(() => {
     if (!availableModels) return null;
     if (agentAllowedModelIds === null) return availableModels;
@@ -287,6 +302,7 @@ export function ChatAppContent({
   const isSessionRestoredRef = useRef(false);
   const lastTeamRouteRequestRef = useRef<string | null>(null);
 
+  // 从 /persona 页面跳转过来时，用路由 state 或 localStorage 恢复选中的人设预设
   // Restore persona from localStorage when navigating from /persona page
   useEffect(() => {
     const personaId = searchParams.get("persona");
@@ -332,6 +348,7 @@ export function ChatAppContent({
     switchToPersonaAgentMode,
   ]);
 
+  // 处理「通过路由指定 Agent/团队」的请求：切换后清理 URL 上的 agent/team 参数
   useEffect(() => {
     const teamRequest = getTeamRouteRequest(searchParams, location.state);
     if (!teamRequest) return;
@@ -351,6 +368,7 @@ export function ChatAppContent({
     );
   }, [location.state, searchParams, selectTeam, setSearchParams, switchAgent]);
 
+  // 会话尚未从历史恢复时，校正当前模型选择（结合可用模型列表与 localStorage 默认值）
   useEffect(() => {
     if (isSessionRestoredRef.current) return;
     const nextSelection = reconcileCurrentModelSelection({
@@ -405,6 +423,8 @@ export function ChatAppContent({
     [],
   );
 
+  // 在 render 期间同步写入 ref，确保 getAgentOptions 总能拿到最新 model_id；
+  // 若改用 useEffect 会晚一拍，导致使用默认模型时 model_id 缺失。
   // Sync ref synchronously during render so getAgentOptions always has
   // the latest model_id — useEffect introduces a one-tick delay that
   // can cause model_id to be missing when using the default model.
@@ -470,6 +490,7 @@ export function ChatAppContent({
     [createPersonaPreset, updatePersonaPreset],
   );
 
+  // 叠加「本次会话临时禁用的 MCP 工具」后的有效工具列表
   const effectiveTools = useMemo(() => {
     const sessionDisabled = new Set(sessionConfig.disabledMcpTools);
     if (sessionDisabled.size === 0) return tools;
@@ -479,6 +500,7 @@ export function ChatAppContent({
     });
   }, [tools, sessionConfig.disabledMcpTools]);
 
+  // 叠加人设技能名单与会话级禁用后的有效技能列表
   const effectiveSkills = useMemo(
     () =>
       buildEffectiveSkills({
@@ -600,10 +622,12 @@ export function ChatAppContent({
     [effectiveTools],
   );
 
+  // 是否有发送消息的权限（无权限时输入框禁用）
   const canSendMessage = hasPermission(Permission.CHAT_WRITE);
 
   const sidebarRef = useRef<SessionSidebarHandle>(null);
 
+  // 订阅 WebSocket 通知：把会话未读数等实时更新推给侧栏
   useWebSocketNotifications({
     sessionId,
     enabled: isAuthenticated,
@@ -643,6 +667,7 @@ export function ChatAppContent({
   const resolvedExternalNavigationTargetRunId =
     externalNavigationTargetRunId || externalNavigationRunId;
 
+  // 外部导航带 traceId 时，向后端查出对应 run_id，供消息列表定位并滚动到该轮
   useEffect(() => {
     const targetTraceId = externalNavigationTargetFile?.traceId ?? undefined;
 
@@ -688,6 +713,7 @@ export function ChatAppContent({
     };
   }, [sessionId, externalNavigationTargetFile?.traceId]);
 
+  // 加载历史会话后恢复其配置：Agent、技能、人设（API 优先、metadata 快照兜底）、团队、Agent 选项与模型
   const handleConfigRestored = useCallback(
     (config: {
       agent_id?: string;
@@ -762,6 +788,7 @@ export function ChatAppContent({
     onConfigRestored: handleConfigRestored,
   });
 
+  // 新建会话并把模型/会话配置/Agent 选项全部重置为默认值
   const handleNewSessionWithReset = useCallback(() => {
     const nextSelection = resolveDefaultModelSelection({
       availableModels,
@@ -806,6 +833,7 @@ export function ChatAppContent({
     outlineToggleRef.current?.();
   }, []);
 
+  // 渲染：AppShell 提供外壳（含会话侧栏），内部为整页拖拽遮罩 + 展示层 ChatView。
   return (
     <AppShell
       activeTab="chat"
@@ -842,6 +870,7 @@ export function ChatAppContent({
       }
     >
       <>
+        {/* 整页拖拽文件时显示的「拖放到此上传」全屏遮罩 */}
         {isPageDragging && (
           <div className="safe-area-viewport-padding fixed inset-0 z-[9999] flex items-center justify-center bg-stone-500/5 transition-colors dark:bg-stone-500/10">
             <div className="flex flex-col items-center gap-3 rounded-2xl border-2 border-dashed border-stone-400 bg-white/95 px-16 py-12 shadow-xl transition-colors dark:border-stone-500 dark:bg-stone-800/95">

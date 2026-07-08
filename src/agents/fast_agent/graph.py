@@ -50,6 +50,10 @@ class FastAgent(BaseGraphAgent):
     - 低延迟要求的场景
     """
 
+    # 以下为类级元数据，供 @register_agent 注册与前端展示读取：
+    # _agent_id 是注册表主键（须与装饰器 "fast" 一致）；_agent_name/_description 为默认展示名与描述；
+    # _name_key/_description_key 为 i18n 文案键；_version 版本号；_sort_order 列表排序权重（越小越靠前）；
+    # _supports_sandbox 标明是否提供沙箱能力（Fast Agent 明确不提供）。
     _agent_id = "fast"
     _agent_name = "Fast Agent"
     _name_key = "agents.fast.name"
@@ -59,6 +63,10 @@ class FastAgent(BaseGraphAgent):
     _sort_order = 2  # 排序权重，数值越小越靠前
     _supports_sandbox = False  # 不支持沙箱环境
 
+    # _options 声明该 agent 暴露给前端的可调选项（随 agent 元数据下发给 UI 渲染）：
+    # enable_thinking 控制思考强度（off/low/medium/high/max，仅支持思考的模型生效）；
+    # enable_code_interpreter 开关轻量 JS/TS 代码解释器。
+    # 用户所选值经 agent_options 一路透传到 nodes.py，用于构建 thinking 配置与相应中间件。
     _options = {
         "enable_thinking": {
             "type": "string",
@@ -87,6 +95,8 @@ class FastAgent(BaseGraphAgent):
         },
     }
 
+    # 向 BaseGraphAgent 暴露外层 graph 的状态 schema 类型，用于编译 graph。
+    # 单行函数体，按约定用上方注释而非 docstring。
     @property
     def state_class(self) -> type:
         return FastAgentState
@@ -97,8 +107,12 @@ class FastAgent(BaseGraphAgent):
 
         当前结构: START -> fast_agent_node -> END
         """
+        # 外层 graph 只是薄壳：唯一业务节点是 fast_agent_node，真正的 ReAct 循环在其内部由
+        # deepagents.create_deep_agent 装配。这里只把结构连成 START -> agent -> END。
         builder.add_node("agent", fast_agent_node)
+        # 设为入口节点（等价于从 START 连一条边到 "agent"）。
         builder.set_entry_point("agent")
+        # 唯一出边指向 END：节点执行完即结束整个外层 graph。
         builder.add_edge("agent", "END")
 
     async def initialize(self) -> None:
@@ -113,6 +127,8 @@ class FastAgent(BaseGraphAgent):
         # thread id so it cannot collide with the inner graph's message state.
         builder = GraphBuilder(self.state_class)
         self.build_graph(builder)
+        # 编译外层 graph：checkpointer=None —— 外层刻意保持无状态（对话历史由内层 deep agent 的
+        # checkpointer 持久化，避免两层 message state 互相覆盖）；recursion_limit 以会话级步数上限兜底。
         self._graph = builder.compile(
             checkpointer=None,
             recursion_limit=settings.SESSION_MAX_RUNS_PER_SESSION,
@@ -132,11 +148,14 @@ class FastAgent(BaseGraphAgent):
         """
         执行 graph
         """
+        # 懒初始化：首次流式调用时才编译外层 graph。
         if not self._initialized:
             await self.initialize()
 
+        # 把当前 user_id/session_id 绑定到上下文变量，供下游 backend、日志、工具调用读取。
         set_user_context(user_id or "default", session_id)
 
+        # Presenter 负责把内部事件转换为前端 SSE 事件流，并按需落库；未传入时按会话新建一个。
         if presenter is None:
             presenter = Presenter(
                 PresenterConfig(
@@ -162,6 +181,7 @@ class FastAgent(BaseGraphAgent):
             enabled_skills=enabled_skills,
             disabled_mcp_tools=disabled_mcp_tools,
         )
+        # setup 装配内置工具与技能；MCP 工具此时不加载，留到节点内首次用到时再懒加载。
         await context.setup()
 
         # 发送 metadata
@@ -171,6 +191,7 @@ class FastAgent(BaseGraphAgent):
         agent_options = kwargs.get("agent_options", {})
         logger.info(f"[FastAgent] agent_options: {agent_options}")
 
+        # 汇总用于 LangSmith 追踪的上下文（选项、过滤名单、persona、附件等），便于回溯每轮请求。
         langsmith_context = {
             "agent_options": agent_options,
             "disabled_tools": disabled_tools,
@@ -188,6 +209,8 @@ class FastAgent(BaseGraphAgent):
             langsmith_context,
         )
 
+        # 组装传给 graph 的 RunnableConfig：configurable 里塞入 presenter、context 与各类选项，
+        # 节点 fast_agent_node 通过 config.get("configurable") 读取它们；thread_id 用 session_id 串联会话。
         config: RunnableConfig = {
             "configurable": {
                 "thread_id": session_id,
@@ -220,11 +243,14 @@ class FastAgent(BaseGraphAgent):
         )
 
         try:
+            # 用 ensure_future 包装 graph 执行并登记到 _stream_tasks[run_id]，
+            # 使外部（如前端“停止”按钮）能通过取消该任务来中断本轮运行。
             graph_task = asyncio.ensure_future(self._graph.ainvoke(initial_state, config))
             self._stream_tasks[presenter.run_id] = graph_task
 
             await graph_task
 
+        # 被取消：确保底层 graph_task 也被取消并 await 干净，再向上重新抛出。
         except asyncio.CancelledError:
             if not graph_task.done():
                 graph_task.cancel()
@@ -234,6 +260,7 @@ class FastAgent(BaseGraphAgent):
                     pass
             raise
 
+        # 任务被中断（如会话超时或主动停止）：同样先让 graph_task 干净收尾再重新抛出。
         except TaskInterruptedError:
             if not graph_task.done():
                 graph_task.cancel()
@@ -243,6 +270,7 @@ class FastAgent(BaseGraphAgent):
                     pass
             raise
 
+        # 其它异常：先向前端发出 error 事件（携带异常类名）让 UI 感知失败，再向上抛出。
         except Exception as e:
             yield presenter.error(str(e), type(e).__name__)
             raise
@@ -261,7 +289,10 @@ class FastAgent(BaseGraphAgent):
                         "ended_at": datetime.now(timezone.utc).isoformat(),
                     },
                 }
+            # 无论成功或异常都注销任务登记并关闭 context；
+            # context.close() 不会关闭全局缓存的 mcp_manager（由其缓存机制自行回收）。
             self._stream_tasks.pop(presenter.run_id, None)
             await context.close()
 
+        # 正常收尾：发出 done 事件标记本轮流式结束。
         yield presenter.done()

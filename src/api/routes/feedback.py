@@ -5,6 +5,9 @@
 每个用户对每个 run 只能提交一次反馈。
 """
 
+# 用户反馈路由模块（挂载于 /api/feedback）
+# 职责：提交反馈、查询反馈列表/统计、查询某次运行(run)的反馈、删除反馈
+# run 指一次 agent 运行；反馈核心是点赞/点踩（RatingValue: up/down），按 (user, session, run) 唯一
 from functools import lru_cache
 from typing import Optional
 
@@ -28,13 +31,16 @@ router = APIRouter()
 logger = get_logger(__name__)
 
 
+# 用 lru_cache 把 FeedbackManager 缓存为进程内单例（首次调用创建，后续复用同一实例）
 @lru_cache
 def get_feedback_manager() -> FeedbackManager:
     """获取反馈管理器依赖（单例）"""
     return FeedbackManager()
 
 
+# 应用关闭时调用：若单例已创建则关闭其底层连接，并清空 lru_cache 缓存
 async def close_feedback_manager() -> None:
+    # currsize 为 0 表示从未创建过 manager，无需关闭
     if get_feedback_manager.cache_info().currsize == 0:
         return
     try:
@@ -54,6 +60,8 @@ def validate_object_id(id_str: str) -> ObjectId:
         )
 
 
+# POST /api/feedback/ —— 提交反馈，需要 feedback:write 权限（此处在函数体内手动校验）
+# 请求体 FeedbackCreate（含 session_id、run_id、rating 等）；同一用户对同一 run 重复提交时 manager 抛 ValueError -> 400
 @router.post("/", response_model=Feedback)
 async def submit_feedback(
     feedback_data: FeedbackCreate,
@@ -66,6 +74,7 @@ async def submit_feedback(
     需要 feedback:write 权限
     每个用户对每个 run 只能提交一次反馈
     """
+    # 手动权限校验：提交反馈需要 feedback:write 权限
     if "feedback:write" not in user.permissions:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -87,6 +96,8 @@ async def submit_feedback(
         )
 
 
+# GET /api/feedback/ —— 管理端分页查询反馈列表，需要 feedback:read 权限
+# 可按 rating（up/down）、user_id、session_id 过滤，skip/limit 分页
 @router.get("/", response_model=FeedbackListResponse)
 async def list_feedback(
     skip: int = Query(0, ge=0, description="跳过数量"),
@@ -111,6 +122,7 @@ async def list_feedback(
     )
 
 
+# GET /api/feedback/stats —— 获取反馈聚合统计（可按 session_id/run_id 过滤），需要 feedback:read 权限
 @router.get("/stats", response_model=FeedbackStats)
 async def get_feedback_stats(
     session_id: Optional[str] = Query(None, description="会话ID过滤"),
@@ -126,6 +138,8 @@ async def get_feedback_stats(
     return await manager.get_stats(session_id, run_id)
 
 
+# GET /api/feedback/my/by-run/{session_id}/{run_id} —— 查询"当前用户"对某次 run 的反馈（可能为 None）
+# 需要 feedback:write 权限（表示用户有权查看自己提交过的反馈）
 @router.get("/my/by-run/{session_id}/{run_id}", response_model=Optional[Feedback])
 async def get_my_feedback_for_run(
     session_id: str,
@@ -146,6 +160,7 @@ async def get_my_feedback_for_run(
     return await manager.get_user_feedback_for_run(user.sub, session_id, run_id)
 
 
+# GET /api/feedback/by-run/{session_id}/{run_id} —— 查询某次 run 的全部反馈（管理端），需要 feedback:read 权限
 @router.get("/by-run/{session_id}/{run_id}", response_model=list[Feedback])
 async def get_feedback_by_run(
     session_id: str,
@@ -161,6 +176,7 @@ async def get_feedback_by_run(
     return await manager.get_feedback_by_run(session_id, run_id)
 
 
+# GET /api/feedback/stats/{session_id}/{run_id} —— 查询某次 run 的反馈统计，需要 feedback:read 权限
 @router.get("/stats/{session_id}/{run_id}", response_model=FeedbackStats)
 async def get_run_feedback_stats(
     session_id: str,
@@ -176,6 +192,8 @@ async def get_run_feedback_stats(
     return await manager.get_stats(session_id, run_id)
 
 
+# DELETE /api/feedback/{feedback_id} —— 删除一条反馈，需要 feedback:admin 权限（高于读写）
+# feedback_id 必须是合法 ObjectId（否则 400）；不存在返回 404，成功返回 {"status": "deleted"}
 @router.delete("/{feedback_id}")
 async def delete_feedback(
     feedback_id: str,

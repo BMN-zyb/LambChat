@@ -8,6 +8,8 @@ from abc import ABC, abstractmethod
 from typing import Any, Optional
 
 
+# 存储抽象基类：用 ABC + abstractmethod 约束所有键值存储实现统一对外接口，
+# 便于上层在不同后端（Redis 等）之间无缝替换
 class StorageBase(ABC):
     """
     存储抽象基类
@@ -26,6 +28,7 @@ class StorageBase(ABC):
         Returns:
             数据或 None
         """
+        # 抽象方法：由具体后端实现按 key 读取
         pass
 
     @abstractmethod

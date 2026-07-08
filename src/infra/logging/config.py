@@ -34,6 +34,7 @@ def parse_log_levels(levels_str: str) -> Dict[str, str]:
     levels = {}
     for item in levels_str.split(","):
         item = item.strip()
+        # 跳过不含 "=" 的畸形片段;级别统一大写以匹配 logging 的级别名。
         if "=" not in item:
             continue
         module, level = item.split("=", 1)
@@ -72,6 +73,8 @@ def setup_logging() -> None:
     console_handler.setFormatter(formatter)
 
     # 添加追踪过滤器
+    # TraceFilter 会在每条日志记录上补充当前的 trace/request 上下文字段,
+    # 供上面的 LOG_FORMAT 引用输出(把追踪信息织入日志的关键一步)。
     console_handler.addFilter(TraceFilter())
 
     # 添加处理器到根日志器

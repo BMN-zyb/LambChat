@@ -17,16 +17,21 @@ from src.kernel.schemas.mcp import (
     UserMCPServer,
 )
 
+# 仅在类型检查阶段导入 MCPStorage，运行时不导入以打破循环依赖
+# （本模块的方法通过 mixin 混入 MCPStorage，self 的真实类型即 MCPStorage）
 if TYPE_CHECKING:
     from src.infra.mcp.storage import MCPStorage
 
 
+# 延迟读取服务器列表上限：局部导入避免模块级循环依赖
 def _server_list_limit() -> int:
     from src.infra.mcp.storage import MCP_SERVER_LIST_LIMIT
 
     return MCP_SERVER_LIST_LIMIT
 
 
+# 兼容性封装：若游标对象支持 .limit(n) 则套用上限，否则原样返回
+# （不同的 Mongo 驱动/测试桩游标可能没有 limit 方法）
 def _limit_cursor(cursor: Any, limit: int) -> Any:
     limit_method = getattr(cursor, "limit", None)
     if callable(limit_method):
@@ -34,6 +39,10 @@ def _limit_cursor(cursor: Any, limit: int) -> Any:
     return cursor
 
 
+# 判断用户是否可访问某系统级服务器：
+# - 管理员放行
+# - 服务器未配置 allowed_roles（为空）表示对所有人可见
+# - 否则要求用户角色与允许角色有交集
 def _can_access_system_server(
     allowed_roles: list[str] | None,
     user_roles: list[str] | None,
@@ -48,6 +57,7 @@ def _can_access_system_server(
     return bool(set(user_roles or []).intersection(allowed_roles))
 
 
+# 读取“有效配置”允许合并的服务器数量上限，做健壮性兜底（非法值回退 100）
 def _get_effective_config_max_servers() -> int:
     value = getattr(settings, "MCP_EFFECTIVE_CONFIG_MAX_SERVERS", 100)
     try:
@@ -56,6 +66,11 @@ def _get_effective_config_max_servers() -> int:
         return 100
 
 
+# 以下四个 _doc_to_* 适配器统一“同步/异步转换器”两种实现：
+# 若 MCPStorage 提供了 *_async 版本（需解密等异步操作）则优先用异步，否则回退同步版本
+# 这样把“文档 -> 领域模型/响应”的转换细节留给基类，本模块只负责编排
+
+# 文档 -> 系统级服务器模型
 async def _doc_to_system_server(self: "MCPStorage", doc: dict[str, Any]) -> SystemMCPServer:
     converter = getattr(self, "_doc_to_system_server_async", None)
     if callable(converter):
@@ -63,6 +78,7 @@ async def _doc_to_system_server(self: "MCPStorage", doc: dict[str, Any]) -> Syst
     return self._doc_to_system_server(doc)
 
 
+# 文档 -> 用户级服务器模型
 async def _doc_to_user_server(self: "MCPStorage", doc: dict[str, Any]) -> UserMCPServer:
     converter = getattr(self, "_doc_to_user_server_async", None)
     if callable(converter):
@@ -70,6 +86,7 @@ async def _doc_to_user_server(self: "MCPStorage", doc: dict[str, Any]) -> UserMC
     return self._doc_to_user_server(doc)
 
 
+# 文档 -> 运行时配置字典（用于下发给客户端/沙箱）
 async def _doc_to_config_dict(self: "MCPStorage", doc: dict[str, Any]) -> dict[str, Any]:
     converter = getattr(self, "_doc_to_config_dict_async", None)
     if callable(converter):
@@ -77,6 +94,7 @@ async def _doc_to_config_dict(self: "MCPStorage", doc: dict[str, Any]) -> dict[s
     return self._doc_to_config_dict(doc)
 
 
+# 文档 -> 前端响应模型：可控制是否可编辑、是否隐藏敏感字段
 async def _doc_to_response(
     self: "MCPStorage",
     doc: dict[str, Any],
@@ -108,10 +126,17 @@ class StorageOperations:
     All methods operate on the same MongoDB collections as the base class.
     """
 
+    # 说明：本类是 MCPStorage 的 mixin，方法里的 self 实际是 MCPStorage 实例，
+    # 因此可直接调用基类提供的 _get_*_collection / _invalidate_*_cache 等能力
+
     # ==========================================
     # Server Type Conversion (Admin only)
+    # 服务器类型转换（仅管理员）：用户级 <-> 系统级 互转
     # ==========================================
 
+    # 将用户级服务器“升格”为系统级（仅管理员）
+    # 语义：把文档从用户集合搬到系统集合，保留创建者信息并记录来源
+    # 返回新的系统级服务器；用户服务器不存在或同名系统服务器已存在（冲突）时返回 None
     async def promote_to_system_server(  # type: ignore[misc]
         self: "MCPStorage", name: str, user_id: str, admin_user_id: str
     ) -> Optional[SystemMCPServer]:
@@ -122,16 +147,19 @@ class StorageOperations:
         Returns the new system server, or None if user server not found.
         """
         # Get the user server
+        # 源用户服务器不存在则无法升格
         user_server = await self.get_user_server(name, user_id)
         if not user_server:
             return None
 
         # Check if system server with same name exists
+        # 同名系统服务器已存在则视为冲突，拒绝升格
         existing_system = await self.get_system_server(name)
         if existing_system:
             return None  # Conflict
 
         # Create system server
+        # 组装系统级文档：置 is_system=True，记录 promoted_from_user/created_by 保留溯源
         now = utc_now_iso()
         system_collection = self._get_system_collection()
         doc = {
@@ -151,6 +179,7 @@ class StorageOperations:
             "created_by": user_id,  # Original creator
         }
         # 加密敏感字段
+        # 落库前对 env/headers 做 Fernet 加密；用线程池执行避免阻塞事件循环
         from src.infra.mcp.encryption import encrypt_server_secrets
 
         doc = await run_blocking_io(encrypt_server_secrets, doc)
@@ -158,13 +187,18 @@ class StorageOperations:
         await system_collection.insert_one(doc)
 
         # Delete the user server (this will invalidate user cache)
+        # 删除原用户服务器（该操作会顺带失效用户缓存）
         await self.delete_user_server(name, user_id)
 
         # Invalidate all caches since system server now exists
+        # 新增了系统服务器，影响所有用户，故全量失效缓存
         await self._invalidate_all_cache()
 
         return await _doc_to_system_server(self, doc)
 
+    # 将系统级服务器“降格”为用户级（仅管理员）
+    # 语义：把文档从系统集合搬到用户集合，归属到 target_user_id
+    # 返回新的用户级服务器；系统服务器不存在或目标用户已有同名服务器时返回 None
     async def demote_to_user_server(  # type: ignore[misc]
         self: "MCPStorage", name: str, target_user_id: str, admin_user_id: str
     ) -> Optional[UserMCPServer]:
@@ -176,16 +210,19 @@ class StorageOperations:
         Returns the new user server, or None if system server not found.
         """
         # Get the system server
+        # 源系统服务器不存在则无法降格
         system_server = await self.get_system_server(name)
         if not system_server:
             return None
 
         # Check if user server with same name exists
+        # 目标用户已有同名服务器则冲突，拒绝降格
         existing_user = await self.get_user_server(name, target_user_id)
         if existing_user:
             return None  # Conflict
 
         # Create user server
+        # 组装用户级文档：置 is_system=False，归属 target_user_id
         now = utc_now_iso()
         user_collection = self._get_user_collection()
         doc = {
@@ -202,6 +239,7 @@ class StorageOperations:
             "updated_at": now,
         }
         # 加密敏感字段
+        # 同样在落库前加密 env/headers
         from src.infra.mcp.encryption import encrypt_server_secrets
 
         doc = await run_blocking_io(encrypt_server_secrets, doc)
@@ -209,15 +247,18 @@ class StorageOperations:
         await user_collection.insert_one(doc)
 
         # Delete the system server (this will invalidate all caches)
+        # 删除原系统服务器（该操作会全量失效缓存）
         await self.delete_system_server(name)
 
         # Invalidate cache for target user
+        # 目标用户新增了服务器，失效其个人缓存
         await self._invalidate_user_cache(target_user_id)
 
         return await _doc_to_user_server(self, doc)
 
     # ==========================================
     # Combined Operations (for runtime)
+    # 组合查询（运行时使用）：合并系统级 + 用户级视图
     # ==========================================
 
     async def get_sandbox_servers(  # type: ignore[misc]

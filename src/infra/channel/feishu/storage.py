@@ -25,6 +25,7 @@ from src.kernel.schemas.feishu import (
 
 logger = get_logger(__name__)
 
+# 列表查询返回条数上限。
 FEISHU_CONFIG_LIST_LIMIT = 200
 
 
@@ -37,11 +38,13 @@ class FeishuStorage:
     """
 
     def __init__(self):
+        # Mongo 客户端与集合句柄惰性初始化。
         self._client = None
         self._collection = None
 
     def _get_collection(self):
         """Get Feishu config collection lazily"""
+        # 首次访问时建立连接并选中集合；这是旧版"每用户单份飞书配置"的集合。
         if self._collection is None:
             self._client = get_mongo_client()
             db = self._client[settings.MONGODB_DB]
@@ -61,6 +64,7 @@ class FeishuStorage:
         collection = self._get_collection()
 
         # Check if config already exists
+        # 该集合约束每用户仅一份配置：已存在则直接报错，避免重复创建。
         existing = await collection.find_one({"user_id": user_id})
         if existing:
             raise ValueError("Feishu configuration already exists for this user")
@@ -69,6 +73,7 @@ class FeishuStorage:
         doc = {
             "user_id": user_id,
             "app_id": config.app_id,
+            # app_secret 落库前加密。
             "app_secret": await self._encrypt_secret(config.app_secret),
             "encrypt_key": config.encrypt_key,
             "verification_token": config.verification_token,
@@ -99,6 +104,7 @@ class FeishuStorage:
 
         update_data: dict[str, Any] = {"updated_at": utc_now_iso()}
 
+        # 仅对显式传入（非 None）的字段做部分更新；app_secret 变更时重新加密。
         if updates.app_id is not None:
             update_data["app_id"] = updates.app_id
         if updates.app_secret is not None:
@@ -142,6 +148,8 @@ class FeishuStorage:
         if not config:
             return None
 
+        # 对外响应脱敏：不回传明文密钥，只用 has_app_secret 标识是否已设置，
+        # encrypt_key/verification_token 有值则以 *** 占位。
         return FeishuConfigResponse(
             user_id=config.user_id,
             app_id=config.app_id,
@@ -183,12 +191,14 @@ class FeishuStorage:
         if not secret:
             return ""
         # Use the same encryption as MCP
+        # 复用 MCP 的加密实现；加密是阻塞操作，放到线程池执行。
         return await run_blocking_io(encrypt_value, {"value": secret})
 
     async def _decrypt_secret(self, encrypted: dict | str) -> str:
         """Decrypt a secret string"""
         if not encrypted:
             return ""
+        # 兼容历史明文数据：字符串形态直接返回，dict 形态才解密。
         if isinstance(encrypted, str):
             return encrypted  # Legacy unencrypted
         decrypted = await run_blocking_io(decrypt_value, encrypted)
@@ -198,6 +208,7 @@ class FeishuStorage:
 
     async def _doc_to_config(self, doc: dict) -> FeishuConfig:
         """Convert MongoDB document to FeishuConfig"""
+        # 时间字段以 ISO 字符串存储；解析时把末尾的 Z 转为 +00:00 以便 fromisoformat 识别。
         created_at = doc.get("created_at")
         updated_at = doc.get("updated_at")
 

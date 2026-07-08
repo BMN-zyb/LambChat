@@ -23,6 +23,8 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
+# 这两个模块级包装通过 session_manager 模块属性做一层间接，便于测试时 monkeypatch 替换
+# （未替换则用真实实现）。mixin 内部统一调用它们，而非直接 import 具体函数。
 def run_blocking_io(*args, **kwargs):
     from src.infra.sandbox import session_manager
 
@@ -35,9 +37,13 @@ def ensure_sandbox_mcp(*args, **kwargs):
     return getattr(session_manager, "ensure_sandbox_mcp", _ensure_sandbox_mcp)(*args, **kwargs)
 
 
+# E2B 平台的生命周期方法集合，通过多继承混入 SessionSandboxManager。
+# 所有方法都依赖 self 提供的共享设施（cache / bindings / locks / scoping 等）。
 class _E2BMixin:
     """E2B platform lifecycle methods for SessionSandboxManager."""
 
+    # 仅供类型检查：声明本 mixin 期望宿主类（SessionSandboxManager）提供的属性与方法，
+    # 运行时不生效（避免与真正的实现冲突）。
     if TYPE_CHECKING:
         _e2b_adapter: Optional["E2BSandboxAdapter"]
         _cache: OrderedDict[str, tuple[str, CompositeBackend, object | None]]
@@ -69,6 +75,8 @@ class _E2BMixin:
 
         async def _get_user_env_vars(self, user_id: str) -> dict[str, str]: ...
 
+    # E2B 版的"获取或创建"：先查内存缓存并做健康检查（活着就续期、复用）；否则按绑定用
+    # Sandbox.connect() 重连（自动恢复暂停的沙箱）；再不行就新建并绑定。与 Daytona 流程对应。
     async def _get_or_create_e2b(
         self, session_id: str, user_id: str
     ) -> tuple[CompositeBackend, str]:
@@ -144,6 +152,7 @@ class _E2BMixin:
 
             return await self._create_and_bind_e2b(session_id, user_id)
 
+    # 新建 E2B 沙箱并绑定到用户：注入用户环境变量，创建后写绑定；写绑定失败则回滚（stop 沙箱）。
     async def _create_and_bind_e2b(
         self, session_id: str, user_id: str
     ) -> tuple[CompositeBackend, str]:
@@ -183,6 +192,7 @@ class _E2BMixin:
         await ensure_sandbox_mcp(scoped_backend, user_id)
         return scoped_backend, scoped_work_dir
 
+    # 用已有 provider 沙箱对象组装 CompositeBackend（默认后端 + /skills/ 路由）。
     def _build_composite_backend(self, provider_obj: object, user_id: str) -> CompositeBackend:
         from src.infra.backend.e2b import E2BBackend
 
@@ -191,6 +201,7 @@ class _E2BMixin:
             routes={"/skills/": create_skills_backend(user_id=user_id)},
         )
 
+    # 停止用户的 E2B 沙箱：持用户锁，优先 pause 保留数据，成功后清缓存并把绑定标记为 paused。
     async def _stop_e2b(self, user_id: str) -> bool:
         assert self._e2b_adapter is not None
         lock = self._get_user_lock(user_id)

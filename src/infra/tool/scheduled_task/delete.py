@@ -9,6 +9,8 @@ from src.infra.scheduler.service import ScheduledTaskService
 from src.infra.tool.backend_utils import get_user_id_from_runtime
 from src.kernel.types import Permission
 
+# ToolRuntime 兼容处理：不同 langchain 版本对该类型的导出路径不一致，
+# 若正式包里没有该符号，就动态构造一个占位模块，避免 import 失败导致整个工具不可用
 if TYPE_CHECKING:
     from langchain.tools import ToolRuntime
 else:
@@ -32,9 +34,11 @@ async def scheduled_task_delete(
 ) -> str:
     """Delete a scheduled task. This is a hard delete — the task document is physically
     removed from the database and will no longer appear in listings or fire."""
+    # runtime 由 LangChain 框架自动注入（InjectedToolArg），从中解析出当前用户身份
     user_id = get_user_id_from_runtime(runtime)
     if not user_id:
         return _json({"error": "No user context available"})
+    # 删除操作使用独立的 SCHEDULED_TASK_DELETE 权限点，与读/写权限区分
     error = await _permission_error(user_id, Permission.SCHEDULED_TASK_DELETE.value)
     if error:
         return _json(error)
@@ -43,6 +47,8 @@ async def scheduled_task_delete(
     task = await service.get_task(task_id)
     if task is None:
         return _json({"error": f"Task '{task_id}' not found"})
+    # 越权保护：即使 task_id 存在，也只允许任务所有者删除；
+    # 非所有者一律返回"未找到"而不是"无权限"，避免暴露任务是否存在
     if task.owner_id != user_id:
         return _json({"error": f"Task '{task_id}' not found"})
 
@@ -73,6 +79,7 @@ async def scheduled_task_run(
     user_id = get_user_id_from_runtime(runtime)
     if not user_id:
         return _json({"error": "No user context available"})
+    # 手动触发一次运行属于"写"操作（会产生一次真实执行），而非删除权限
     error = await _permission_error(user_id, Permission.SCHEDULED_TASK_WRITE.value)
     if error:
         return _json(error)

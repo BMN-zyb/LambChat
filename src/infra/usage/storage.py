@@ -15,8 +15,12 @@ from src.kernel.config import settings
 
 logger = get_logger(__name__)
 
+# 列表查询单页返回上限(防止一次拉取过多)。
 USAGE_LOG_LIMIT_MAX = 200
+# 各类排行榜(agents/teams/models 等)取前 N 名。
 USAGE_RANKING_LIMIT = 8
+# 判定「一条用量记录是否属于定时任务」的聚合表达式:source 为 scheduled_task,
+# 或 scheduled_task_id 非空。用于仪表盘里统计定时任务占比。
 SCHEDULED_USAGE_CONDITION = {
     "$or": [
         {"$eq": ["$source", "scheduled_task"]},
@@ -31,6 +35,7 @@ SCHEDULED_USAGE_CONDITION = {
 
 
 def _as_int(value: Any) -> int:
+    # 防御式转 int(用于外部/历史脏数据):bool 转 0/1,数值取非负,字符串尽力解析,失败则 0。
     if isinstance(value, bool):
         return int(value)
     if isinstance(value, int):
@@ -46,6 +51,7 @@ def _as_int(value: Any) -> int:
 
 
 def _as_float(value: Any) -> float:
+    # 防御式转 float,取非负;无法解析则 0.0。
     if isinstance(value, bool):
         return float(value)
     if isinstance(value, (int, float)):
@@ -59,6 +65,7 @@ def _as_float(value: Any) -> float:
 
 
 def _as_datetime(value: Any) -> datetime | None:
+    # 尽力把值转成 datetime:已是 datetime 直接返回,ISO 字符串解析,其他/失败返回 None。
     if value is None:
         return None
     if isinstance(value, datetime):
@@ -72,12 +79,14 @@ def _as_datetime(value: Any) -> datetime | None:
 
 
 def _as_str(value: Any) -> str:
+    # 仅当是字符串才返回,否则返回空串(统一 None/非字符串为 "")。
     return value if isinstance(value, str) else ""
 
 
 def _merge_metadata_value(
     metadata: Dict[str, Any], session_metadata: Dict[str, Any], key: str
 ) -> str:
+    # 取某字段:优先 trace 自身 metadata,缺失则回退到 session 级 metadata。
     return _as_str(metadata.get(key)) or _as_str(session_metadata.get(key))
 
 
@@ -85,11 +94,13 @@ class UsageStorage:
     """使用日志存储 — 独立的 usage_logs 集合"""
 
     def __init__(self):
+        # usage_logs 集合(惰性加载)。
         self._collection = None
 
     @property
     def collection(self):
         """延迟加载 usage_logs 集合"""
+        # 首次访问才连库取集合,避免导入期建立连接。
         if self._collection is None:
             client = get_mongo_client()
             db = client[settings.MONGODB_DB]
@@ -98,6 +109,8 @@ class UsageStorage:
 
     async def ensure_indexes(self) -> None:
         """创建索引"""
+        # trace_id 唯一索引:配合 upsert 保证每个 trace 只有一条用量记录(幂等写入)。
+        # 其余为「过滤字段 + started_at 倒序」的复合索引,支撑按用户/模型/团队/来源等维度的时间序查询。
         try:
             await self.collection.create_index(
                 "trace_id",
@@ -115,6 +128,7 @@ class UsageStorage:
             logger.error(f"Failed to create usage logs indexes: {e}")
 
     async def _get_session_metadata(self, session_id: str) -> Dict[str, Any]:
+        # 取会话级 metadata,作为 trace metadata 缺失字段的回退来源;任何异常都降级为空 dict。
         if not session_id:
             return {}
         try:
@@ -131,6 +145,7 @@ class UsageStorage:
             return {}
 
     async def _resolve_team_name(self, team_id: str) -> str:
+        # 由 team_id 反查团队名(当 metadata 里没有 team_name 时的兜底)。
         if not team_id:
             return ""
         try:
@@ -138,6 +153,7 @@ class UsageStorage:
 
             from src.infra.team.storage import TeamStorage
 
+            # team_id 可能是 ObjectId 的字符串形式,先尝试转 ObjectId,失败则按原字符串查询。
             query_id: ObjectId | str
             try:
                 query_id = ObjectId(team_id)
@@ -166,6 +182,7 @@ class UsageStorage:
             return False
 
         # 从 events 中找到最后一个 token:usage 事件
+        # 倒序遍历取「最后一条」token:usage(通常代表本次 run 的最终累计用量)。
         usage_event = None
         for event in reversed(trace_doc.get("events", [])):
             if event.get("event_type") == "token:usage":
@@ -193,20 +210,24 @@ class UsageStorage:
         if not trace_id:
             return False
 
+        # 合并 trace 与 session 两级 metadata 作为字段来源。
         metadata = trace_doc.get("metadata", {}) or {}
         session_metadata = await self._get_session_metadata(str(trace_doc.get("session_id") or ""))
         usage_data = usage_data or {}
         input_tokens = _as_int(usage_data.get("input_tokens", 0))
         output_tokens = _as_int(usage_data.get("output_tokens", 0))
         total_tokens = _as_int(usage_data.get("total_tokens", 0))
+        # 若上游未给 total,则用 输入+输出 兜底计算。
         if total_tokens <= 0:
             total_tokens = input_tokens + output_tokens
 
+        # team_name 优先取 metadata,缺失时按 team_id 反查团队集合。
         team_id = _merge_metadata_value(metadata, session_metadata, "team_id")
         team_name = _merge_metadata_value(
             metadata, session_metadata, "team_name"
         ) or await self._resolve_team_name(team_id)
 
+        # 组装一条「扁平化」的用量记录:把维度字段与 token/时长/状态等指标拍平,便于后续直接聚合查询。
         doc = {
             "trace_id": trace_id,
             "session_id": trace_doc.get("session_id", ""),
@@ -249,6 +270,7 @@ class UsageStorage:
         }
 
         try:
+            # 按 trace_id upsert:存在则覆盖(重复完成/补写不会产生重复记录),不存在则插入。
             await self.collection.update_one(
                 {"trace_id": trace_id},
                 {"$set": doc},
@@ -298,6 +320,7 @@ class UsageStorage:
 
         try:
             # 并行执行 count + stats + items
+            # 计数/聚合统计 与 分页取数 相互独立,用两个 task 并发执行以降低总延迟。
             import asyncio
 
             count_task = asyncio.create_task(self._count_and_stats(query))
@@ -320,6 +343,7 @@ class UsageStorage:
         end_date: Optional[str] = None,
         search: Optional[str] = None,
     ) -> Dict[str, Any]:
+        # 根据可选过滤条件拼装 Mongo 查询;时间范围用 started_at 的 $gte/$lt,搜索按用户名做不区分大小写正则。
         query: Dict[str, Any] = {}
 
         if user_id:
@@ -354,6 +378,8 @@ class UsageStorage:
             end_date=end_date,
             search=search,
         )
+        # 用一个 $facet 在「同一次匹配」上并行算出多个视图:总览 summary、按天 daily、
+        # 以及 agents/teams/personas/models/users/sources/triggers 等多个排行榜,避免多次查库。
         pipeline = [
             {"$match": query},
             {
@@ -438,6 +464,9 @@ class UsageStorage:
         fallback_id: str | None = None,
         include_empty: bool = False,
     ) -> list[Dict[str, Any]]:
+        # 生成一个「按某维度分组取 Top N」的子管道,供 $facet 复用。
+        # field: 分组字段; name_field: 附带展示名; fallback_id: 空值时的兜底分组键;
+        # include_empty: 是否保留空值分组(默认过滤掉 None/"")。
         group_id: Any = f"${field}"
         if fallback_id:
             group_id = {
@@ -454,10 +483,12 @@ class UsageStorage:
             "duration": {"$sum": "$duration"},
         }
         if name_field:
+            # $first 取分组内首条记录的展示名。
             group["name"] = {"$first": f"${name_field}"}
         pipeline: list[Dict[str, Any]] = []
         if not include_empty:
             pipeline.append({"$match": {field: {"$nin": [None, ""]}}})
+        # 分组 -> 按 tokens、requests 降序 -> 取前 limit 名。
         pipeline.extend(
             [
                 {"$group": group},
@@ -469,6 +500,7 @@ class UsageStorage:
 
     async def _count_and_stats(self, query: Dict[str, Any]) -> tuple[int, Dict[str, Any]]:
         """计算总数和聚合统计"""
+        # 先取总条数,再用聚合求各类 token 与时长的合计;聚合只有一个 _id=None 分组,取到即 break。
         total = await self.collection.count_documents(query)
 
         pipeline = [
@@ -511,6 +543,7 @@ class UsageStorage:
         self, query: Dict[str, Any], skip: int, limit: int
     ) -> List[Dict[str, Any]]:
         """获取分页数据"""
+        # 按 started_at 倒序分页;投影排除 _id;失败返回空列表。
         try:
             cursor = (
                 self.collection.find(query, {"_id": 0})
@@ -525,6 +558,7 @@ class UsageStorage:
 
     async def get_user_usage_summary(self, user_id: str) -> Dict[str, Any]:
         """获取单个用户的用量汇总"""
+        # 单用户维度的合计(请求数 + 各类 token + 时长),用于用户个人的用量概览。
         query = {"user_id": user_id}
         total = await self.collection.count_documents(query)
 
@@ -560,6 +594,7 @@ class UsageStorage:
 
 
 def _empty_stats() -> Dict[str, Any]:
+    # 统计的空结构(查询失败或无数据时返回),字段与 _count_and_stats 输出保持一致。
     return {
         "total_requests": 0,
         "total_input_tokens": 0,
@@ -572,6 +607,7 @@ def _empty_stats() -> Dict[str, Any]:
 
 
 def _format_ranking_item(doc: Dict[str, Any]) -> Dict[str, Any]:
+    # 把聚合出的排行分组文档格式化为对外条目;无 name 时回退到 id,再回退到 "Unknown"。
     item_id = str(doc.get("_id") or "")
     return {
         "id": item_id,
@@ -583,6 +619,8 @@ def _format_ranking_item(doc: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _format_dashboard(doc: Dict[str, Any]) -> Dict[str, Any]:
+    # 把 $facet 聚合结果整理成前端仪表盘结构:提取 summary、逐日 daily,并派生若干比率指标。
+    # summary 分组结果是「至多一个元素的数组」,取第一个(空则用 {})。
     summary_doc = (doc.get("summary") or [{}])[0] if isinstance(doc.get("summary"), list) else {}
     total_requests = _as_int(summary_doc.get("total_requests"))
     successful_requests = _as_int(summary_doc.get("successful_requests"))
@@ -593,6 +631,7 @@ def _format_dashboard(doc: Dict[str, Any]) -> Dict[str, Any]:
     scheduled_runs = _as_int(summary_doc.get("scheduled_runs"))
     total_tool_calls = _as_int(summary_doc.get("total_tool_calls"))
     failed_requests = _as_int(summary_doc.get("failed_requests"))
+    # 过滤掉无日期的分组后,组装逐日明细。
     daily_items = [
         {
             "date": str(item.get("_id") or ""),
@@ -606,11 +645,13 @@ def _format_dashboard(doc: Dict[str, Any]) -> Dict[str, Any]:
         for item in doc.get("daily", [])
         if item.get("_id")
     ]
+    # 峰值日:按 (tokens, requests, duration) 取最大的一天。
     peak_day = max(
         daily_items,
         key=lambda item: (item["tokens"], item["requests"], item["duration"]),
         default=None,
     )
+    # 各派生比率均对分母为 0 做了保护(total_requests / total_input_tokens 为 0 时取 0.0)。
     summary = {
         "total_requests": total_requests,
         "total_tokens": total_tokens,
@@ -646,6 +687,7 @@ def _format_dashboard(doc: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _empty_dashboard() -> Dict[str, Any]:
+    # 仪表盘空结构(聚合失败或无数据时返回),字段与 _format_dashboard 输出严格对应,保证前端契约稳定。
     return {
         "summary": {
             "total_requests": 0,
@@ -679,4 +721,5 @@ def _empty_dashboard() -> Dict[str, Any]:
 
 def get_usage_storage() -> UsageStorage:
     """获取 UsageStorage 实例"""
+    # 每次返回新实例;集合是惰性加载的,不同实例最终共享同一 Mongo 客户端连接池。
     return UsageStorage()

@@ -1,3 +1,10 @@
+"""任务状态 / 错误信息的只读查询。
+
+对外提供「按 session 或 run 查状态、查错误」的能力。数据来源有多处（MongoDB
+session.metadata、trace 存储、内存 run_info），本模块负责按优先级依次回退，
+并把底层的 trace 状态映射为统一的 TaskStatus。
+"""
+
 from __future__ import annotations
 
 from typing import Any
@@ -13,10 +20,14 @@ logger = get_logger(__name__)
 class TaskStatusQueries:
     """Read task status and error details from storage backends."""
 
+    # storage: SessionStorage；run_info: manager 维护的 run_id -> 运行信息内存表，
+    # 作为查不到持久化数据时的兜底来源。
     def __init__(self, *, storage: Any, run_info: dict[str, dict[str, Any]]) -> None:
         self._storage = storage
         self._run_info = run_info
 
+    # 查会话当前任务状态：读 session.metadata.task_status；任何异常或缺失
+    # 都保守回退为 PENDING（宁可让上层认为「还在进行」也不误报终态）。
     async def get_status(self, session_id: str) -> TaskStatus:
         """Get the current task status for a session."""
         try:
@@ -29,6 +40,8 @@ class TaskStatusQueries:
             logger.warning("Failed to get status from session storage: %s", e)
         return TaskStatus.PENDING
 
+    # 查某个具体 run 的状态：优先看 session.metadata；再回退到 trace 存储，
+    # 取该 run 最近一条 trace 并把 running/completed/error 映射为 TaskStatus。
     async def get_run_status(self, session_id: str, run_id: str) -> TaskStatus:
         """Get status for a specific run."""
         try:
@@ -62,6 +75,7 @@ class TaskStatusQueries:
 
         return TaskStatus.PENDING
 
+    # 查会话最近一次任务错误信息（来自 session.metadata.task_error）。
     async def get_error(self, session_id: str) -> str | None:
         """Get the latest task error for a session."""
         try:
@@ -72,6 +86,8 @@ class TaskStatusQueries:
             logger.warning("Failed to get error from session storage: %s", e)
         return None
 
+    # 查某个 run 的详细错误：先看 trace.metadata.error；没有则取该 trace 的最后
+    # 一条 error 事件；仍没有则回退到内存 run_info 对应 session 的 task_error。
     async def get_run_error(self, run_id: str) -> str | None:
         """Get error details for a specific run."""
         try:
@@ -114,6 +130,7 @@ class TaskStatusQueries:
 
         return None
 
+    # 从内存 run_info 中取该 run 关联的 trace_id（同步方法，无 IO）。
     def get_trace_id(self, run_id: str) -> str | None:
         """Get the trace identifier associated with a run."""
         info = self._run_info.get(run_id)

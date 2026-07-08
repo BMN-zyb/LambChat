@@ -13,30 +13,38 @@ from src.kernel.schemas.user import TokenPayload, User, UserUpdate
 
 router = APIRouter()
 logger = get_logger(__name__)
+# 用户 metadata 中列表类字段的通用最大条目数（防止恶意写入超大列表撑爆存储）
 MAX_USER_METADATA_LIST_ITEMS = 100
+# 置顶模型 id 列表的最大数量
 MAX_PINNED_MODEL_IDS = 10
+# 置顶预设 id 列表的最大数量
 MAX_PINNED_PRESET_IDS = 10
+# 收藏预设 id 列表的最大数量
 MAX_FAVORITE_PRESET_IDS = 100
 
 
 class AvatarUpdateRequest(BaseModel):
     """Request schema for updating avatar"""
 
+    # 头像 URL（通常是文件上传到对象存储/S3 后返回的可访问地址）
     avatar_url: str
 
 
 class UsernameUpdateRequest(BaseModel):
     """Request schema for updating username"""
 
+    # 新用户名：长度限制 3~50 个字符
     username: str = Field(..., min_length=3, max_length=50)
 
 
 class MetadataUpdateRequest(BaseModel):
     """Request schema for updating user metadata (partial merge)"""
 
+    # 待更新的 metadata 字典：与现有 metadata 做部分合并（merge），而非整体覆盖
     metadata: dict
 
 
+# 校验某字段必须是"字符串列表"且长度不超过 max_items，否则抛 400；用于约束 metadata 中的各列表字段
 def _validate_bounded_string_list(
     values: object,
     *,
@@ -55,6 +63,9 @@ def _validate_bounded_string_list(
         )
 
 
+# POST /update-avatar —— 更新当前登录用户的头像
+# 认证要求：需携带有效 access token；请求体：AvatarUpdateRequest（avatar_url）
+# 副作用：将 avatar_url 写入用户记录并返回更新后的用户
 @router.post("/update-avatar")
 async def update_avatar(
     request: AvatarUpdateRequest,
@@ -83,6 +94,8 @@ async def update_avatar(
     return updated_user
 
 
+# GET /profile —— 获取当前登录用户的完整个人资料
+# 认证要求：需携带有效 access token；响应体：User
 @router.get("/profile", response_model=User)
 async def get_user_profile(
     current_user: TokenPayload = Depends(get_current_user_required),
@@ -102,6 +115,8 @@ async def get_user_profile(
     return user
 
 
+# POST /update-username —— 修改当前登录用户的用户名
+# 请求体：UsernameUpdateRequest（3~50 字符）；用户名重复时由存储层抛 ValidationError，转成 400
 @router.post("/update-username")
 async def update_username(
     request: UsernameUpdateRequest,
@@ -125,6 +140,9 @@ async def update_username(
         )
 
 
+# PUT /profile/metadata —— 部分更新当前用户的 metadata（合并式，而非整体覆盖）
+# 请求体：MetadataUpdateRequest（metadata 字典）；写入前逐项校验受支持字段
+# 校验项：language（白名单枚举）、theme（light/dark）、各列表字段（必须为字符串列表且不超上限）
 @router.put("/profile/metadata")
 async def update_user_metadata(
     request: MetadataUpdateRequest,
@@ -141,6 +159,7 @@ async def update_user_metadata(
     storage = UserStorage()
 
     # Validate language if provided
+    # 支持的界面语言白名单（传入不在其中的值直接 400）
     supported_languages = {"en", "zh", "ja", "ko", "ru"}
     if "language" in request.metadata:
         lang = request.metadata["language"]
@@ -191,6 +210,7 @@ async def update_user_metadata(
         )
 
     # Validate user skill preference lists if provided
+    # 技能相关的三个偏好列表统一按"字符串列表 + 默认上限"校验
     for field_name in ("disabled_skills", "pinned_skill_names", "favorite_skill_names"):
         if field_name in request.metadata:
             _validate_bounded_string_list(
@@ -198,5 +218,6 @@ async def update_user_metadata(
                 field_name=field_name,
             )
 
+    # 校验通过后做部分合并（只更新传入的键，其余保留），并返回更新后的用户
     updated_user = await storage.update_metadata(current_user.sub, request.metadata)
     return updated_user

@@ -10,6 +10,8 @@ from src.infra.tool.backend_utils import get_user_id_from_runtime
 from src.kernel.schemas.scheduled_task import ScheduledTaskUpdate
 from src.kernel.types import Permission
 
+# ToolRuntime 兼容处理：不同 langchain 版本对该类型的导出路径不一致，
+# 若正式包里没有该符号，就动态构造一个占位模块，避免 import 失败导致整个工具不可用
 if TYPE_CHECKING:
     from langchain.tools import ToolRuntime
 else:
@@ -67,6 +69,8 @@ async def scheduled_task_update(
     if task.owner_id != user_id:
         return _json({"error": f"Task '{task_id}' not found"})
 
+    # action 参数与"字段更新"是两条互斥的分支：一旦提供了 action，
+    # 就只执行对应的生命周期操作（暂停/恢复/立即运行一次），忽略后面传入的其他字段
     if action is not None:
         if action == "pause":
             try:
@@ -118,10 +122,14 @@ async def scheduled_task_update(
         return _json({"error": "Invalid action. Use 'pause', 'resume', or 'run'."})
 
     # Build update payload
+    # 逐字段判断是否为 None：只把调用方显式传入的字段收集进 updates，
+    # 未传字段（保持默认 None）不会出现在更新集合里，从而不会覆盖原值
     updates: dict[str, Any] = {}
     if name is not None:
         updates["name"] = name
     if message is not None:
+        # message 存储在 input_payload 里，需要和其余 input_payload 字段合并后整体替换，
+        # 而不是直接覆盖整个 input_payload（否则会丢失 agent_options/attachments 等其他字段）
         updates["input_payload"] = {**(task.input_payload or {}), "message": message}
     if description is not None:
         updates["description"] = description

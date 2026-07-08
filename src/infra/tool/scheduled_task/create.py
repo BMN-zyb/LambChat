@@ -13,6 +13,8 @@ from src.infra.utils.datetime import ensure_utc, to_iso, utc_now
 from src.kernel.schemas.scheduled_task import ScheduledTaskCreate, TriggerType
 from src.kernel.types import Permission
 
+# ToolRuntime 兼容处理：不同 langchain 版本对该类型的导出路径不一致，
+# 若正式包里没有该符号，就动态构造一个占位模块，避免 import 失败导致整个工具不可用
 if TYPE_CHECKING:
     from langchain.tools import ToolRuntime
 else:
@@ -41,6 +43,8 @@ from src.infra.tool.scheduled_task.helpers import (
 
 
 def _parse_run_at_iso(value: str, timezone_name: str) -> datetime:
+    # 解析用户传入的一次性执行时间：若字符串本身不带时区信息，
+    # 按 timezone_name（一般是用户当前时区）补全，最终统一转换为 UTC 存储
     run_date = datetime.fromisoformat(value)
     if run_date.tzinfo is None:
         run_date = run_date.replace(tzinfo=ZoneInfo(timezone_name))
@@ -172,6 +176,7 @@ async def scheduled_task_create(
     Before calling this tool, explain in the current conversation what the scheduled
     task will do. This tool does not run the task once for preview; it only asks
     for explicit human confirmation before creating the schedule."""
+    # runtime 由 LangChain 框架自动注入（InjectedToolArg），从中解析出当前用户身份
     user_id = get_user_id_from_runtime(runtime)
     if not user_id:
         return _json({"error": "No user context available"})
@@ -179,6 +184,8 @@ async def scheduled_task_create(
     if error:
         return _json(error)
 
+    # 从触发本次工具调用的会话里继承 agent/时区/人设/团队等默认值，
+    # 使用户不必在每次创建定时任务时都重新声明这些上下文
     (
         session_agent_id,
         session_agent_options,
@@ -199,6 +206,7 @@ async def scheduled_task_create(
 
     trigger_config: dict[str, Any]
     if trigger_enum == TriggerType.DATE:
+        # 一次性任务：delay_seconds（相对时间）与 run_at_iso（绝对时间）二选一
         if delay_seconds is None and run_at_iso is None:
             return _json(
                 {
@@ -250,6 +258,12 @@ async def scheduled_task_create(
     effective_attachments = _normalize_attachments(
         attachments if attachments is not None else get_attachments_from_runtime(runtime)
     )
+    # 有效 agent 的判定优先级（自上而下）：
+    # 1) 明确给出 team_query → 强制走 team agent
+    # 2) 给出 role_query（按人设自然语言搜索）→ 沿用显式/会话 agent，且不能是 team，缺省兜底为 'fast'
+    # 3) 显式声明 agent_id='team'，或给了 team_id 且当前上下文本就是/趋向 team → 走 team agent
+    # 4) 显式给了 persona_preset_id → 同 role_query 的 agent 选择逻辑
+    # 5) 其余情况：显式 agent_id > 会话默认 agent > 兜底 'fast'
     if team_query:
         effective_agent_id = "team"
     elif role_query:
@@ -272,6 +286,7 @@ async def scheduled_task_create(
         )
     else:
         effective_agent_id = agent_id or session_agent_id or "fast"
+    # 模型覆盖：继承会话的 agent_options 后，用本次显式传入的 model_id/model 覆盖
     effective_agent_options = dict(session_agent_options)
     if model_id:
         effective_agent_options["model_id"] = model_id
@@ -282,6 +297,9 @@ async def scheduled_task_create(
     resolved_role_match = None
     resolved_team_match = None
     if effective_agent_id == "team":
+        # team 场景：优先用显式 team_id；否则尝试用 team_query 做自然语言搜索解析；
+        # 解析出错（如搜索失败）直接返回错误，搜索不到匹配项也算错误；
+        # 都没有则回退到会话默认的 team_id
         effective_team_id = team_id
         if not effective_team_id:
             (
@@ -294,6 +312,8 @@ async def scheduled_task_create(
         if not effective_team_id:
             effective_team_id = session_team_id
     else:
+        # 非 team 场景：同理，优先显式 persona_preset_id，其次按 role_query 搜索解析，
+        # 最后回退到会话默认人设
         effective_persona_preset_id = persona_preset_id
         if not effective_persona_preset_id:
             (
@@ -310,6 +330,8 @@ async def scheduled_task_create(
         if not effective_persona_preset_id:
             effective_persona_preset_id = session_persona_preset_id
 
+    # 一次性任务（DATE）执行的时候本身就是"未来某一刻立即执行一次"，
+    # 因此禁用 run_on_start（否则等价于创建时立刻多执行一次，产生重复语义）
     effective_run_on_start = False if trigger_enum == TriggerType.DATE else run_on_start
     preview = _build_task_preview(
         name=name,
@@ -326,6 +348,8 @@ async def scheduled_task_create(
         preview["resolved_persona_preset"] = resolved_role_match
     if resolved_team_match:
         preview["resolved_team"] = resolved_team_match
+    # 创建定时任务前必须先经过人工确认（human-in-the-loop），
+    # 这是本工具最重要的安全设计：agent 不能未经用户同意就单方面建立会自动重复触发的任务
     confirmation = await _confirm_scheduled_task_creation(preview=preview, user_id=user_id)
     if not confirmation["approved"]:
         return _json(
@@ -347,6 +371,8 @@ async def scheduled_task_create(
 
     ctx = TraceContext.get_request_context()
     try:
+        # input_payload 只包含"确实有值"的字段（用字典展开的条件表达式过滤掉空值），
+        # 避免向下游写入一堆 None/空字典的冗余字段
         input_payload = {
             "message": message,
             **({"agent_options": effective_agent_options} if effective_agent_options else {}),
@@ -401,6 +427,8 @@ async def scheduled_task_create(
 
 
 def _normalize_attachments(value: Any) -> list[dict[str, Any]] | None:
+    # 只保留 list 中的 dict 元素，过滤掉非法项；空列表统一归一化为 None，
+    # 方便调用方用 "if effective_attachments" 简单判断是否存在附件
     if not isinstance(value, list):
         return None
     attachments = [dict(item) for item in value if isinstance(item, dict)]

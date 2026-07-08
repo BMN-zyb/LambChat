@@ -23,11 +23,18 @@ from src.infra.async_utils import run_blocking_io
 from src.infra.logging import get_logger
 
 logger = get_logger(__name__)
+# 图片内联为 data URL 的大小上限（2MB）：超过则不内联，避免把超大图片塞进消息体撑爆上下文
 IMAGE_DATA_URL_INLINE_MAX_BYTES = 2 * 1024 * 1024
+# SpooledTemporaryFile 的内存阈值（256KB）：小于它时数据留在内存，超过后自动落盘，避免大图占满内存
 IMAGE_DATA_URL_SPOOL_MAX_MEMORY_BYTES = 256 * 1024
+# 分块 base64 编码的块大小（192KB）：必须是 3 的倍数，否则逐块编码会在块间插入 "=" 填充导致结果损坏
 IMAGE_DATA_URL_ENCODE_CHUNK_BYTES = 192 * 1024
 
 
+# 【双层 graph 设计】LambChat 外层 graph（START→agent_node→END）只是薄壳，
+# 真正的 ReAct 循环由 deepagents 的内层 graph 提供。当我们在外层节点里手动调用内层 graph 时，
+# 需要手动拼出它的 configurable 配置：把 checkpointer 注入到 LangGraph 约定的特殊键下，
+# 并用空的 checkpoint_ns 让内层 graph 拥有独立的检查点命名空间。
 def build_nested_graph_configurable(
     *,
     thread_id: str,
@@ -43,13 +50,18 @@ def build_nested_graph_configurable(
     }
 
 
+# 手动嵌套运行内层 graph 时使用的上下文管理器：临时把 var_child_runnable_config 置空，
+# 使内层 graph 不继承外层节点的「子任务运行配置」。否则内层 graph 会被 LangGraph 当成外层的子任务，
+# 导致检查点/流式事件串台；退出时再 reset 还原，保证不影响外层。
 @asynccontextmanager
 async def isolated_nested_graph_run() -> AsyncIterator[None]:
     """Run a manually nested graph without inheriting the parent graph task config."""
+    # 置空当前上下文变量并保存旧值 token，进入内层 graph 运行
     token = var_child_runnable_config.set(None)
     try:
         yield
     finally:
+        # 无论内层是否异常，都恢复外层原有的运行配置
         var_child_runnable_config.reset(token)
 
 

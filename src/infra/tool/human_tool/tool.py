@@ -18,6 +18,7 @@ logger = get_logger(__name__)
 
 
 async def _json_dumps_result(data: dict[str, Any]) -> str:
+    # 统一走线程池执行 json.dumps，避免（理论上）较大的响应结构在序列化时阻塞事件循环
     return await run_blocking_io(json.dumps, data, ensure_ascii=False)
 
 
@@ -43,6 +44,9 @@ class AskHumanTool(BaseTool):
     - 不确定用户意图时请求澄清
     """
 
+    # name/description 会被 LangChain 直接拼进 LLM 的工具调用 schema，
+    # 因此下面这段中文说明既是给人看的文档，也是模型据以判断"何时调用/如何传参"的依据，
+    # 内容需要尽量详尽、贴合实际参数结构
     name: str = "ask_human"
     description: str = """向用户提问并等待响应，支持多字段表单。
 
@@ -107,6 +111,8 @@ class AskHumanTool(BaseTool):
         timeout: int = 300,
     ) -> str:
         """同步执行（不支持，返回错误）"""
+        # 本工具的核心是"阻塞等待人工响应"，天然需要 await，因此只提供异步实现；
+        # 同步入口保留仅为满足 BaseTool 的抽象方法要求，调用即报错提示改用 ainvoke
         return "Error: ask_human only supports async execution. Use ainvoke instead."
 
     async def _arun(
@@ -130,9 +136,13 @@ class AskHumanTool(BaseTool):
             JSON 字符串，包含状态和字段值或错误消息
         """
         # 设置默认值
+        # choices/multiple 是免手写 fields 的简写路径，二者互斥：
+        # 提供了 fields 就忽略 choices（见 _expand_short_choices 实现）
         fields = self._expand_short_choices(fields, choices, multiple)
 
         # 解析字段并设置默认值
+        # 字段可能来自 LLM 生成的多种不规范形态（dict/JSON 字符串/字段别名等），
+        # 丢进线程池里做规整解析，避免这部分兼容性处理占用事件循环
         parsed_fields = await run_blocking_io(self._parse_fields, fields)
 
         # 如果启用了 allow_other，追加一个独立的「其他意见」文本字段
@@ -151,18 +161,24 @@ class AskHumanTool(BaseTool):
         # 获取当前请求上下文
         from src.infra.logging.context import TraceContext
 
+        # session_id 优先使用实例属性（get_human_tool 显式传入的），
+        # 缺省时回退到当前请求的 TraceContext，两者都取不到就无法推送实时事件
         ctx = TraceContext.get_request_context()
         session_id = self.session_id or ctx.session_id
         run_id = ctx.run_id
         user_id = ctx.user_id
 
         # 构建审批类型和字段列表
+        # approval_type 固定为 "form"：即便只有一个字段（如简单确认），
+        # 也统一走表单审批流程，避免维护"单字段/多字段"两套不同的响应结构
         approval_type = "form"
 
         # 将字段序列化为 dict 列表
         field_dicts = [f.model_dump() for f in parsed_fields] if parsed_fields else []
 
         # 创建审批请求
+        # create_approval 只是把这次请求记录下来（持久化 + 生成 approval_id），
+        # 真正通知用户靠下面的 SSE 事件；wait_for_response 才会真正阻塞等待
         approval = await create_approval(
             message=message,
             approval_type=approval_type,
@@ -177,10 +193,14 @@ class AskHumanTool(BaseTool):
         )
 
         # 等待用户响应
+        # 核心阻塞点：这里会挂起当前协程，直到用户在前端提交/拒绝，
+        # 或者等待时间超过 timeout 秒后由 wait_for_response 自行返回 None（超时）
         response = await wait_for_response(approval.id, timeout=timeout)
 
         if response is None:
             # 超时：构建超时响应
+            # 超时场景下没有用户输入，退化为返回各字段的默认值，
+            # 保证下游解析响应结构时始终能拿到与"成功"一致的 values 形状
             result = {
                 "status": "timeout",
                 "message": f"等待用户响应超时（{timeout}秒）",
@@ -202,6 +222,7 @@ class AskHumanTool(BaseTool):
         if response.response and isinstance(response.response, dict):
             values = response.response
         else:
+            # 响应存在但不是预期的 dict 结构（异常兜底），仍然退化为默认值
             values = self._get_default_values(parsed_fields)
 
         result = {
@@ -217,10 +238,13 @@ class AskHumanTool(BaseTool):
         choices: Optional[List[str]],
         multiple: bool,
     ) -> list[Any]:
+        # fields 优先级更高：只有在完全没有提供 fields 时才尝试用 choices 简写展开
         if fields:
             return fields
         if not choices:
             return []
+        # 把一组选项字符串展开成单个名为 "choice" 的字段：
+        # multiple=True 时用 multi_select（下拉多选），否则用 radio（平铺单选）
         return [
             {
                 "name": "choice",
@@ -258,6 +282,8 @@ class AskHumanTool(BaseTool):
         parsed = []
         for field in fields:
             if isinstance(field, FormField):
+                # 兼容历史数据/调用方遗留的写法：给了 options 却仍标记为 TEXT 类型，
+                # 视为"忘记设置正确类型"，按 multiple 自动纠正为 multi_select 或 radio
                 if field.options and field.type == FieldType.TEXT:
                     field = field.model_copy(
                         update={
@@ -271,6 +297,7 @@ class AskHumanTool(BaseTool):
                 field_multiple = bool(field.get("multiple", False))
                 field_type = field.get("type")
                 if not field_type:
+                    # 未显式指定类型时，按是否有 options/是否多选推断出合理的默认类型
                     field_type = (
                         "multi_select"
                         if field.get("options") and field_multiple
@@ -279,6 +306,8 @@ class AskHumanTool(BaseTool):
                         else "text"
                     )
                 if isinstance(field_type, str):
+                    # LLM 可能用一些近义词表达类型，这里做一层别名归一化，
+                    # 提升对不规范/自然语言化输出的容错能力
                     type_aliases = {
                         "choice": "radio",
                         "single": "radio",
@@ -308,6 +337,7 @@ class AskHumanTool(BaseTool):
                 logger.warning(f"Unknown field type: {type(field)}")
 
         # 如果没有字段，添加一个默认的文本字段
+        # 保证 ask_human 永远至少有一个可填写的字段，避免出现"空表单"的边界情况
         if not parsed:
             parsed.append(
                 FormField(
@@ -330,6 +360,8 @@ class AskHumanTool(BaseTool):
         Returns:
             该类型的默认值
         """
+        # select/radio 类型语义上是"用户必须选择一项"，没有天然的空值表示，
+        # 因此默认值用 None（而不是空字符串）表示"尚未选择"
         defaults = {
             FieldType.TEXT: "",
             FieldType.TEXTAREA: "",
@@ -351,6 +383,7 @@ class AskHumanTool(BaseTool):
         Returns:
             字段名到默认值的映射
         """
+        # 用于超时场景：字段自身声明的 default 优先，没有声明则退回该类型的通用默认值
         values = {}
         for field in fields:
             if field.default is not None:
@@ -381,6 +414,8 @@ class AskHumanTool(BaseTool):
             f"run_id={run_id}, approval_id={approval.id}"
         )
 
+        # 没有 session_id 就没有可推送的 SSE 通道（例如非会话场景下的后台调用），
+        # 此时用户不会在界面上看到审批弹窗，只能依赖轮询或其他方式获知
         if not session_id:
             logger.warning("[AskHuman] Cannot send approval event: no session_id")
             return
@@ -414,6 +449,8 @@ class AskHumanTool(BaseTool):
                 f"session={session_id}, run_id={run_id}"
             )
         except Exception as e:
+            # 事件推送失败不影响审批本身已创建的事实，只是前端可能收不到实时提示；
+            # 用户仍可能通过刷新或其他渠道看到待处理的审批
             logger.error(f"[AskHuman] Failed to send approval event: {e}", exc_info=True)
 
 
@@ -427,4 +464,6 @@ def get_human_tool(session_id: str = "") -> AskHumanTool:
     Returns:
         配置好的 AskHumanTool 实例
     """
+    # 每次调用都返回一个新实例（而非单例）：session_id 与具体会话绑定，
+    # 不同会话/请求需要各自独立的工具实例来携带各自的 session_id
     return AskHumanTool(session_id=session_id)

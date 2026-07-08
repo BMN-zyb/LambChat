@@ -39,6 +39,7 @@ import { copyToClipboard } from "../../../utils/clipboard";
 import { shouldShowGoalDetailsForMessage } from "../goalVisibility";
 import { areChatMessagePropsEqual } from "./messageMemo";
 
+// 助手「思考中」的骨架动画（细线条占位）：流式已开始但尚无内容时显示
 // Skeleton-style loading animation component - refined thin lines
 function ThinkingIndicator() {
   return (
@@ -69,6 +70,7 @@ function ThinkingIndicator() {
   );
 }
 
+// ChatMessage 的 props：单条消息数据 + 会话/运行上下文 + 预览/分叉/重试等回调
 interface ChatMessageProps {
   message: Message;
   sessionId?: string;
@@ -91,6 +93,7 @@ interface ChatMessageProps {
   isFirst?: boolean;
 }
 
+// Token 用量统计按钮：点击弹出输入/输出/缓存/总量、耗时、模型、开始时间等明细
 // Token usage statistics button component - ChatGPT style
 function TokenDetailsButton({
   tokenUsage,
@@ -261,6 +264,7 @@ function TokenDetailsButton({
   );
 }
 
+// 目标详情按钮：点击弹出当前目标（objective）、运行状态与已运行时长
 function GoalDetailsButton({
   goal,
   isLastMessage,
@@ -317,6 +321,7 @@ function GoalDetailsButton({
     : null;
   const endedAt = goal.ended_at ? new Date(goal.ended_at).getTime() : null;
 
+  // 目标进行中且弹窗打开时，每秒触发一次重渲染，让运行时长自动累加
   // Tick every second so the running duration auto-increments.
   const [, setTick] = useState(0);
   useEffect(() => {
@@ -420,6 +425,10 @@ function GoalDetailsButton({
   );
 }
 
+// 单条聊天消息组件（用 memo + 自定义比较避免无谓重渲染）。
+// 分两大分支：用户消息渲染为右侧气泡；助手消息为左侧布局——
+// 有 parts 时按序交给 MessagePartRenderer，否则回退到 Markdown + 工具调用列表；
+// 底部提供复制/分叉/Token/反馈/分享/目标等操作，末条消息还会展示推荐问题。
 export const ChatMessage = memo(function ChatMessage({
   message,
   sessionId,
@@ -441,6 +450,7 @@ export const ChatMessage = memo(function ChatMessage({
   const { availableModels } = useSettingsContext();
   const { isAuthenticated } = useAuth();
   const isUser = message.role === "user";
+  // 「思考中」判定：正在流式但还没有任何内容（此时展示骨架动画）
   const isStreaming = message.isStreaming && !message.content;
   const modelDetails = resolveTokenUsageModelDetails({
     modelId: message.tokenUsage?.model_id,
@@ -448,8 +458,10 @@ export const ChatMessage = memo(function ChatMessage({
     availableModels,
   });
 
+  // 新版消息带 parts（按类型分块渲染）；旧版消息只有 content/toolCalls，走兜底渲染
   // If there are parts, render in order; otherwise fall back to old rendering method
   const hasParts = message.parts && message.parts.length > 0;
+  // 用户消息：右对齐气泡样式，直接交给 UserMessageBubble
   // User message: bubble style, right aligned
   if (isUser) {
     return (
@@ -472,6 +484,7 @@ export const ChatMessage = memo(function ChatMessage({
     );
   }
 
+  // 提取助手消息的纯文本（用于复制）：有 parts 时拼接所有 text 块，否则用 content
   // Get assistant message's plain text content for copying
   const getAssistantTextContent = (): string => {
     if (hasParts && message.parts) {
@@ -487,6 +500,7 @@ export const ChatMessage = memo(function ChatMessage({
     return message.content || "";
   };
 
+  // 助手消息：左侧布局（头像 + 名称 + 时间，下方为正文与底部操作栏）
   // Assistant message: left layout
   return (
     <div
@@ -528,6 +542,7 @@ export const ChatMessage = memo(function ChatMessage({
           {/* Streaming/Thinking indicator */}
           {isStreaming && !hasParts && <ThinkingIndicator />}
 
+          {/* 有 parts：按序渲染各消息块并汇总产物；否则回退到 Markdown + 工具调用 */}
           {hasParts ? (
             <div className="space-y-3 my-2">
               {message.parts!.map((part: MessagePart, index: number) =>

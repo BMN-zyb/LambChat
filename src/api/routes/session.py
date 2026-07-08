@@ -22,34 +22,48 @@ from src.kernel.exceptions import NotFoundError, SessionError
 from src.kernel.schemas.session import Session, SessionCreate, SessionUpdate
 from src.kernel.schemas.user import TokenPayload
 
+# 会话管理路由（挂载于 /api/sessions）：会话列表/详情/更新/删除、
+# 会话内事件与消息、runs/traces、分叉与检查点、收藏与移动、标题生成等
 router = APIRouter()
 logger = get_logger(__name__)
 
 # 支持的语言白名单
 SUPPORTED_LANGUAGES = frozenset(["en", "zh", "ja", "ko"])
+# 单次请求中事件类型过滤器最多接受的类型数量（超出部分截断，防止过滤条件过大）
 SESSION_EVENT_TYPE_FILTER_LIMIT = 100
+# 事件查询接口单次最多返回的事件数上限
 SESSION_EVENT_RESPONSE_LIMIT_MAX = 10000
+# 原始 trace 查询接口单次最多返回的 trace 数上限
 SESSION_RAW_TRACE_RESPONSE_LIMIT_MAX = 20
+# 原始 trace 查询接口中每个 trace 最多返回的（最近）事件数上限
 SESSION_RAW_TRACE_EVENTS_LIMIT_MAX = 200
 
 
+# 创建消息检查点（checkpoint）的请求体
 class MessageCheckpointCreatePayload(BaseModel):
+    # 检查点名称，可选；为空时由后端自动生成默认名称
     name: str | None = None
 
 
+# 将逗号分隔的事件类型字符串解析为去重后的类型列表：
+# 空输入返回 None（表示不过滤）；自动去除首尾空白、跳过空串与重复项；
+# 数量达到 SESSION_EVENT_TYPE_FILTER_LIMIT 即停止，避免过滤条件过大
 def _parse_event_types_filter(event_types: str | None) -> list[str] | None:
     if not event_types:
         return None
     parsed: list[str] = []
     seen = set()
+    # 逐个拆分事件类型，去重后收集
     for raw_type in event_types.split(","):
         event_type = raw_type.strip()
         if not event_type or event_type in seen:
             continue
         seen.add(event_type)
         parsed.append(event_type)
+        # 达到数量上限立即停止，防止过滤列表过长
         if len(parsed) >= SESSION_EVENT_TYPE_FILTER_LIMIT:
             break
+    # 没有任何有效类型时返回 None（等价于不过滤）
     return parsed or None
 
 
@@ -67,6 +81,7 @@ def _is_retryable_error(error: Exception) -> bool:
         "网络错误",  # Chinese API proxy network error
         "network error",
     ]
+    # 只要错误信息命中任一模式，即视为可重试
     return any(pattern in error_str for pattern in retryable_patterns)
 
 
@@ -77,11 +92,13 @@ async def _ainvoke_with_retry(model, prompt: str, max_retries: int | None = None
         max_retries = getattr(settings, "LLM_MAX_RETRIES", 3)
 
     last_error: Exception | None = None
+    # 循环重试：成功即返回；命中可重试错误则退避后再试，否则直接抛出
     for attempt in range(max_retries):
         try:
             return await model.ainvoke(prompt)
         except Exception as e:
             last_error = e
+            # 仅在错误可重试且还有剩余重试次数时才等待后重试
             if _is_retryable_error(e) and attempt < max_retries - 1:
                 delay = settings.LLM_RETRY_DELAY * (2**attempt)  # 指数退避
                 logger.warning(
@@ -105,12 +122,16 @@ def verify_session_ownership(session: Session, user: TokenPayload) -> None:
         )
 
 
+# 查询用户的"收藏"项目 ID：收藏在存储上表现为一个 type=="favorites" 的特殊项目，
+# 不存在时返回 None
 async def _get_favorites_project_id(user_id: str) -> str | None:
     project_storage = get_project_storage()
     favorites_project = await project_storage.get_by_type(user_id, "favorites")
     return favorites_project.id if favorites_project else None
 
 
+# 规范化会话的 metadata（例如根据收藏项目 ID 校正 is_favorite 等字段），
+# 返回一个更新后的副本，不修改传入的原对象
 def _normalize_session(
     session: Session,
     favorites_project_id: str | None,
@@ -166,8 +187,10 @@ async def list_sessions(
 
     # 所有用户只能查看自己的会话
     filter_user_id = user.sub
+    # 预取收藏项目 ID，供收藏过滤与元数据规范化使用
     favorites_project_id = await _get_favorites_project_id(user.sub)
 
+    # 交给 SessionManager 统一执行分页、状态/项目过滤、名称模糊搜索与收藏过滤
     sessions, total = await manager.list_sessions(
         user_id=filter_user_id,
         skip=skip,
@@ -179,6 +202,7 @@ async def list_sessions(
         favorites_project_id=favorites_project_id,
     )
 
+    # has_more：已返回偏移量 + 本页数量是否仍小于总数，供前端判断能否继续翻页
     return {
         "sessions": sessions,
         "total": total,
@@ -196,6 +220,7 @@ async def mark_all_sessions_read(
 ):
     """批量将会话标记为已读，支持按项目或定时任务过滤。"""
     manager = SessionManager()
+    # 批量清除未读，返回实际被修改的会话数量
     modified_count = await manager.mark_all_read(user.sub, project_id, scheduled_task_id)
     return {"status": "ok", "modified_count": modified_count}
 
@@ -230,6 +255,7 @@ async def get_session(
         raise HTTPException(status_code=404, detail="会话不存在")
 
     verify_session_ownership(session, user)
+    # 返回前规范化元数据（如收藏标记），保证前端拿到一致的字段
     favorites_project_id = await _get_favorites_project_id(user.sub)
     return _normalize_session(session, favorites_project_id)
 
@@ -256,6 +282,7 @@ async def delete_session(
         raise HTTPException(status_code=500, detail="删除失败")
 
     # 清理延迟工具发现记录
+    # 尽力而为：清理失败不影响删除结果，直接吞掉异常
     try:
         from src.infra.tool.deferred_manager import clear_discovered_tools
 
@@ -328,6 +355,7 @@ async def get_session_events(
 
     # 重要：completed_only=True，确保正在运行的 trace 中的事件不要被返回，而是单独去请求/stream接口，避免重复返回事件，导致前端消息重复显示。
     # 否则刷新页面时，当前 run 的 user:message 事件会丢失，导致消息合并
+    # 多取一条（limit+1）用于探测结果是否被截断，从而正确返回 events_limited 标记
     events_probe_limit = (limit + 1) if limit is not None else None
     events = await dual_writer.read_session_events(
         session_id,
@@ -337,6 +365,7 @@ async def get_session_events(
         completed_only=True,
         max_events=events_probe_limit,
     )
+    # 实际数量超过 limit 说明还有更多事件，标记为已截断并裁剪到 limit 条
     events_limited = limit is not None and len(events) > limit
     if events_limited:
         events = events[:limit]
@@ -382,10 +411,12 @@ async def get_session_runs(
     dual_writer = get_dual_writer()
     trace_storage = get_trace_storage()
 
+    # 将单条 trace 转换为对话轮次（run）摘要，并附带该轮首条用户消息的预览
     async def build_run_summary(trace: dict[str, Any]) -> dict[str, Any]:
         run_id = trace.get("run_id")
         current_trace_id = trace.get("trace_id")
         user_message = None
+        # 取该 trace 的首条 user:message 作为这一轮对话的标题预览
         if run_id and current_trace_id:
             event = await trace_storage.get_first_trace_event(
                 trace_id=current_trace_id,
@@ -393,6 +424,7 @@ async def get_session_runs(
             )
             data = event.get("data", {}) if event else {}
             user_message = data.get("content") or data.get("message") or ""
+            # 预览过长时截断为 17 字 + 省略号
             if user_message and len(user_message) > 20:
                 user_message = user_message[:17] + "..."
 
@@ -407,11 +439,13 @@ async def get_session_runs(
             "user_message": user_message,
         }
 
+    # 指定 trace_id：只返回该 trace 的摘要，且必须属于当前会话（否则视为空）
     if trace_id:
         trace = await dual_writer.get_trace(trace_id)
         traces = [trace] if trace and trace.get("session_id") == session_id else []
         runs = [await build_run_summary(trace) for trace in traces]
     else:
+        # 未指定 trace_id：由存储层直接列出该会话的所有 run 摘要
         runs = await trace_storage.list_run_summaries(
             session_id=session_id,
             limit=limit,
@@ -481,6 +515,8 @@ async def get_session_raw_traces(
 
     trace_storage = get_trace_storage()
 
+    # 直接查询 trace 集合：用 $slice 只取每个 trace 最近 events_limit 条事件，
+    # 按开始时间倒序，最多取 limit 个 trace（用于调试查看原始数据）
     cursor = (
         trace_storage.collection.find(
             {"session_id": session_id},
@@ -511,6 +547,7 @@ async def update_session_status(
 
     只能更新自己拥有的会话状态。
     """
+    # 只接受 active/archived 两种状态，其余一律返回 400
     if status not in ["active", "archived"]:
         raise HTTPException(status_code=400, detail="状态必须是 active 或 archived")
 
@@ -521,6 +558,7 @@ async def update_session_status(
 
     verify_session_ownership(session, user)
 
+    # active/archived 映射为 metadata.is_active 布尔值
     is_active = status == "active"
     updated_session = await manager.update_session(
         session_id,
@@ -548,6 +586,7 @@ async def clear_session_messages(
 
     verify_session_ownership(session, user)
 
+    # 清空消息的同时释放其引用的附件，返回被释放的附件列表
     released_attachments = await manager.clear_session_messages(session_id)
     return {"status": "cleared", "released_attachments": released_attachments}
 
@@ -573,11 +612,14 @@ async def update_session(
     updated_session = await manager.update_session(session_id, session_data)
     if not updated_session:
         raise HTTPException(status_code=500, detail="更新失败")
+    # 返回前规范化元数据，保证收藏等字段一致
     favorites_project_id = await _get_favorites_project_id(user.sub)
     updated_session = _normalize_session(updated_session, favorites_project_id)
     return {"status": "updated", "session": updated_session}
 
 
+# POST /api/sessions/{session_id}/messages/{message_id}/fork
+# 从指定消息处「分叉」出一个新会话（复制该消息及其之前的上下文），需为会话所有者
 @router.post("/{session_id}/messages/{message_id}/fork")
 async def fork_session_from_message(
     session_id: str,
@@ -594,6 +636,7 @@ async def fork_session_from_message(
     try:
         return await manager.fork_session_from_message(session_id, message_id, user.sub)
     except NotFoundError as exc:
+        # 根据异常信息区分是「消息不存在」还是其它资源缺失，返回对应 404 文案
         detail = "消息不存在" if "message" in str(exc) else "资源不存在"
         logger.warning("Fork 404: session=%s message=%s exc=%s", session_id, message_id, exc)
         raise HTTPException(status_code=404, detail=detail) from exc
@@ -602,6 +645,8 @@ async def fork_session_from_message(
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+# POST /api/sessions/{session_id}/messages/{message_id}/checkpoints
+# 在指定消息处创建一个检查点（checkpoint），便于日后从该点分叉，需为会话所有者
 @router.post("/{session_id}/messages/{message_id}/checkpoints")
 async def create_message_checkpoint(
     session_id: str,
@@ -628,6 +673,8 @@ async def create_message_checkpoint(
         raise HTTPException(status_code=404, detail=detail) from exc
 
 
+# POST /api/sessions/{session_id}/checkpoints/{checkpoint_id}/fork
+# 从已保存的检查点分叉出一个新会话，需为会话所有者
 @router.post("/{session_id}/checkpoints/{checkpoint_id}/fork")
 async def fork_session_from_checkpoint(
     session_id: str,
@@ -648,6 +695,7 @@ async def fork_session_from_checkpoint(
             user_id=user.sub,
         )
     except NotFoundError as exc:
+        # 区分「检查点不存在」与其它资源缺失，返回对应 404 文案
         detail = "检查点不存在" if "checkpoint" in str(exc) else "资源不存在"
         logger.warning(
             "Fork checkpoint 404: session=%s checkpoint=%s exc=%s",
@@ -666,6 +714,8 @@ async def fork_session_from_checkpoint(
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+# POST /api/sessions/{session_id}/favorite
+# 切换会话的收藏状态；收藏与会话所属项目解耦，切换时不改变其项目归属
 @router.post("/{session_id}/favorite")
 async def toggle_session_favorite(
     session_id: str,
@@ -691,6 +741,7 @@ async def toggle_session_favorite(
         raise HTTPException(status_code=500, detail="收藏状态更新失败")
 
     updated_session = _normalize_session(updated_session, favorites_project_id)
+    # 返回最新收藏状态（基于规范化后的元数据与收藏项目 ID 判定）
     return {
         "status": "updated",
         "is_favorite": is_session_favorite(
@@ -729,9 +780,11 @@ async def generate_session_title(
 
     verify_session_ownership(session, user)
 
+    # 空消息（或纯空白）直接返回默认标题，不消耗 LLM 调用
     if not message or not message.strip():
         return {"title": "新对话", "session_id": session_id}
 
+    # 解析配置中的标题生成模型引用（可能是模型 ID，也可能附带模型配置）
     title_model_id, title_model = await resolve_model_reference(settings.SESSION_TITLE_MODEL)
     prompt_template = settings.SESSION_TITLE_PROMPT
 
@@ -746,8 +799,10 @@ async def generate_session_title(
         model = await LLMClient.get_model(
             **model_kwargs,
         )
+        # 用语言与消息填充提示词模板；消息截断到 800 字以控制 token 消耗
         prompt = prompt_template.replace("{lang}", lang).replace("{message}", message[:800])
 
+        # 带重试地调用 LLM 生成标题
         response = await _ainvoke_with_retry(model, prompt)
         logger.debug("LLM 生成标题响应: %s", response)
 
@@ -812,9 +867,11 @@ async def move_session(
 
     verify_session_ownership(session, user)
     favorites_project_id = await _get_favorites_project_id(user.sub)
+    # 记录移动前是否已收藏：移动到别的项目后需保持收藏标记不丢失
     was_favorite = is_session_favorite(session.metadata, favorites_project_id)
 
     # Get project_id from body
+    # 从请求体读取目标项目 ID：为 None 表示移动到「未分类」
     project_id = body.get("project_id")
 
     # If project_id provided (not null), verify project exists and belongs to user
@@ -829,6 +886,7 @@ async def move_session(
     if not updated_session:
         raise HTTPException(status_code=500, detail="移动失败")
 
+    # 若移动后脱离了收藏项目导致收藏标记丢失，则显式补回 is_favorite
     if was_favorite and not is_session_favorite(
         updated_session.metadata,
         favorites_project_id,
@@ -841,6 +899,7 @@ async def move_session(
             raise HTTPException(status_code=500, detail="移动后收藏状态同步失败")
 
     # Sync revealed files' project_id
+    # 同步该会话已展示文件（revealed files）的 project_id；失败仅告警不阻断移动
     try:
         from src.infra.revealed_file.storage import get_revealed_file_storage
 

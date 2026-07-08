@@ -33,6 +33,9 @@ logger = get_logger(__name__)
 _DEFAULT_TIMEOUT = 30 * 60
 
 
+# CubeSandbox 的后端适配器：CubeSandbox 刻意提供与 E2B 类似的 commands/files API，
+# 因此这里直接继承 E2BBackend 复用其成熟的命令/文件/glob/上传/下载逻辑，
+# 仅覆盖生命周期与配置（get_info/pause/超时）等原生差异部分。
 class CubeSandboxBackend(E2BBackend):
     """Backend wrapper for the native CubeSandbox Python SDK.
 
@@ -50,15 +53,19 @@ class CubeSandboxBackend(E2BBackend):
     ):
         super().__init__(
             sandbox=sandbox,
+            # 超时优先级：显式传入 > settings.CUBE_TIMEOUT > 环境变量 CUBE_TIMEOUT > 默认 30 分钟
             timeout=timeout
             or settings.CUBE_TIMEOUT
             or int(os.environ.get("CUBE_TIMEOUT", _DEFAULT_TIMEOUT)),
             env_vars=env_vars,
             work_dir=work_dir,
         )
+        # 记录已 mkdir 过的父目录，避免每次写文件都重复执行 mkdir -p
         self._ensured_parent_dirs: set[str] = set()
 
     def get_info(self) -> dict[str, Any]:
+        # 把 CubeSandbox 返回的字段（可能是 camelCase 或 snake_case）归一化成统一结构；
+        # 拿不到 dict 时回退父类实现，异常则返回最小可用信息。
         try:
             info = self._sandbox.get_info()
             if isinstance(info, dict):
@@ -80,6 +87,7 @@ class CubeSandboxBackend(E2BBackend):
         logger.info("[CubeSandbox] Paused sandbox %s", self.id)
 
     def _ensure_parent_dir(self, file_path: str) -> None:
+        # 写文件前确保父目录存在；用 _ensured_parent_dirs 去重，避免重复的 mkdir 调用
         file_path = self._resolve_path(file_path)
         parent = os.path.dirname(file_path)
         if not parent or parent in self._ensured_parent_dirs:
@@ -88,6 +96,8 @@ class CubeSandboxBackend(E2BBackend):
         self._ensured_parent_dirs.add(parent)
 
     def ls_info(self, path: str) -> list[FileInfo]:
+        # CubeSandbox 无原生 ls：在沙箱内跑一段 python3 脚本列目录并输出 JSON
+        # （含每项 size、是否目录），再在本地解析成 FileInfo 列表。
         path = self._resolve_path(path)
         quoted = shlex.quote(path)
         command = (
@@ -132,6 +142,7 @@ class CubeSandboxBackend(E2BBackend):
     def read(self, file_path: str, offset: int = 0, limit: int = 2000) -> ReadResult:  # type: ignore[override]
         file_path = self._resolve_path(file_path)
         try:
+            # 读取前按大小预检，超过 SANDBOX_READ_MAX_BYTES 直接拒绝，避免拉取超大文件
             size = self._file_size(file_path)
             if size is not None and size > SANDBOX_READ_MAX_BYTES:
                 return ReadResult(
@@ -145,6 +156,7 @@ class CubeSandboxBackend(E2BBackend):
                 try:
                     content = content.decode("utf-8")
                 except UnicodeDecodeError:
+                    # 非 UTF-8（二进制）内容无法当文本渲染 → 编码成 data URI 返回
                     data_uri = (
                         "data:application/octet-stream;base64,"
                         + base64.standard_b64encode(content).decode()
@@ -180,6 +192,7 @@ class CubeSandboxBackend(E2BBackend):
             return WriteResult(path=file_path, error="file_not_found")
 
     def upload_files(self, files: list[tuple[str, bytes]]) -> list[FileUploadResponse]:
+        # 数量超限则整体拒绝；单文件超过上传上限单独标记 file_too_large
         if len(files) > SANDBOX_BATCH_FILES_LIMIT:
             return [FileUploadResponse(path=path, error="too_many_files") for path, _ in files]
 
@@ -199,6 +212,7 @@ class CubeSandboxBackend(E2BBackend):
         return responses
 
     def download_files(self, paths: list[str]) -> list[FileDownloadResponse]:
+        # 数量超限则整体拒绝；单文件超过下载上限视为 file_not_found（不返回超大内容）
         if len(paths) > SANDBOX_BATCH_FILES_LIMIT:
             return [
                 file_download_response(path=path, content=None, error="too_many_files")
@@ -230,6 +244,7 @@ class CubeSandboxBackend(E2BBackend):
         return responses
 
     def _file_size(self, path: str) -> int | None:
+        # 用 stat 取文件字节数（失败或非数字返回 None），作为读/下载前的大小预检
         command = f"stat -c %s {shlex.quote(path)} 2>/dev/null"
         result = self.execute(command, timeout=5)
         if result.exit_code != 0:

@@ -29,6 +29,8 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
+# 这两个模块级包装通过 session_manager 模块属性做一层间接，便于测试时 monkeypatch 替换
+# （未替换则用真实实现）。mixin 内部统一调用它们，而非直接 import 具体函数。
 def run_blocking_io(*args, **kwargs):
     from src.infra.sandbox import session_manager
 
@@ -41,9 +43,13 @@ def ensure_sandbox_mcp(*args, **kwargs):
     return getattr(session_manager, "ensure_sandbox_mcp", _ensure_sandbox_mcp)(*args, **kwargs)
 
 
+# Daytona 平台的生命周期方法集合，通过多继承混入 SessionSandboxManager。
+# 所有方法都依赖 self 提供的共享设施（cache / bindings / locks / scoping 等）。
 class _DaytonaMixin:
     """Daytona platform lifecycle methods for SessionSandboxManager."""
 
+    # 仅供类型检查：声明本 mixin 期望宿主类（SessionSandboxManager）提供的属性与方法，
+    # 运行时不生效（避免与真正的实现冲突）。
     if TYPE_CHECKING:
         _daytona_client: Optional["Daytona"]
         _cache: OrderedDict[str, tuple[str, CompositeBackend, object | None]]
@@ -105,6 +111,7 @@ class _DaytonaMixin:
             logger.error(f"[SessionSandboxManager] Timeout getting sandbox {sandbox_id} state")
             return "unknown"
         except Exception as e:
+            # 查不到（not found）说明沙箱已被销毁，归一化为 "destroyed"；其他异常继续上抛
             if "not found" in str(e).lower():
                 return "destroyed"
             raise

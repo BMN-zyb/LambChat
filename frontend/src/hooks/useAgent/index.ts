@@ -1,3 +1,6 @@
+// 【useAgent 模块的公共出口（barrel）】统一对外转出各子模块的类型与工具函数，
+// 使外部只需从 "./useAgent" 导入，无需感知内部文件拆分。
+
 // Re-export types
 export type {
   EventType,

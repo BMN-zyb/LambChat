@@ -2,16 +2,23 @@
 Core authentication routes (register, login, refresh, me, permissions)
 """
 
+# FastAPI 路由与异常/状态码工具
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 
+# 依赖：从请求中解析并要求已登录用户（无有效 token 则直接 401）
 from src.api.deps import get_current_user_required
+# JWT 相关：签发 access/refresh token、解码校验 token
 from src.infra.auth.jwt import create_access_token, create_refresh_token, decode_token
+# Cloudflare Turnstile 人机验证服务（防机器人刷注册/登录）
 from src.infra.auth.turnstile import get_turnstile_service
 from src.infra.logging import get_logger
+# 用户业务管理器：封装注册/登录/查询等用户领域逻辑
 from src.infra.user.manager import UserManager
 from src.kernel.config import settings
 from src.kernel.exceptions import ValidationError
+# 权限相关的响应模型与构造函数
 from src.kernel.schemas.permission import PermissionsResponse, get_permissions_response
+# 用户相关的请求/响应数据模型（Pydantic）
 from src.kernel.schemas.user import (
     LoginRequest,
     RegisterResponse,
@@ -28,6 +35,10 @@ router = APIRouter()
 logger = get_logger(__name__)
 
 
+# POST /register —— 用户注册接口
+# 请求体：UserCreate（用户名/邮箱/密码等）；响应体：RegisterResponse（新用户 + 是否需要邮箱验证）
+# 约束：受 ENABLE_REGISTRATION 开关控制；可选 Turnstile 人机验证
+# 副作用：若开启邮箱验证，会写入验证令牌并发送验证邮件
 @router.post("/register", response_model=RegisterResponse)
 async def register(user_data: UserCreate, request: Request):
     """用户注册"""
@@ -40,6 +51,7 @@ async def register(user_data: UserCreate, request: Request):
 
     # Turnstile 验证
     turnstile_service = get_turnstile_service()
+    # 仅当配置要求"注册时校验"才执行；令牌由前端放在 X-Turnstile-Token 请求头中
     if turnstile_service.require_on_register:
         turnstile_token = request.headers.get("X-Turnstile-Token")
         client_ip = _get_client_ip(request)
@@ -51,6 +63,7 @@ async def register(user_data: UserCreate, request: Request):
 
     manager = UserManager()
     try:
+        # 执行注册：创建用户（内部会做用户名/邮箱查重、密码哈希等）
         user = await manager.register(user_data)
 
         # 如果要求邮箱验证，发送验证邮件
@@ -68,6 +81,7 @@ async def register(user_data: UserCreate, request: Request):
                 from src.infra.user.storage import UserStorage
 
                 storage = UserStorage()
+                # 把验证令牌与过期时间写回用户记录，供后续 /verify-email 校验使用
                 await storage.update(
                     user.id,
                     UserUpdate(
@@ -94,6 +108,7 @@ async def register(user_data: UserCreate, request: Request):
             else:
                 logger.warning("[Auth] Email verification required but email service not enabled")
 
+        # 返回新用户信息，并告知前端是否还需完成邮箱验证（未验证时通常不允许登录）
         return RegisterResponse(user=user, requires_verification=requires_verification)
     except ValidationError as e:
         raise HTTPException(
@@ -102,11 +117,16 @@ async def register(user_data: UserCreate, request: Request):
         )
 
 
+# POST /login —— 用户登录接口
+# 请求体：LoginRequest（用户名 + 密码）；响应体：Token（access_token / refresh_token / 过期秒数）
+# 关键逻辑：登录前可选 Turnstile 校验；凭证错误返回 401
+# 特殊处理：将"邮箱未验证 / 账户未激活"两类异常转换为 403 并给出中文提示
 @router.post("/login", response_model=Token)
 async def login(credentials: LoginRequest, request: Request):
     """用户登录"""
     # Turnstile 验证
     turnstile_service = get_turnstile_service()
+    # 仅当配置要求"登录时校验"才执行人机验证
     if turnstile_service.require_on_login:
         turnstile_token = request.headers.get("X-Turnstile-Token")
         client_ip = _get_client_ip(request)
@@ -118,6 +138,7 @@ async def login(credentials: LoginRequest, request: Request):
 
     manager = UserManager()
     try:
+        # 校验用户名/密码，成功返回已签发的 Token，失败返回 None
         token = await manager.login(credentials.username, credentials.password)
         if not token:
             raise HTTPException(
@@ -126,6 +147,7 @@ async def login(credentials: LoginRequest, request: Request):
             )
         return token
     except Exception as e:
+        # 登录可能抛出领域异常，这里按异常类名/消息文本判别并转成对应的 HTTP 状态码
         # 处理邮箱未验证错误
         if "EmailNotVerifiedError" in type(e).__name__ or "请先验证邮箱" in str(e):
             raise HTTPException(
@@ -141,6 +163,9 @@ async def login(credentials: LoginRequest, request: Request):
         raise
 
 
+# POST /refresh —— 刷新令牌接口
+# 请求体：JSON { "refresh_token": ... }；响应体：Token（新 access_token + 轮换后的 refresh_token）
+# 关键逻辑：解码并校验 refresh token（type 必须为 refresh、用户仍存在），随后重新签发令牌
 @router.post("/refresh", response_model=Token)
 async def refresh_token(request: Request):
     """刷新令牌"""
@@ -153,6 +178,7 @@ async def refresh_token(request: Request):
                 detail="缺少刷新令牌",
             )
 
+        # 解码并校验 refresh token 的签名与有效期，取出其载荷（payload）
         payload = decode_token(token)
 
         # 验证是否是 refresh token
@@ -181,12 +207,14 @@ async def refresh_token(request: Request):
             )
 
         # 生成新的 access token 和 refresh token（轮换 refresh token）
+        # 轮换 refresh token：旧的用后作废，降低泄露后被长期滥用的风险
         access_token = create_access_token(user_id=user_id)
         new_refresh_token = create_refresh_token(
             user_id=user_id,
             username=username or user.username,
         )
 
+        # expires_in 以秒为单位返回 access token 有效时长（配置的小时数 × 3600）
         return Token(
             access_token=access_token,
             refresh_token=new_refresh_token,
@@ -201,6 +229,9 @@ async def refresh_token(request: Request):
         )
 
 
+# GET /me —— 获取当前登录用户信息（含动态权限）
+# 认证要求：依赖 get_current_user_required，需携带有效 access token
+# 响应体：User；其中 permissions 采用 TokenPayload 中已动态解析的权限，而非数据库里的历史快照
 @router.get("/me", response_model=User)
 async def get_current_user_info(
     current_user: TokenPayload = Depends(get_current_user_required),
@@ -218,6 +249,8 @@ async def get_current_user_info(
     return user
 
 
+# GET /permissions —— 获取所有可用权限的分组列表（无需认证）
+# 响应体：PermissionsResponse；供前端动态渲染权限选择器
 @router.get("/permissions", response_model=PermissionsResponse)
 async def get_permissions():
     """

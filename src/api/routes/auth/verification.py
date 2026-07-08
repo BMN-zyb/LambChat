@@ -2,6 +2,7 @@
 Email verification and password reset routes
 """
 
+# hashlib：用于在"用户不存在"分支执行一次等价哈希，抵御时序攻击（timing attack）
 import hashlib
 from datetime import timezone
 
@@ -9,6 +10,7 @@ from fastapi import APIRouter, HTTPException, Request, status
 
 from src.infra.logging import get_logger
 from src.infra.user.manager import UserManager
+# utc_now：统一获取带时区的 UTC 当前时间，用于令牌过期比较
 from src.infra.utils.datetime import utc_now
 from src.kernel.config import settings
 from src.kernel.schemas.user import (
@@ -26,6 +28,10 @@ router = APIRouter()
 logger = get_logger(__name__)
 
 
+# POST /forgot-password —— 请求发送密码重置邮件
+# 请求体：ForgotPasswordRequest（email）；无论邮箱是否注册都统一返回成功，防止邮箱枚举
+# 限流：同一 IP 每小时最多 5 次、同一邮箱每小时最多 3 次（任一超限返回 429）
+# 副作用：邮箱存在时写入重置令牌并发信；不存在时执行等价耗时操作以抵御时序攻击
 @router.post("/forgot-password")
 async def forgot_password(
     request_data: ForgotPasswordRequest,
@@ -45,6 +51,7 @@ async def forgot_password(
     limiter = get_rate_limiter()
 
     # IP-based rate limit (5 per hour)
+    # 第一层：按客户端 IP 限流，key 形如 ratelimit:forgot-password:ip:<ip>，窗口 3600 秒内最多 5 次
     ip_key = limiter.build_key("ratelimit:forgot-password:ip", client_ip)
     ip_allowed, _ = await limiter.check_rate_limit(ip_key, max_requests=5, window_seconds=3600)
     if not ip_allowed:
@@ -54,6 +61,7 @@ async def forgot_password(
         )
 
     # Email-based rate limit (3 per hour)
+    # 第二层：按目标邮箱限流，防止单一邮箱被高频轰炸，窗口 3600 秒内最多 3 次
     email_key = limiter.build_key("ratelimit:forgot-password:email", email)
     email_allowed, _ = await limiter.check_rate_limit(
         email_key, max_requests=3, window_seconds=3600
@@ -114,6 +122,9 @@ async def forgot_password(
     return {"message": "如果邮箱已注册，您将收到密码重置邮件"}
 
 
+# POST /reset-password —— 使用重置令牌设置新密码
+# 请求体：ResetPasswordRequest（token + new_password）
+# 校验：令牌无效或过期均返回 400；成功后更新密码并清空重置令牌（令牌一次性）
 @router.post("/reset-password")
 async def reset_password(request_data: ResetPasswordRequest):
     """重置密码
@@ -137,6 +148,7 @@ async def reset_password(request_data: ResetPasswordRequest):
     # 检查令牌是否过期
     if user.reset_token_expires:
         expires_dt = user.reset_token_expires
+        # 兼容存储中可能是"无时区(naive)"的时间：补上 UTC 时区后再比较，避免 aware/naive 混用报错
         if expires_dt.tzinfo is None:
             expires_dt = expires_dt.replace(tzinfo=timezone.utc)
         if utc_now() > expires_dt:
@@ -160,6 +172,9 @@ async def reset_password(request_data: ResetPasswordRequest):
     return {"message": "密码重置成功"}
 
 
+# POST /verify-email —— 用验证令牌验证邮箱并激活账户
+# 请求体：VerifyEmailRequest（token）；令牌无效或过期返回 400（过期检查在存储层完成）
+# 副作用：置 email_verified=True、is_active=True；无角色时赋予默认角色，并清空验证令牌
 @router.post("/verify-email")
 async def verify_email(request_data: VerifyEmailRequest):
     """验证邮箱
@@ -213,6 +228,10 @@ async def verify_email(request_data: VerifyEmailRequest):
     return {"message": "邮箱验证成功，账户已激活"}
 
 
+# POST /resend-verification —— 重新发送邮箱验证邮件
+# 请求体：ResendVerificationRequest（email）；无论邮箱是否存在/是否已验证都统一返回成功，防止枚举
+# 限流：同一 IP 每小时最多 5 次、同一邮箱每小时最多 3 次（任一超限返回 429）
+# 副作用：仅当用户存在且尚未验证时，才重新生成验证令牌（24h 有效）并发信
 @router.post("/resend-verification")
 async def resend_verification(
     request_data: ResendVerificationRequest,
@@ -232,6 +251,7 @@ async def resend_verification(
     limiter = get_rate_limiter()
 
     # IP-based rate limit (5 per hour)
+    # 第一层：按客户端 IP 限流，key 形如 ratelimit:resend-verification:ip:<ip>，3600 秒内最多 5 次
     ip_key = limiter.build_key("ratelimit:resend-verification:ip", client_ip)
     ip_allowed, _ = await limiter.check_rate_limit(ip_key, max_requests=5, window_seconds=3600)
     if not ip_allowed:
@@ -241,6 +261,7 @@ async def resend_verification(
         )
 
     # Email-based rate limit (3 per hour)
+    # 第二层：按目标邮箱限流，防止单一邮箱被高频轰炸，3600 秒内最多 3 次
     email_key = limiter.build_key("ratelimit:resend-verification:email", email)
     email_allowed, _ = await limiter.check_rate_limit(
         email_key, max_requests=3, window_seconds=3600
@@ -261,6 +282,7 @@ async def resend_verification(
     manager = UserManager()
     user = await manager.storage.get_by_email(email)
 
+    # 仅对"存在且尚未验证"的用户重新发信；已验证或不存在则静默跳过（对外仍统一返回成功）
     if user and not user.email_verified:
         # 生成新的验证令牌（24小时有效期）
         verify_token = email_service.generate_token()

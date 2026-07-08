@@ -42,6 +42,9 @@ import { sessionApi } from "../../../services/api";
 
 const FLOATING_SCROLL_BUTTON_OFFSET_CLASS = "bottom-full mb-3";
 
+// 聊天主界面组件：装配「消息列表（虚拟滚动）+ 审批面板 + 预览宿主 + 底部输入框」。
+// 由 ChatAppContent 把会话数据、工具/技能/人设、Agent 等大量状态透传进来（见 ChatViewProps）。
+// 消息为空时展示欢迎页 WelcomePage，否则用 react-virtuoso 渲染 ChatMessage 列表。
 export function ChatView({
   messages,
   sessionId,
@@ -122,6 +125,7 @@ export function ChatView({
   const { t } = useTranslation();
   const navigate = useNavigate();
   const { user } = useAuth();
+  // 会话是否正在运行（存在流式消息或正在加载）——决定输入框显示发送还是停止
   const sessionRunning = isSessionRunning(messages, isLoading);
   const scheduledTasksRefreshKey = [
     sessionId ?? "",
@@ -133,6 +137,7 @@ export function ChatView({
     (message) => message.role === "assistant" && message.isStreaming,
   );
 
+  // 是否在列表底部显示「流式生成中」骨架占位：连接正常、会话运行中，但还没有可见流式消息时
   const showStreamingFooterSkeleton = shouldShowStreamingFooterSkeleton({
     connectionStatus,
     sessionRunning,
@@ -140,6 +145,7 @@ export function ChatView({
     hasVisibleStreamingMessage,
   });
 
+  // 根据当前小时选择问候语 i18n key（凌晨/上午/下午/晚上），用于欢迎页问候
   const getGreetingKey = () => {
     const h = new Date().getHours();
     if (h < 6) return "chat.goodEvening";
@@ -157,6 +163,8 @@ export function ChatView({
   );
   const [visibleRange, setVisibleRange] = useState<ListRange | null>(null);
 
+  // 消息滚动管理：容器/虚拟列表 refs、是否贴近顶/底、历史滚动稳定态，
+  // 以及滚动到底/顶等方法；同时负责响应「外部导航」（跳转到某文件/某 run）。
   const {
     messagesContainerRef,
     virtuosoRef,
@@ -180,6 +188,7 @@ export function ChatView({
     null,
   );
 
+  // 计算虚拟列表的 key：切换会话时改用新 key 强制重建列表，避免沿用旧滚动位置
   useEffect(() => {
     const previousSessionId = previousSessionIdRef.current;
     previousSessionIdRef.current = sessionId;
@@ -200,6 +209,7 @@ export function ChatView({
     return preset?.avatar ?? null;
   }, [personaPresets, selectedPersonaPresetId]);
   const currentTeam = useCurrentTeam(currentAgent, selectedTeamId);
+  // 解析当前助手身份（头像 + 名称）：优先取人设预设头像，其次团队/Agent
   const assistantIdentity = useMemo(
     () =>
       resolveChatAssistantIdentity({
@@ -251,6 +261,7 @@ export function ChatView({
     isLoadingHistory || isHistoryScrollSettling;
 
   // --- Message action handlers ---
+  // 从某条消息处「分叉」出新会话：调用 API 成功后跳转到新会话
   const handleForkMessage = useCallback(
     async (messageId: string) => {
       if (!sessionId) return;
@@ -267,6 +278,7 @@ export function ChatView({
     [navigate, sessionId, t],
   );
 
+  // 重试被取消的消息：找到目标消息的内容与附件后重新发送（仅会话空闲且有发送权限时）
   const handleRetryCancelledMessage = useCallback(
     (messageId: string) => {
       if (sessionRunning || !canSendMessage) {
@@ -283,6 +295,7 @@ export function ChatView({
     [canSendMessage, messages, onSendMessage, sessionRunning],
   );
 
+  // 点击推荐问题：把该问题直接作为新消息发送
   const handleRecommendQuestionClick = useCallback(
     (question: string) => {
       if (sessionRunning || !canSendMessage) {
@@ -312,6 +325,7 @@ export function ChatView({
     [shouldHideHistoryMeasurementFrame],
   );
 
+  // 虚拟列表自定义组件：Scroller 绑定滚动容器 ref；Footer 放流式骨架与底部锚点
   const virtuosoComponents = useMemo(
     () => ({
       Scroller: (
@@ -356,6 +370,7 @@ export function ChatView({
     [showStreamingFooterSkeleton],
   );
 
+  // 单个列表项的渲染：把每条 message 交给 ChatMessage，并传入预览/分叉/重试等回调
   const virtuosoItemContent = useCallback(
     (index: number, message: (typeof messages)[number]) => (
       <ChatMessage
@@ -394,6 +409,7 @@ export function ChatView({
     ],
   );
 
+  // 底部输入框与欢迎页输入框共用的一组 props，集中构造以避免重复
   // Shared ChatInput props to avoid duplication
   const chatInputProps = {
     onSend: (
@@ -456,6 +472,8 @@ export function ChatView({
     onToggleGoalMode,
   };
 
+  // 渲染：图库 Provider 包裹 → 主区（空态欢迎页 / 虚拟消息列表）→ 审批面板、
+  // 预览宿主、附件预览、持久化工具面板 → 底部悬浮滚动按钮与 ChatInput。
   return (
     <SessionImageGalleryProvider messages={messages}>
       <main
@@ -471,6 +489,7 @@ export function ChatView({
               "linear-gradient(to bottom, transparent, var(--theme-bg))",
           }}
         />
+        {/* 空消息：加载中显示骨架，否则显示欢迎页；有消息则渲染虚拟列表 */}
         {messages.length === 0 ? (
           isLoading ? (
             <ChatSkeleton count={8} />

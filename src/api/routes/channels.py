@@ -31,26 +31,37 @@ from src.kernel.types import Permission
 
 logger = get_logger(__name__)
 
+# 本模块挂载于 /api/channels，负责用户的外部渠道（如飞书 Feishu）配置管理：
+# 渠道类型元数据查询、飞书一键注册，以及各渠道实例的增删改查、状态查询与连接测试。
+# 配置通过 ChannelStorage 持久化；敏感字段（如密钥）在返回前统一脱敏为 "***"。
+# 权限基于 Permission.CHANNEL_READ / CHANNEL_WRITE / CHANNEL_DELETE 控制。
 router = APIRouter()
+# 单次列表返回的渠道配置数量上限；超过则返回 413，避免一次性拉取过多
 CHANNEL_LIST_MAX_ITEMS = 200
 
 
+# FastAPI 依赖：为各路由提供 ChannelStorage 实例（渠道配置的持久化访问层）。
 async def get_channel_storage() -> ChannelStorage:
     """Dependency to get ChannelStorage"""
     return ChannelStorage()
 
 
+# 校验用户是否有权把该渠道绑定到指定 agent：
+# 1) agent 必须全局启用；2) 若用户角色配置了 allowed_agents 白名单，则该 agent 必须在白名单内。
 async def _validate_agent_id(agent_id: str | None, user: TokenPayload) -> None:
     """Validate that the user has permission to use the specified agent."""
+    # 未指定 agent，无需校验
     if not agent_id:
         return
 
     agent_storage = get_agent_config_storage()
 
+    # 校验 agent 是否全局启用
     # Check agent is globally enabled
     if not await agent_storage.is_agent_enabled(agent_id):
         raise HTTPException(status_code=400, detail=f"Agent '{agent_id}' is not available")
 
+    # 校验 agent 是否在用户角色允许的范围内（汇总各角色的 allowed_agents）
     # Check agent is allowed for user's roles
     if user.roles:
         role_storage = RoleStorage()
@@ -65,6 +76,7 @@ async def _validate_agent_id(agent_id: str | None, user: TokenPayload) -> None:
             )
 
 
+# 校验项目存在且归属当前用户（渠道可绑定到某个项目）。
 async def _validate_project_id(project_id: str | None, user: TokenPayload) -> None:
     """Validate that the project exists and belongs to the current user."""
     if not project_id:
@@ -78,6 +90,7 @@ async def _validate_project_id(project_id: str | None, user: TokenPayload) -> No
         raise HTTPException(status_code=400, detail=f"Project '{project_id}' does not exist")
 
 
+# 校验所选人设预设对当前用户可见（存在且有权限）；管理员可见全部。
 async def _validate_persona_preset_id(persona_preset_id: str | None, user: TokenPayload) -> None:
     """Validate that the selected persona preset is visible to the current user."""
     if not persona_preset_id:
@@ -97,6 +110,8 @@ async def _validate_persona_preset_id(persona_preset_id: str | None, user: Token
         raise HTTPException(status_code=403, detail="Persona preset is not allowed")
 
 
+# 判断某渠道实例是否已连接：优先用分布式检查（可能是协程，需 await），
+# 否则回退到单机内存态检查。兼容 manager 是否实现分布式接口。
 async def _is_manager_connected(manager, user_id: str, instance_id: str) -> bool:
     distributed_checker = getattr(manager, "is_connected_distributed", None)
     if callable(distributed_checker):
@@ -107,6 +122,9 @@ async def _is_manager_connected(manager, user_id: str, instance_id: str) -> bool
     return bool(manager.is_connected(user_id, instance_id))
 
 
+# GET /api/channels/types —— 列出所有可用渠道类型及其元数据（配置字段、能力等）。
+# 权限：CHANNEL_READ。前端据此渲染"新建渠道"表单。
+# 注意：本路由及 /feishu/* 等具体路径都声明在 /{channel_type} 之前，避免被路径参数吞掉。
 @router.get(
     "/types",
     response_model=ChannelTypeListResponse,
@@ -119,6 +137,9 @@ async def get_channel_types():
     return ChannelTypeListResponse(types=metadata_list)
 
 
+# POST /api/channels/feishu/registrations —— 发起飞书应用"一键注册"会话。
+# 权限：CHANNEL_WRITE。依赖 lark-oapi 的 register_app 能力，缺失时返回 400。
+# 返回的会话信息不含 secret（include_secret=False）。
 @router.post(
     "/feishu/registrations",
     dependencies=[Depends(require_permissions(Permission.CHANNEL_WRITE))],
@@ -137,6 +158,8 @@ async def start_feishu_registration():
         )
 
 
+# GET /api/channels/feishu/registrations/{session_id} —— 轮询一键注册会话进度。
+# 权限：CHANNEL_WRITE。仅当会话状态为 success 时才在响应中带上 secret。
 @router.get(
     "/feishu/registrations/{session_id}",
     dependencies=[Depends(require_permissions(Permission.CHANNEL_WRITE))],
@@ -151,6 +174,8 @@ async def get_feishu_registration(session_id: str):
     return session.to_dict(include_secret=session.status == "success")
 
 
+# DELETE /api/channels/feishu/registrations/{session_id} —— 取消一键注册会话。
+# 权限：CHANNEL_WRITE。会话不存在返回 404。
 @router.delete(
     "/feishu/registrations/{session_id}",
     dependencies=[Depends(require_permissions(Permission.CHANNEL_WRITE))],
@@ -164,6 +189,8 @@ async def cancel_feishu_registration(session_id: str):
     return {"cancelled": True}
 
 
+# GET /api/channels/ —— 列出当前用户已配置的所有渠道实例（跨类型）。
+# 权限：CHANNEL_READ。配置数超过上限返回 413；敏感字段脱敏后返回；未知渠道类型跳过。
 @router.get(
     "/",
     response_model=ChannelListResponse,
@@ -195,6 +222,7 @@ async def list_user_channels(
                     if field.get("sensitive"):
                         sensitive_fields.add(field["name"])
 
+                # 脱敏：先剔除敏感字段，再把有值的敏感字段统一替换成 "***"（存在但不外泄）
                 # Mask sensitive fields
                 masked_config = {k: v for k, v in config.items() if k not in sensitive_fields}
                 for field in sensitive_fields:
@@ -218,6 +246,7 @@ async def list_user_channels(
                         updated_at=config.get("updated_at"),
                     )
                 )
+        # 配置中的 channel_type 无法解析为已知枚举：跳过（可能是已下线的渠道类型）
         except ValueError:
             # Unknown channel type, skip
             continue
@@ -225,6 +254,8 @@ async def list_user_channels(
     return ChannelListResponse(channels=responses)
 
 
+# GET /api/channels/{channel_type} —— 列出某一渠道类型下的所有实例。
+# 权限：CHANNEL_READ。未知渠道类型返回 404，配置数超过上限返回 413；敏感字段同样脱敏。
 @router.get(
     "/{channel_type}",
     response_model=ChannelListResponse,
@@ -258,6 +289,7 @@ async def list_channel_instances(
             if field.get("sensitive"):
                 sensitive_fields.add(field["name"])
 
+        # 脱敏：先剔除敏感字段，再把有值的敏感字段统一替换成 "***"
         # Mask sensitive fields
         masked_config = {k: v for k, v in config.items() if k not in sensitive_fields}
         for field in sensitive_fields:
@@ -285,6 +317,8 @@ async def list_channel_instances(
     return ChannelListResponse(channels=responses)
 
 
+# GET /api/channels/{channel_type}/{instance_id} —— 获取单个渠道实例配置。
+# 权限：CHANNEL_READ。未知类型或实例不存在返回 404；返回体由 storage 统一脱敏构造。
 @router.get(
     "/{channel_type}/{instance_id}",
     response_model=ChannelConfigResponse,
@@ -310,6 +344,10 @@ async def get_channel_instance(
     return storage.build_response_from_config(config, channel_type, user.sub, metadata)
 
 
+# POST /api/channels/{channel_type} —— 新建一个渠道实例。权限：CHANNEL_WRITE。
+# 请求体 ChannelConfigCreate（channel_type 需与路径一致、name 必填、config 及可选的
+#   agent_id/model_id/project_id/team_id/persona_preset_id）。会校验角色的渠道数量上限、
+#   agent/项目/人设权限；创建后热加载对应渠道客户端并广播配置变更事件。
 @router.post(
     "/{channel_type}",
     response_model=ChannelConfigResponse,
@@ -323,6 +361,7 @@ async def create_channel_instance(
     storage: ChannelStorage = Depends(get_channel_storage),
 ):
     """Create a new channel instance"""
+    # 请求体里的 channel_type 必须与路径参数一致
     if data.channel_type != channel_type:
         raise HTTPException(
             status_code=400,
@@ -332,6 +371,7 @@ async def create_channel_instance(
     if not data.name or not data.name.strip():
         raise HTTPException(status_code=400, detail="Instance name is required")
 
+    # 依据用户角色计算可创建渠道数量上限：取各角色中最严格（最小）的 max_channels
     # Check channel limit from user roles
     max_channels = None  # Default: no limit
     if user.roles:
@@ -357,6 +397,7 @@ async def create_channel_instance(
 
     metadata = channel_class.get_metadata()
 
+    # 逐项校验绑定对象的权限/存在性：agent、项目、人设预设
     # Validate agent_id against user permissions
     await _validate_agent_id(data.agent_id, user)
     await _validate_project_id(data.project_id, user)
@@ -375,6 +416,7 @@ async def create_channel_instance(
             persona_preset_id=data.persona_preset_id,
         )
 
+        # 若该渠道有 manager，则热加载客户端使新配置立即生效（失败仅告警，不影响创建）
         # Reload the channel client if manager exists
         manager_class = registry.get_manager_class(channel_type)
         if manager_class:
@@ -384,6 +426,7 @@ async def create_channel_instance(
             except Exception as e:
                 logger.warning(f"Failed to reload {channel_type} client: {e}")
 
+        # 通过 pubsub 广播"配置已变更"，通知其它进程/实例同步重载该渠道
         await publish_channel_config_changed(
             user_id=user.sub,
             channel_type=channel_type.value,
@@ -398,6 +441,10 @@ async def create_channel_instance(
         raise HTTPException(status_code=400, detail=str(e))
 
 
+# PUT /api/channels/{channel_type}/{instance_id} —— 更新渠道实例。权限：CHANNEL_WRITE。
+# 请求体 ChannelConfigUpdate。合并配置时保留原有敏感字段（前端传空即视为不改）；
+# 对 agent_id/model_id/project_id/team_id/persona_preset_id 用 ... 哨兵区分"未提供"与"显式清空"。
+# 更新后同样热加载渠道客户端并广播配置变更。
 @router.put(
     "/{channel_type}/{instance_id}",
     response_model=ChannelConfigResponse,
@@ -423,6 +470,7 @@ async def update_channel_instance(
     if not existing:
         raise HTTPException(status_code=404, detail="Channel instance not found")
 
+    # 合并配置：新值覆盖旧值；但敏感字段若前端传空，则保留数据库里的原值（避免误清空密钥）
     # Merge configs: keep existing values for empty sensitive fields
     merged_config = {**existing, **data.config}
     for field in metadata.get("config_fields", []):
@@ -430,6 +478,8 @@ async def update_channel_instance(
             # Keep existing value for empty sensitive fields
             merged_config[field["name"]] = existing.get(field["name"])
 
+    # 以下字段用 ...（Ellipsis）作哨兵：仅当字段出现在 data.model_fields_set（即请求显式传了）时才更新，
+    # 传了就用新值（可为 None，表示解绑），没传则保持 ...，由 storage 层识别并跳过、不动原值。
     # Validate agent_id if explicitly provided in the request
     agent_id_value: str | None = ...  # type: ignore[assignment]
     if "agent_id" in data.model_fields_set:
@@ -484,6 +534,7 @@ async def update_channel_instance(
     if not config:
         raise HTTPException(status_code=404, detail="Channel instance not found")
 
+    # 热加载渠道客户端，使更新后的配置立即生效（失败仅告警）
     # Reload the channel client
     manager_class = registry.get_manager_class(channel_type)
     if manager_class:
@@ -493,6 +544,7 @@ async def update_channel_instance(
         except Exception as e:
             logger.warning(f"Failed to reload {channel_type} client: {e}")
 
+    # 广播配置变更，通知其它进程/实例重载该渠道
     await publish_channel_config_changed(
         user_id=user.sub,
         channel_type=channel_type.value,
@@ -503,6 +555,8 @@ async def update_channel_instance(
     return await storage.get_response(user.sub, channel_type, instance_id, metadata)
 
 
+# DELETE /api/channels/{channel_type}/{instance_id} —— 删除渠道实例。权限：CHANNEL_DELETE。
+# 关键顺序：先删配置再停客户端——否则热加载会读到残留配置又把渠道重启起来。停客户端失败仅记错误日志。
 @router.delete(
     "/{channel_type}/{instance_id}",
     dependencies=[Depends(require_permissions(Permission.CHANNEL_DELETE))],
@@ -524,6 +578,7 @@ async def delete_channel_instance(
     if not existing:
         raise HTTPException(status_code=404, detail="Channel instance not found")
 
+    # 先删除配置，再停止运行中的渠道客户端（顺序不能反，见函数说明）
     # Delete config first, then stop the running channel
     # (must delete before reload, otherwise reload sees the config and restarts it)
     deleted = await storage.delete_config(user.sub, channel_type, instance_id)
@@ -542,6 +597,7 @@ async def delete_channel_instance(
                 f"The channel may still be running. Error: {e}"
             )
 
+    # 广播删除事件，通知其它进程/实例停用该渠道
     await publish_channel_config_changed(
         user_id=user.sub,
         channel_type=channel_type.value,
@@ -552,6 +608,8 @@ async def delete_channel_instance(
     return {"message": "Channel instance deleted successfully"}
 
 
+# GET /api/channels/{channel_type}/{instance_id}/status —— 查询渠道实例的连接状态。
+# 权限：CHANNEL_READ。先取存储中的状态，再尝试用 manager 刷新实时的 connected 标志（失败仅告警）。
 @router.get(
     "/{channel_type}/{instance_id}/status",
     response_model=ChannelConfigStatus,
@@ -576,6 +634,7 @@ async def get_channel_instance_status(
 
     status = await storage.get_status(user.sub, channel_type, instance_id)
 
+    # 用渠道 manager 刷新实时连接状态，覆盖存储里的旧值
     # Update connection status from channel manager
     manager_class = registry.get_manager_class(channel_type)
     if manager_class:
@@ -595,6 +654,9 @@ async def get_channel_instance_status(
     return status
 
 
+# POST /api/channels/{channel_type}/{instance_id}/test —— 测试渠道实例连接。
+# 权限：CHANNEL_READ。实例不存在返回 404、被禁用返回 400；若当前未连接会先尝试
+#   reload_user 启动一次再复检。返回 {success, message}。
 @router.post(
     "/{channel_type}/{instance_id}/test",
     dependencies=[Depends(require_permissions(Permission.CHANNEL_READ))],
@@ -618,6 +680,7 @@ async def test_channel_instance_connection(
     if not config.get("enabled", True):
         raise HTTPException(status_code=400, detail="Channel instance is disabled")
 
+    # 若未连接，先尝试启动（reload_user）再复检，据此返回是否连接成功
     # Check if connected; if not, attempt to start the channel
     manager_class = registry.get_manager_class(channel_type)
     if manager_class:

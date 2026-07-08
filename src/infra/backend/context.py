@@ -3,6 +3,8 @@
 from contextvars import ContextVar
 from typing import Optional
 
+# 用 ContextVar 而非全局变量：在 asyncio 下每个请求/任务拥有独立副本，天然实现并发隔离，
+# 无需层层传参就能在 backend 各处拿到"当前用户/会话"上下文。
 # Context variable for current user
 current_user_id: ContextVar[Optional[str]] = ContextVar("current_user_id", default=None)
 
