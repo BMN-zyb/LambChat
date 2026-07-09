@@ -2,6 +2,17 @@
 会话管理器
 """
 
+# 会话管理器（SessionManager）：会话领域对外的统一入口，聚合三层存储——
+# 会话元数据存储（SessionStorage）、事件溯源存储（TraceStorage）与附件文件记录
+# （FileRecordStorage）。
+# 主要职责：
+#   - 会话 CRUD、列表、未读计数、收藏、停用等元数据操作（多为对 storage 的转发）；
+#   - 消息与附件的生命周期：清空/删除会话时，先释放附件引用计数、回收无引用文件，
+#     再删除对应的 trace 与 LangGraph 检查点，避免残留脏数据与孤儿文件；
+#   - 事件溯源读取：跨 trace 聚合出会话的事件流 / trace 列表；
+#   - fork（分叉）：以某条用户消息或命名检查点为锚点，复制锚点之前的历史 trace，
+#     派生出一个可独立续聊的新会话；并优先直接克隆 LangGraph 检查点，克隆失败时
+#     退化为「用复制出的历史消息重建并种入检查点」，最后重建搜索索引使历史可检索。
 import uuid
 from copy import deepcopy
 from dataclasses import dataclass, field

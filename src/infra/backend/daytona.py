@@ -95,6 +95,7 @@ class DaytonaBackend(BaseSandbox):
             or int(os.environ.get("DAYTONA_TIMEOUT", _DEFAULT_TIMEOUT))
         )
 
+    # 返回底层 Daytona 沙箱的 ID
     @property
     def id(self) -> str:
         return self._sandbox.id
@@ -108,6 +109,7 @@ class DaytonaBackend(BaseSandbox):
             self._work_dir = self._sandbox.get_work_dir()
         return self._work_dir
 
+    # 给命令套上工作目录：已显式 cd 的命令原样返回，否则先 mkdir -p 再 cd 进 work_dir 执行
     def _with_work_dir(self, command: str) -> str:
         if command.lstrip().startswith("cd "):
             return command
@@ -272,12 +274,15 @@ class DaytonaBackend(BaseSandbox):
             return command_matches
         return super().glob_info(pattern, path)
 
+    # glob_info 的异步变体：放线程池执行，避免阻塞事件循环
     async def aglob_info(self, pattern: str, path: str = "/") -> list[FileInfo]:
         return await run_blocking_io(self.glob_info, pattern, path)
 
+    # 把 glob_info 的匹配列表包装成 GlobResult
     def glob(self, pattern: str, path: str | None = None) -> GlobResult:
         return GlobResult(matches=self.glob_info(pattern, path or "/"))
 
+    # glob 的异步变体
     async def aglob(self, pattern: str, path: str | None = None) -> GlobResult:
         return GlobResult(matches=await self.aglob_info(pattern, path or "/"))
 

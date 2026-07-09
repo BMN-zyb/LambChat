@@ -2,6 +2,22 @@
 Feishu channel manager for managing multiple user bot connections.
 """
 
+# ============================================================================
+# 模块说明
+# ----------------------------------------------------------------------------
+# 飞书渠道管理器：管理"多用户 / 多实例"的飞书机器人长连接（每个 app_id 一条）。
+# 关键难点是分布式协调——同一 app_id 在整个集群里只能由一个节点建立连接，否则会
+# 重复收发。这里用 Redis 实现：
+#   - 节点成员心跳（feishu:nodes:*，带 TTL）标记本节点存活；
+#   - 一致性分配（HRW / Rendezvous 哈希，见 _preferred_owner）决定每个 app_id 的
+#     首选归属节点，节点增减时只迁移少量 app_id；
+#   - 租约（feishu:lease:*，SET NX + 后台续约 + Lua 原子释放/续期）保证独占；
+#   - 周期性再均衡（_rebalance_loop）在节点上下线后把连接迁移到正确的节点。
+# 一旦续约失败（丢失租约）就立即停掉本地连接以让出所有权；租约相关操作使用独立的
+# Redis 连接池，与业务 Redis 隔离。
+# 关键依赖：ChannelStorage、FeishuChannel、Redis、FeishuConfig。
+# ============================================================================
+
 import asyncio
 import hashlib
 import uuid
@@ -73,11 +89,14 @@ class FeishuChannelManager(UserChannelManager):
         self._lease_redis: Redis | None = None
         self._rebalance_task: asyncio.Task | None = None
 
+    # 取全局单例（与模块级 get_feishu_channel_manager 保持一致），覆盖基类默认实现。
     @classmethod
     def get_instance(cls) -> "FeishuChannelManager":
         """Get the singleton instance, consistent with get_feishu_channel_manager()."""
         return get_feishu_channel_manager()
 
+    # 把存储读出的配置字典转换成 FeishuConfig：instance_id 优先用显式入参、其次取字典、
+    # 最后回退空串；各字段带默认值（群策略/表情/流式回复/音频转写提示等）。
     def _dict_to_config(
         self,
         user_id: str,
@@ -432,6 +451,8 @@ class FeishuChannelManager(UserChannelManager):
 
         return True
 
+    # 按 user_id 查找本地渠道实例并 cast 成 FeishuChannel：优先精确匹配
+    # "user:instance"，再退化为裸 user_id，最后按 "user_id:" 前缀命中该用户任一实例。
     def _find_channel(
         self, user_id: str, instance_id: Optional[str] = None
     ) -> Optional[FeishuChannel]:
@@ -462,6 +483,7 @@ class FeishuChannelManager(UserChannelManager):
 
         return None
 
+    # 通过某用户的飞书机器人发送文本消息：找不到本地连接则告警并返回 False。
     async def send_message(
         self,
         user_id: str,
@@ -477,6 +499,8 @@ class FeishuChannelManager(UserChannelManager):
 
         return await client.send_message(chat_id, content)
 
+    # 发送交互式卡片并返回 (是否成功, message_id)：先定位客户端、解析接收方，再走内部
+    # 发送实现（供审批卡片等需要记住 message_id 以便后续更新的场景）。
     async def send_card_message_with_id(
         self,
         user_id: str,
@@ -507,6 +531,7 @@ class FeishuChannelManager(UserChannelManager):
         )
         return success, message_id
 
+    # 通过某用户的飞书机器人给消息加表情回应，返回 reaction_id；无连接返回 None。
     async def add_reaction(
         self,
         user_id: str,
@@ -520,6 +545,7 @@ class FeishuChannelManager(UserChannelManager):
             return None
         return await client._add_reaction(message_id, emoji_type)
 
+    # 通过某用户的飞书机器人删除某条表情回应；无连接返回 False。
     async def delete_reaction(
         self,
         user_id: str,
@@ -533,6 +559,7 @@ class FeishuChannelManager(UserChannelManager):
             return False
         return await client._delete_reaction(message_id, reaction_id)
 
+    # 判断某用户（可指定实例）的飞书连接在"本地"是否已建立且处于运行态。
     def is_connected(self, user_id: str, instance_id: Optional[str] = None) -> bool:
         """Check if a user's Feishu bot is connected."""
         channel = self._find_channel(user_id, instance_id)

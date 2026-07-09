@@ -39,6 +39,10 @@ _MAX_RESULT_SNIPPET = 1000
 _MAX_INLINE_PAYLOAD_CHARS = 2500
 
 
+# 子 Agent 活动追踪中间件：把子 agent 的每次模型调用/工具调用记录成一份"活动日志"文件，
+# 供主 agent 事后按需回读。日志用可压缩结构（CompressibleMarkdownLog）承接，超出 token 预算时用 LLM
+# 把较早条目压成要点；超大工具结果单独落盘为 payload、正文只保留片段，避免活动日志本身膨胀。
+# 到达最终回复时把整份日志落盘，并在回复末尾追加日志文件引用。
 class SubagentActivityMiddleware(AgentMiddleware):
     """Record a subagent's model/tool activity to a backend-readable file."""
 

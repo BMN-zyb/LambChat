@@ -24,6 +24,9 @@ _REPORT_TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M:%S %z"
 _ACTIVITY_LOG_RE = re.compile(r"Activity log saved to:\s*([^\]\s]+)")
 
 
+# 子 Agent 结果交接中间件：子 agent（task 工具）产出最终报告后，把完整报告落盘为交接文件，
+# 并把返回给主 agent 的消息内容替换成一句"报告已存到 <路径>，请先读该文件再据此综合"的引用文案，
+# 从而避免把超长报告整段塞回主 agent 上下文；同时透传报告里提到的活动日志路径。
 class SubagentResultHandoffMiddleware(AgentMiddleware):
     """Move completed subagent final reports into a handoff file for the main agent."""
 
@@ -34,6 +37,8 @@ class SubagentResultHandoffMiddleware(AgentMiddleware):
         run_id_factory: Callable[[], str] | None = None,
     ) -> None:
         super().__init__()
+        # backend：交接文件的写入后端（可为实例，或按 runtime 解析出后端的工厂）；
+        # run_id_factory：为每份报告生成短随机 run id（缺省取 uuid 前 8 位），用于命名报告文件。
         self._backend = backend
         self._run_id_factory = run_id_factory or (lambda: uuid.uuid4().hex[:8])
 

@@ -1,5 +1,19 @@
 """Feishu human approval card handling."""
 
+# ============================================================================
+# 模块说明
+# ----------------------------------------------------------------------------
+# 飞书"人工确认(HITL)"审批卡片的构建与回调处理。当 agent 运行到需要用户确认的
+# 节点时，会向飞书会话推送一张带"确认 / 拒绝"按钮的交互卡片；用户点击后飞书回调
+# 到本模块，由 handle_feishu_approval_action 把结果写回审批存储，从而唤醒被暂停的
+# agent 流程，并把卡片就地更新为最终状态。
+# 关键难点——防重复处理：同一审批可能被多次点击或被多实例并发处理，这里用
+#   1) 进程内本地锁集合 + 2) Redis SET NX（带 TTL）做双层去重（见 _claim_*）；
+# 抢不到处理权时只刷新卡片状态、不重复提交。
+# 关键依赖：审批存储(get_approval_storage)、HTTP 审批响应(respond_to_approval)、
+# Redis、FeishuChannelManager（用于回写卡片）。
+# ============================================================================
+
 import json
 from typing import Any
 
@@ -200,6 +214,8 @@ async def _build_approval_card_content(
     return json.dumps(card, ensure_ascii=False)
 
 
+# 构建"处理中"卡片 JSON：用户点击按钮后同步返回它，用于立刻禁用按钮并显示
+# "正在处理"状态，避免用户重复点击。
 def build_feishu_approval_processing_card_data(approval_id: str) -> dict[str, Any]:
     """Build card JSON returned synchronously to disable clicked approval buttons."""
     card: dict[str, Any] = {

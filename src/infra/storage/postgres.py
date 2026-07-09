@@ -4,6 +4,19 @@ PostgreSQL 存储实现
 提供 LangGraph PostgresStore 的工厂函数。
 """
 
+# ---------------------------------------------------------------------------
+# 模块说明：PostgreSQL 连接池 + LangGraph PostgresStore 工厂
+#
+# 本模块为 LangGraph 的长期记忆（PostgresStore）提供数据库地基：
+#   - get_connection_pool()：难点——维护一个全局共享的 psycopg 连接池（模块级
+#     单例），所有 agent 共用以支撑高并发；池内用 max_idle/max_lifetime 定期回收
+#     与轮换连接，规避长连接因数据库端超时/网络中断而失效的问题。
+#   - create_postgres_store()：每个 agent 各建一个 PostgresStore，但共享同一连接池；
+#     store.setup() 幂等地建好所需表结构/索引。
+#   - close_connection_pool()：应用关停时优雅关闭连接池并清空全局引用。
+# 采用「工厂函数 + 模块级全局变量」而非类，是为了让连接池天然成为进程级单例。
+# ---------------------------------------------------------------------------
+
 from typing import Any
 
 from langgraph.store.postgres import PostgresStore

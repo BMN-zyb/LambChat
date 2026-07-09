@@ -2,6 +2,21 @@
 Redis 存储实现
 """
 
+# ---------------------------------------------------------------------------
+# 模块说明：Redis 存储地基（连接池工厂 + StorageBase 实现 + Stream 封装）
+#
+# 本模块是数据层地基之一，分两层：
+#   1. 客户端工厂（模块级函数）：难点——get_redis_connection_pool 用 @lru_cache 做
+#      进程级单例，全进程共享一个连接池；create_redis_client 支持 isolated_pool 选项，
+#      为阻塞式监听（如 SSE 长阻塞 XREAD）单独开池，避免长期占用共享池连接；
+#      _redis_pool_kwargs 统一超时/重试/解码等参数，并用 _UNSET 哨兵区分「未传参」
+#      与「显式传 None」。
+#   2. RedisStorage：实现 StorageBase 的键值接口（get/set/... 自动 JSON 序列化），
+#      keys() 用 SCAN 增量扫描并限量，避免 KEYS 阻塞与内存膨胀；另额外封装了
+#      Redis Stream 操作（xadd/xrange/xread/...），字段值统一做 JSON 编解码。
+#   JSON 序列化/反序列化放到线程池（run_blocking_io）执行，避免阻塞事件循环。
+# ---------------------------------------------------------------------------
+
 import json
 from functools import lru_cache
 from typing import Any, Optional
@@ -104,6 +119,8 @@ async def close_redis_client() -> None:
         logger.warning(f"Error closing Redis client: {e}")
 
 
+# 通用键值存储的 Redis 实现：延迟持有共享连接池上的客户端，实现 StorageBase 接口，
+# 并额外提供 Stream / 计数器等 Redis 特有能力
 class RedisStorage(StorageBase):
     """
     Redis 存储实现

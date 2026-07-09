@@ -32,6 +32,8 @@ class ModelConfigPubSub:
     """
 
     def __init__(self):
+        # _subscription_token：订阅 pubsub hub 后拿到的取消凭证（退订时用）；
+        # _running：监听器是否在运行的标志（保证 start/stop 幂等）。
         self._subscription_token: Optional[str] = None
         self._running = False
         # Unique ID for this instance — used to skip self-published messages
@@ -41,6 +43,7 @@ class ModelConfigPubSub:
     def instance_id(self) -> str:
         return self._instance_id
 
+    # 启动监听器：向 pubsub hub 订阅"模型配置变更"频道并注册处理回调，应在应用启动时调用；幂等（已运行则直接返回）。
     async def start_listener(self) -> None:
         """Start listening for model config change notifications.
 
@@ -89,6 +92,7 @@ class ModelConfigPubSub:
         except Exception as e:
             logger.error(f"[ModelConfigPubSub] Error handling message: {e}")
 
+    # 停止监听器：退订频道，并在 hub 空闲时将其关闭；应在应用关闭时调用。
     async def stop_listener(self) -> None:
         """Stop the model config pub/sub listener.
 

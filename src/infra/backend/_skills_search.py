@@ -174,10 +174,12 @@ def glob_files_from_paths(
     entries: list[FileInfo] = []
 
     for file_path in paths:
+        # 只保留位于 prefix 目录下的文件，其余跳过
         if not file_path.startswith(prefix_slash):
             continue
 
         relative = file_path[len(prefix_slash) :]
+        # 取相对路径的最后一段（basename）来做 glob 匹配
         basename = relative.rsplit("/", 1)[-1] if "/" in relative else relative
 
         if fnmatch.fnmatch(basename, pattern):

@@ -25,6 +25,8 @@ from src.infra.agent.middleware._helpers import (
 logger = logging.getLogger(__name__)
 
 
+# 提示注入中间件之一：把若干"确定性"的提示段各自作为独立 system 内容块追加。
+# 每段单独成块可形成更细粒度的 KV 缓存断点——改动某一段只失效对应块，而非整个 system 前缀。
 class SectionPromptMiddleware(AgentMiddleware):
     """Append one or more deterministic prompt sections as separate system blocks.
 
@@ -58,6 +60,9 @@ class SectionPromptMiddleware(AgentMiddleware):
         return await handler(request)
 
 
+# 提示注入中间件：请求时把用户的"记忆索引"注入 system 提示末尾。
+# 索引由 NativeMemoryBackend.build_memory_index 生成（自带 5 分钟/用户缓存，故重复调用几乎零成本），
+# 仅在记忆后端为 native 且启用该特性时生效；构建失败一律降级为不注入，绝不阻断模型调用。
 class MemoryIndexMiddleware(AgentMiddleware):
     """Injects the native memory index into the system prompt at request time.
 
@@ -113,6 +118,9 @@ async def _build_memory_index_for_user(user_id: str) -> str:
         return ""
 
 
+# 提示注入中间件：请求时把沙箱工具描述注入到 system 提示的"末尾"
+# （排在 deepagents 基础提示与其他中间件注入之后）。放尾部是为了最大化 KV 缓存命中——
+# 沙箱工具变化只会使缓存尾部失效，而不动稳定的前缀（后端自带 30 分钟/用户缓存）。
 class SandboxMCPMiddleware(AgentMiddleware):
     """Injects sandbox tool descriptions into the system prompt at request time.
 
@@ -147,6 +155,8 @@ class SandboxMCPMiddleware(AgentMiddleware):
         return await handler(request)
 
 
+# 提示注入中间件：把用户已配置的环境变量"键名"注入 system 提示。
+# 出于安全，这里只暴露 key 名称，绝不读取/注入明文值。
 class EnvVarPromptMiddleware(AgentMiddleware):
     """Inject configured environment variable keys into the system prompt.
 

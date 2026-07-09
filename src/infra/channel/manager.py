@@ -4,6 +4,18 @@ Provides a unified manager that coordinates multiple channel types
 and their user-specific instances.
 """
 
+# ============================================================================
+# 模块说明
+# ----------------------------------------------------------------------------
+# 渠道协调器（ChannelCoordinator）——LambChat 渠道管理的总入口。它按渠道类型持有
+# 各自的 UserChannelManager（每种类型一个），负责统一启动 / 停止、按用户重载配置、
+# 转发发送消息、汇总连接状态，以及向前端暴露"可用渠道"元数据。
+# 具体的连接与分布式调度交由各 UserChannelManager 实现，这里只做编排与路由：
+# 启停时逐个处理、单个失败不影响其它；发送/查询按"类型 → 管理器 → 实例"两级定位。
+# 通过 get_channel_coordinator() 提供进程级全局单例。
+# 关键依赖：get_registry（自动发现管理器类）、UserChannelManager、ChannelType。
+# ============================================================================
+
 from __future__ import annotations
 
 from typing import Any, Callable, Optional
@@ -75,6 +87,7 @@ class ChannelCoordinator:
 
         self._managers.clear()
 
+    # 重载某用户在指定渠道类型下的配置：找不到对应管理器返回 False，否则委托其 reload_user。
     async def reload_user(self, user_id: str, channel_type: ChannelType) -> bool:
         """
         Reload a user's channel configuration.
@@ -127,6 +140,7 @@ class ChannelCoordinator:
 
         return await channel.send_message(chat_id, content)
 
+    # 查询某用户在指定渠道类型下是否已连接：无对应管理器视为未连接。
     def is_connected(self, user_id: str, channel_type: ChannelType) -> bool:
         """Check if a user's channel is connected."""
         manager = self._managers.get(channel_type)
@@ -134,6 +148,7 @@ class ChannelCoordinator:
             return False
         return manager.is_connected(user_id)
 
+    # 汇总所有渠道类型的状态：每种类型给出已连接用户列表与本地实例总数。
     def get_status(self) -> dict[str, Any]:
         """Get status of all channels."""
         status = {}
@@ -144,6 +159,7 @@ class ChannelCoordinator:
             }
         return status
 
+    # 返回所有可用渠道类型的元数据（取自注册表，供前端展示可选渠道列表）。
     def get_available_channels(self) -> list[dict]:
         """Get metadata for all available channel types."""
         registry = get_registry()
@@ -155,6 +171,7 @@ class ChannelCoordinator:
 _coordinator: Optional[ChannelCoordinator] = None
 
 
+# 取（或懒创建）全局渠道协调器单例。
 def get_channel_coordinator() -> ChannelCoordinator:
     """Get the global channel coordinator instance."""
     global _coordinator

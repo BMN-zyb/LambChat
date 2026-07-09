@@ -65,6 +65,9 @@ async def isolated_nested_graph_run() -> AsyncIterator[None]:
         var_child_runnable_config.reset(token)
 
 
+# 解析"回退模型"：当主模型不可用（限流/报错等）时改用的备用模型。
+# 需要两跳 DB 查询——先按 id 或 value 取出当前模型记录，读它配置的 fallback_model（存的是另一模型的 id）；
+# 再查一次拿到该回退模型真正的 value 字符串。任一步查不到、或未配置回退，都返回 None。
 async def resolve_fallback_model(
     model_id: str | None,
     selected_model: str | None,
@@ -99,6 +102,7 @@ async def resolve_fallback_model(
         return None
 
     try:
+        # 第二跳：fallback_model 字段存的是"另一条模型记录的 id"，需再查一次取它的 value
         fallback_db = await storage.get(db_model.fallback_model)
     except Exception as e:
         logger.warning("%s Failed to lookup fallback model: %s", log_prefix, e)
@@ -116,6 +120,9 @@ async def resolve_fallback_model(
     return None
 
 
+# 从模型的 profile（能力档案）中读取某个布尔能力位的共享实现。
+# resolve_model_supports_vision / resolve_model_image_url_to_base64 都复用它，
+# 免去各自重复"按 id/value 取模型 → 读 profile.<属性>"这套样板；任何异常或字段缺失都保守返回 False。
 async def _resolve_model_profile_bool(
     attr_name: str,
     model_id: str | None,
@@ -176,18 +183,24 @@ async def resolve_model_image_url_to_base64(
     )
 
 
+# 判断附件是否为图片：优先看 type=="image"，否则看 mime_type 是否以 "image/" 开头。
+# 兼容 mime_type / mimeType 两种键名写法。
 def _is_image_attachment(attachment: dict) -> bool:
     file_type = str(attachment.get("type", "")).lower()
     mime_type = str(attachment.get("mime_type") or attachment.get("mimeType") or "").lower()
     return file_type == "image" or mime_type.startswith("image/")
 
 
+# 由存储 key 拼出可公开访问的下载 URL：去掉 base_url 末尾的 "/"，
+# 对 key 做 URL 转义（保留 "/" 作路径分隔），组合成 <base>/api/upload/file/<key>。
 def _attachment_url_from_key(key: object, base_url: str) -> str:
     clean_base_url = base_url.rstrip("/")
     quoted_key = quote(str(key).lstrip("/"), safe="/")
     return f"{clean_base_url}/api/upload/file/{quoted_key}"
 
 
+# _attachment_url_from_key 的反向操作：从图片 URL 还原出上传存储 key。
+# data: 内联 URL 没有 key，返回 None；路径中不含 /api/upload/file/ 标记（即非本站上传文件）也返回 None。
 def _upload_key_from_image_url(url: str) -> str | None:
     if url.startswith("data:"):
         return None
@@ -202,6 +215,8 @@ def _upload_key_from_image_url(url: str) -> str | None:
     return key or None
 
 
+# SSRF 防护用的私有/环回/链路本地网段清单：内联外部图片 URL 前会检查目标是否落入这些网段，
+# 命中即拒绝下载，防止服务端被诱导去访问内网地址。
 _PRIVATE_NETWORKS = [
     ipaddress.ip_network("127.0.0.0/8"),
     ipaddress.ip_network("10.0.0.0/8"),
@@ -213,6 +228,7 @@ _PRIVATE_NETWORKS = [
     ipaddress.ip_network("fe80::/10"),
 ]
 
+# 直接按主机名拦截的黑名单（localhost 及其变体），与上面的 IP 网段检查互为补充。
 _BLOCKED_HOSTNAMES = frozenset({"localhost", "localhost.localdomain"})
 
 
@@ -238,6 +254,8 @@ def _is_private_url(url: str) -> bool:
         return False
 
 
+# 分块流式地对文件做 base64 编码再拼接：逐块读取，避免把整张大图一次性读进内存。
+# 块大小 IMAGE_DATA_URL_ENCODE_CHUNK_BYTES 取 3 的倍数，保证逐块编码不会在块间产生 "=" 填充、拼接后仍是合法 base64。
 def _base64_encode_file(file) -> str:
     parts: list[str] = []
     while True:
@@ -248,6 +266,8 @@ def _base64_encode_file(file) -> str:
     return "".join(parts)
 
 
+# 从对象存储（S3 等）把图片下载进 SpooledTemporaryFile（小文件留内存、超阈值自动落盘），
+# 若下载字节数超过 max_bytes 则放弃内联返回 None，否则读回并 base64 编码成 data URL。
 async def _download_image_as_data_url(
     storage,
     key: object,
@@ -267,6 +287,10 @@ async def _download_image_as_data_url(
     return f"data:{mime_type};base64,{encoded}"
 
 
+# 把任意图片 URL 转成 data URL，也是 SSRF 防护的关键点，处理分三步：
+# 1）若 URL 指向本站上传文件（能解析出存储 key），走内部存储下载，最安全；
+# 2）否则按外部 URL 处理，先用 _is_private_url 拦掉私有/环回/非 http(s) 地址，防止 SSRF；
+# 3）通过后用 httpx 流式下载并实时累计大小，一旦超过 max_bytes 立即放弃；全程用 spooled 临时文件承接。
 async def _download_image_url_as_data_url(
     url: str,
     mime_type: str,
@@ -330,6 +354,10 @@ async def inline_image_attachments_as_data_urls(
     inlined: list[dict] = []
     storage = None
 
+    # 逐个附件按优先级决定处理方式（从高到低）：
+    # 非图片→原样保留；已带 data_url→原样；已有 URL 且不强制内联→直接用 URL；
+    # 强制内联→下载该 URL 转 data URL；否则有 base_url→由 key 拼出 URL；再否则→从存储下载并内联为 data URL。
+    # 设计意图：尽量用 URL 而非 data URL（省上下文与带宽），只有必要时才把图片字节内联进消息体。
     for attachment in attachments:
         if not _is_image_attachment(attachment):
             inlined.append(attachment)
@@ -347,6 +375,7 @@ async def inline_image_attachments_as_data_urls(
         key = attachment.get("key")
         mime_type = attachment.get("mime_type") or attachment.get("mimeType") or "image/jpeg"
 
+        # 有 URL 但要求强制内联：先按已知 size 粗筛（超限直接放弃内联），否则下载该 URL 转成 data URL
         if existing_url and force_data_url:
             size = attachment.get("size")
             if isinstance(size, int) and size > max_inline_bytes:
@@ -393,6 +422,7 @@ async def inline_image_attachments_as_data_urls(
             inlined.append(attachment)
             continue
 
+        # 走到这里：需要真正从对象存储下载并内联为 data URL；storage 懒初始化后被多个附件复用
         try:
             if storage is None:
                 from src.infra.storage.s3.service import get_or_init_storage
@@ -423,6 +453,9 @@ async def inline_image_attachments_as_data_urls(
     return inlined
 
 
+# 把附件信息渲染成一段人类可读的 Markdown 摘要并追加到用户文本末尾，
+# 让不支持视觉的模型也能以文本形式"看到"附件：逐个列出名称/类型/MIME/大小/链接；
+# 无链接的附件跳过；图片若有对应的多模态序号则标注 "#N"，与消息里的图像块一一对应。
 def _format_attachment_summary(text: str, attachments: list[dict]) -> str:
     enhanced_text = text
     if not attachments:
@@ -494,6 +527,7 @@ def build_human_message(
         url = attachment.get("url")
         data_url = attachment.get("data_url")
         image_url = url or data_url
+        # 模型支持视觉、且该附件是带链接（url 或 data_url）的图片：作为多模态 image_url 块加入，并记录其序号
         if supports_vision and _is_image_attachment(attachment) and image_url:
             image_index = len(multimodal_images) + 1
             multimodal_images.append(
@@ -508,6 +542,7 @@ def build_human_message(
             text_summary_attachments.append(attachment)
 
     enhanced_text = _format_attachment_summary(text, text_summary_attachments)
+    # 无任何图像块 → 退化为纯文本消息；有图像块 → 组成 [文本块, 图像块...] 的多模态消息内容
     if not multimodal_images:
         return HumanMessage(content=enhanced_text)
 

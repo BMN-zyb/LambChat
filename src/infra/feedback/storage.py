@@ -5,6 +5,19 @@
 每个用户对每个 run 只能提交一次反馈。
 """
 
+# ---------------------------------------------------------------------------
+# 模块说明：用户反馈存储层（Storage / DAO）
+#
+# 本模块封装反馈数据在 MongoDB "feedback" 集合上的全部读写，是
+# FeedbackManager 的底层依赖。要点：
+#   - 集合采用延迟加载（首次访问 collection 属性时才取连接），避免导入期建连；
+#   - create_indexes() 建立唯一索引 (user_id, session_id, run_id)，在数据库层
+#     强制「每用户每 run 仅一条反馈」，兜底应用层预检查存在的并发竞态；
+#   - MongoDB 主键字段为 _id(ObjectId)，读出后统一转成字符串 id 再交给
+#     Pydantic 模型校验，写入前则把领域字段拼成普通 dict；
+#   - get_stats() 用一次聚合(aggregate)同时算出总数/好评/差评，避免多次 count。
+# ---------------------------------------------------------------------------
+
 from __future__ import annotations
 
 from typing import Any, Optional

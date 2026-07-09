@@ -201,6 +201,7 @@ class SkillsStoreBackend(BackendProtocol):
             return False
         return skill_name not in self._get_disabled_skill_names()
 
+    # 统一的"skill 不存在"错误文案
     @staticmethod
     def _skill_not_found_error(skill_name: str) -> str:
         return f"Skill '{skill_name}' not found"
@@ -303,6 +304,7 @@ class SkillsStoreBackend(BackendProtocol):
     # 写入操作
     # ==========================================
 
+    # 同步接口：委托给异步实现 awrite（_run_async 在无事件循环时用 asyncio.run 执行）
     def write(self, file_path: str, content: str) -> WriteResult:
         return _run_async(self.awrite(file_path, content))
 
@@ -351,6 +353,7 @@ class SkillsStoreBackend(BackendProtocol):
     # 编辑操作
     # ==========================================
 
+    # 同步接口：委托给异步实现 aedit
     def edit(
         self,
         file_path: str,
@@ -430,13 +433,16 @@ class SkillsStoreBackend(BackendProtocol):
     # 列表操作
     # ==========================================
 
+    # 同步接口：委托给异步实现 als
     def ls(self, path: str) -> LsResult:
         return _run_async(self.als(path))
 
+    # 便捷变体：只返回条目列表（entries），忽略 LsResult 外层包装
     def ls_info(self, path: str) -> list[FileInfo]:
         result = self.ls(path)
         return result.entries or []
 
+    # als 的便捷变体：异步返回条目列表
     async def als_info(self, path: str) -> list[FileInfo]:
         result = await self.als(path)
         return result.entries or []
@@ -509,6 +515,7 @@ class SkillsStoreBackend(BackendProtocol):
     # 批量操作
     # ==========================================
 
+    # 同步接口：委托给异步实现 adownload_files
     def download_files(self, paths: list[str]) -> list[FileDownloadResponse]:
         return _run_async(self.adownload_files(paths))
 
@@ -635,6 +642,7 @@ class SkillsStoreBackend(BackendProtocol):
 
         return results
 
+    # 同步接口：委托给异步实现 aupload_files
     def upload_files(self, files: list[tuple[str, bytes]]) -> list[FileUploadResponse]:
         return _run_async(self.aupload_files(files))
 
@@ -689,6 +697,7 @@ class SkillsStoreBackend(BackendProtocol):
     # 搜索操作（grep）
     # ==========================================
 
+    # 同步接口：委托给异步实现 agrep
     def grep(
         self,
         pattern: str,
@@ -776,6 +785,7 @@ class SkillsStoreBackend(BackendProtocol):
             return result.error if result.error.startswith("Error:") else f"Error: {result.error}"
         return result.matches or []
 
+    # agrep_raw：agrep 的异步"裸"变体，出错则返回带 "Error:" 前缀的字符串
     async def agrep_raw(
         self,
         pattern: str,
@@ -791,13 +801,16 @@ class SkillsStoreBackend(BackendProtocol):
     # Glob 操作
     # ==========================================
 
+    # 同步接口：委托给异步实现 aglob
     def glob(self, pattern: str, path: str | None = None) -> GlobResult:
         return _run_async(self.aglob(pattern, path))
 
+    # 便捷变体：只返回匹配列表（matches），忽略 GlobResult 外层包装
     def glob_info(self, pattern: str, path: str | None = None) -> list[FileInfo]:
         result = self.glob(pattern, path)
         return result.matches or []
 
+    # aglob 的便捷变体：异步返回匹配列表
     async def aglob_info(self, pattern: str, path: str | None = None) -> list[FileInfo]:
         result = await self.aglob(pattern, path)
         return result.matches or []

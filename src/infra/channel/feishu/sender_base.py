@@ -1,5 +1,20 @@
 """Shared Feishu sender HTTP helpers and streaming card operations."""
 
+# ============================================================================
+# 模块说明
+# ----------------------------------------------------------------------------
+# FeishuChannel 的"发送基础层" Mixin（FeishuBaseSenderMixin），封装两类底层能力：
+#   1) 直连飞书 REST 的 HTTP 工具：复用 httpx 异步客户端、缓存 tenant_access_token
+#      （提前过期以留余量）、统一的 _feishu_json 请求封装（自动带鉴权头、解析响应、
+#      记录错误）；
+#   2) CardKit 2.0 "流式卡片"操作：创建流式卡片、把卡片作为消息发送、按单调递增的
+#      sequence 增量更新正文、以及定稿（关闭打字机效果）。
+# 若干健壮性处理：发送卡片优先"回复引用"，遇到可回退错误码时退化为直接发送；刚创建
+# 的流式卡片可能因尚未同步而被判为无效(230099)，此时不回退成再发普通卡片（会重复），
+# 而是短暂退避后重试。JSON 序列化等阻塞操作经 run_blocking_io 丢线程池执行。
+# 关键依赖：httpx、run_blocking_io、飞书 open-apis（auth / im / cardkit）。
+# ============================================================================
+
 import asyncio
 import json
 import time

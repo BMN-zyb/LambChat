@@ -5,6 +5,22 @@ Usage storage layer.
 查询时直接从该集合读取，避免对 traces 集合做复杂聚合。
 """
 
+# ---------------------------------------------------------------------------
+# 模块说明：用量统计存储（独立 usage_logs 集合 + 扁平化写入 + 仪表盘聚合）
+#
+# 设计动机：原始 trace 文档结构复杂（含 events 数组、嵌套 metadata），直接在其上
+# 做统计聚合既慢又难写。因此本模块在「trace 完成时」把本次 run 的最终用量抽取出来，
+# 拍平成一条维度齐全的记录（用户/团队/模型/来源/定时任务 + input/output/cache token、
+# 时长、状态等）写入独立的 usage_logs 集合——这就是「扁平化」，查询侧只需对这张扁平表
+# 聚合即可。要点：
+#   - upsert_usage_log 从 events 里倒序取最后一条 token:usage 作为最终累计用量；
+#   - 以 trace_id 唯一索引 + upsert 保证幂等（重复完成/补写不产生重复记录）；
+#   - 字段来源按「trace metadata 优先、session metadata 兜底」合并，team_name 缺失时
+#     再按 team_id 反查；_as_int/_as_float/_as_datetime 对历史脏数据做防御式转换；
+#   - get_usage_dashboard 用单个 $facet 在一次匹配上并行算出 summary/daily 及多个
+#     Top N 排行榜，避免多次查库；所有派生比率都对分母为 0 做了保护。
+# ---------------------------------------------------------------------------
+
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -90,6 +106,8 @@ def _merge_metadata_value(
     return _as_str(metadata.get(key)) or _as_str(session_metadata.get(key))
 
 
+# 用量存储：延迟持有 usage_logs 集合；写侧提供 upsert（扁平化落库），
+# 读侧提供列表查询、运营仪表盘聚合与单用户汇总
 class UsageStorage:
     """使用日志存储 — 独立的 usage_logs 集合"""
 

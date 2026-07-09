@@ -120,6 +120,8 @@ class SessionSandboxManager(_DaytonaMixin, _E2BMixin, _CubeSandboxMixin):
         assert self._collection is not None
         return self._collection
 
+    # 首次访问集合时后台调度一次唯一索引创建：用类级标记保证全进程只建一次，
+    # 已有未完成的调度任务则跳过；当前无运行事件循环（RuntimeError）时静默放弃。
     def _schedule_index(self) -> None:
         cls = type(self)
         if cls._index_ensured:

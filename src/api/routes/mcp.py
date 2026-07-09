@@ -4,6 +4,20 @@ MCP (Model Context Protocol) API router
 Provides endpoints for managing MCP server configurations.
 """
 
+# ============================================================================
+# 模块说明
+# ----------------------------------------------------------------------------
+# MCP（Model Context Protocol）服务器配置管理路由，分为两套 APIRouter：
+#   - router（挂载 /api/mcp）：面向普通用户，管理其自建服务器、查看对自己可见的
+#     系统服务器，并按 transport 类型细分写权限（mcp:write_sse/http/sandbox）。
+#   - admin_router（挂载 /api/admin/mcp）：面向管理员（mcp:admin），管理系统级
+#     服务器、全局工具策略，并支持用户服务器 <-> 系统服务器的升/降级。
+# 关键规则：系统服务器受基于角色（allowed_roles）的可见性控制，敏感字段
+# （url/headers/command/env_keys）仅创建者可见；工具开关分"系统级禁用"（对所有人
+# 生效、个人不可自行恢复）与"用户级偏好"（仅影响本人）两个层级；内置(internal)
+# 服务器由代码注册表提供、仅管理员可见。
+# ============================================================================
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from src.api.deps import require_permissions

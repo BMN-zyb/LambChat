@@ -70,18 +70,23 @@ def _run_async(coro):
 
 def normalize_path(path: str) -> str:
     """标准化路径，确保始终以 /skills/ 开头"""
+    # 空路径 → 直接返回 skills 根目录
     if not path:
         return "/skills/"
 
+    # 已是标准 /skills/ 前缀 → 原样返回
     if path.startswith("/skills/"):
         return path
 
+    # 缺少前导斜杠的 "skills/..." → 补上开头的 "/"
     if path.startswith("skills/"):
         return f"/{path}"
 
+    # 其他以 "/" 开头的绝对路径 → 前面拼接 /skills
     if path.startswith("/"):
         return f"/skills{path}"
 
+    # 剩余情况视为相对路径 → 拼到 /skills/ 下
     return f"/skills/{path}"
 
 

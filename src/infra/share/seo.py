@@ -1,3 +1,13 @@
+"""
+分享页 / 公开落地页 SEO 元信息生成与注入。
+
+本模块为「分享会话页」和「公开落地页」构造 SEO / 社交分享所需的元信息
+（title、description、robots、Open Graph / Twitter Card、JSON-LD 结构化数据等），
+并以字符串替换的方式注入到前端构建产物 index.html 中，实现 SSR-lite 级别的 SEO：
+搜索引擎 / 社交平台抓取到的是注入后的静态 HTML，无需执行前端 JS 即可看到正确的
+标题、描述与预览内容。分享页默认 noindex（内容多为私有/临时），公开落地页允许 index。
+"""
+
 from __future__ import annotations
 
 # 本模块用于为"分享会话"页面与公开落地页生成 SEO/社交分享所需的元信息（标题、描述、robots、

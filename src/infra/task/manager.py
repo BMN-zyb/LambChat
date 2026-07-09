@@ -536,6 +536,8 @@ class BackgroundTaskManager:
         except Exception as e:
             logger.warning(f"Failed to release concurrency slot: {e}")
 
+    # 以下若干只读查询方法统一转发给 TaskStatusQueries 子服务：按 session/run 查询
+    # 任务状态与错误信息、取某 run 的 trace_id。多源回退的优先级见 status_queries.py。
     async def get_status(self, session_id: str) -> TaskStatus:
         return await self._status_queries().get_status(session_id)
 
@@ -645,6 +647,8 @@ class BackgroundTaskManager:
             logger.warning("Failed to lookup trace_id for run %s: %s", run_id, e)
         return None
 
+    # 用户手动「继续」会话的入口：转发给 TaskRecoveryService，对会话当前中断的 run
+    # 做分布式安全的续跑（前置校验、抢恢复锁、拉起新 run）。具体流程见 recovery.py。
     async def resume_session(
         self,
         session_id: str,

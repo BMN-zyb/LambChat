@@ -1,5 +1,20 @@
 """Feishu response collection and card/file delivery."""
 
+# ============================================================================
+# 模块说明
+# ----------------------------------------------------------------------------
+# 飞书响应收集器：把 agent 产出的事件流（文本片段、工具调用、待展示文件、审批请求）
+# 汇聚起来，并以尽量好看的形式投递到飞书会话。核心是"流式卡片"体验：
+#   - 首个文本片段到达时创建一张 CardKit 流式卡片并发出，之后用一个"单槽合并队列 +
+#     后台推送 worker + 防抖"把高频 chunk 合并成较低频率的卡片增量更新（序号单调
+#     递增，避免乱序覆盖，也降低被飞书限流的风险）；结束时定稿关闭打字机效果；
+#   - 若未开启流式或流式失败，则回退为最后一次性发送整张卡片；
+#   - 另外负责：处理中 emoji 指示、把 send:// 图片与产出文件从 S3 流式下载后上传到
+#     飞书、以及 HITL 审批卡片的发送与状态回写。
+# 关键依赖：FeishuChannel（底层收发）、FeishuChannelManager、FeishuMarkdownAdapter、
+# handler_helpers（下载/链接常量）、S3 storage、run_blocking_io。
+# ============================================================================
+
 import asyncio
 import json
 import os
@@ -300,6 +315,8 @@ class FeishuResponseCollector:
             return text
         return f"{text.rstrip()}\n\n{link}" if text.strip() else link
 
+    # 在流式卡片上显示"等待用户确认"的临时状态行（非终态）：截取审批信息首行做提示，
+    # 触发一次卡片更新。用于 HITL 审批期间给用户可见反馈。
     async def set_waiting_for_approval(self, approval: dict[str, Any]) -> None:
         """Show a non-final waiting status while a human approval is pending."""
         logger.debug(
@@ -313,6 +330,7 @@ class FeishuResponseCollector:
             self._ensure_stream_update_worker()
             self._queue_latest_stream_update()
 
+    # 清除流式卡片上的临时"等待确认"状态行，并触发一次更新（审批完成后调用）。
     async def clear_waiting_for_approval(self) -> None:
         """Remove the temporary approval wait status from the streaming card."""
         if not self._stream_status_text:
@@ -398,6 +416,7 @@ class FeishuResponseCollector:
             logger.debug(f"[Feishu] Failed to upload image from URI {uri}: {e}")
             return None
 
+    # 取出本收集器对应的 FeishuChannel 客户端（按 user_id/instance_id 定位）；找不到记警告返回 None。
     def _get_client(self) -> "FeishuChannel | None":
         base_client = self.manager._find_channel(self.user_id, self.instance_id)
         if not base_client:
@@ -547,6 +566,8 @@ class FeishuResponseCollector:
             )
         return success
 
+    # 把之前发出的审批卡片就地更新为终态（通过/拒绝等）：需先前用 record_approval_card
+    # 记过该审批的 message_id，否则跳过；重建卡片内容后调用 patch_card_message 覆盖。
     async def update_approval_card(
         self,
         approval_id: str,

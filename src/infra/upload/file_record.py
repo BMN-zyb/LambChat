@@ -1,5 +1,19 @@
 """File record storage for content-hash based deduplication."""
 
+# ---------------------------------------------------------------------------
+# 模块说明：文件记录存储（基于内容哈希的去重 + 引用计数）
+#
+# 本模块把上传文件的元信息存入 MongoDB 的 file_records 集合，核心是「内容哈希去重」：
+#   - 以文件内容的 SHA-256 作为 hash 唯一键——内容相同的文件只存一份底层对象，
+#     多处上传/引用共用同一条记录，从而节省存储；
+#   - reference_count 记录该对象被多少条「已持久化的消息」引用：消息落库时
+#     add_references +1，消息删除时 release_references -1（且不会减成负数）；
+#     引用归零后底层对象即可被安全清理。
+# 其余要点：集合与索引均惰性初始化（ensure_indexes_if_needed 以 fire-and-forget
+# 后台任务只建一次索引，不阻塞请求）；hash 与 key 双唯一索引分别支撑去重与按 key 定位；
+# 批量增减引用前先用 _bounded_unique_keys 清洗去重并限量，防止异常输入放大更新范围。
+# ---------------------------------------------------------------------------
+
 import asyncio
 from typing import Optional
 
@@ -26,6 +40,8 @@ def _bounded_unique_keys(keys: list[str], *, limit: int = REFERENCE_KEYS_MAX) ->
     return unique_keys
 
 
+# 文件记录存储：延迟持有 file_records 集合与「后台建索引」任务，
+# 对外提供按 hash/key 查找、创建、引用计数增减与删除
 class FileRecordStorage:
     """Storage layer for file records, keyed by content hash."""
 

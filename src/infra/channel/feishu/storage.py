@@ -4,6 +4,19 @@ Feishu/Lark configuration storage using MongoDB
 Stores user-level Feishu bot configurations with encrypted sensitive fields.
 """
 
+# ============================================================================
+# 模块说明
+# ----------------------------------------------------------------------------
+# 飞书机器人配置的持久化存储（MongoDB，集合 user_feishu_configs）。这是"每个用户
+# 一份飞书配置"的旧版存储；新版支持多实例的通用配置存储见
+# channel_storage.ChannelStorage。
+# 敏感字段（app_secret）落库前加密、对外响应时脱敏；加解密复用 MCP 的实现，并放到
+# 线程池执行以免阻塞事件循环。对外提供：CRUD、对外响应/状态对象构建，以及供渠道
+# 管理器启动时批量拉取"已启用配置"的接口。
+# 关键依赖：get_mongo_client、encrypt_value/decrypt_value、run_blocking_io、
+# FeishuConfig 及相关 schema。
+# ============================================================================
+
 from datetime import datetime
 from typing import Any, Optional
 
@@ -51,6 +64,7 @@ class FeishuStorage:
             self._collection = db["user_feishu_configs"]
         return self._collection
 
+    # 读取某用户的飞书配置：查不到返回 None，查到则解密敏感字段并转成 FeishuConfig。
     async def get_config(self, user_id: str) -> Optional[FeishuConfig]:
         """Get Feishu configuration for a user"""
         collection = self._get_collection()
@@ -59,6 +73,8 @@ class FeishuStorage:
             return await self._doc_to_config(doc)
         return None
 
+    # 创建配置：每用户仅允许一份，已存在则抛 ValueError；app_secret 加密后落库，
+    # 写入创建/更新时间戳，最后返回解密后的 FeishuConfig。
     async def create_config(self, config: FeishuConfigCreate, user_id: str) -> FeishuConfig:
         """Create Feishu configuration for a user"""
         collection = self._get_collection()
@@ -92,6 +108,8 @@ class FeishuStorage:
 
         return await self._doc_to_config(doc)
 
+    # 部分更新配置：配置不存在返回 None；仅对显式传入（非 None）的字段写入 $set，
+    # app_secret 若变更会重新加密；更新后回读并返回最新的 FeishuConfig。
     async def update_config(
         self, user_id: str, updates: FeishuConfigUpdate
     ) -> Optional[FeishuConfig]:
@@ -132,6 +150,7 @@ class FeishuStorage:
         updated_doc = await collection.find_one({"user_id": user_id})
         return await self._doc_to_config(updated_doc) if updated_doc else None
 
+    # 删除某用户的飞书配置：确实删掉一条时返回 True，否则返回 False。
     async def delete_config(self, user_id: str) -> bool:
         """Delete Feishu configuration for a user"""
         collection = self._get_collection()
@@ -142,6 +161,7 @@ class FeishuStorage:
             return True
         return False
 
+    # 构建对外配置响应：无配置返回 None；有配置则对敏感字段脱敏后返回（详见下方）。
     async def get_response(self, user_id: str) -> Optional[FeishuConfigResponse]:
         """Get Feishu configuration response (with masked sensitive fields)"""
         config = await self.get_config(user_id)
@@ -166,6 +186,8 @@ class FeishuStorage:
             updated_at=config.updated_at,
         )
 
+    # 构建连接状态：无配置视为未启用、未连接；connected 恒为 False，真实连接态
+    # 由渠道管理器另行填充（见下方 TODO）。
     async def get_status(self, user_id: str) -> FeishuConfigStatus:
         """Get Feishu connection status for a user"""
         config = await self.get_config(user_id)
@@ -178,6 +200,7 @@ class FeishuStorage:
             connected=False,  # Will be updated by channel manager
         )
 
+    # 列出所有已启用的飞书配置（供渠道管理器启动时逐一拉起连接），限量返回。
     async def list_enabled_configs(self) -> list[FeishuConfig]:
         """List all enabled Feishu configurations (for channel manager)"""
         collection = self._get_collection()
@@ -236,6 +259,7 @@ class FeishuStorage:
             updated_at=updated_at,
         )
 
+    # 只清空本地句柄；全局 Mongo 客户端由外部统一管理，不在此处关闭。
     async def close(self):
         """Clear local MongoDB references without closing the global client."""
         self._client = None

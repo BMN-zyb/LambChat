@@ -4,12 +4,25 @@
 提供角色管理的业务逻辑。
 """
 
+# ---------------------------------------------------------------------------
+# 模块说明：角色业务管理层（Manager）+ 进程级单例
+#
+# 本模块是角色（Role）功能的业务门面：对上给路由层提供角色的增删改查、
+# 计数与默认角色初始化等方法，对下把全部读写委托给 RoleStorage。
+# 真正的持久化与「Redis 缓存」逻辑都在 RoleStorage 内部，Manager 只做转发，
+# 因此这里几乎没有分支逻辑。
+# 模块末尾的 get_role_manager() 以懒加载方式返回全进程共享的单例，
+# 避免每次请求都重建 Manager / Storage 实例。
+# ---------------------------------------------------------------------------
+
 from typing import Optional
 
 from src.infra.role.storage import RoleStorage
 from src.kernel.schemas.role import Role, RoleCreate, RoleUpdate
 
 
+# 角色业务管理器：无状态门面，构造时持有一个 RoleStorage（内部带 Redis 缓存），
+# 所有方法均为异步，逐一转发到存储层
 class RoleManager:
     """
     角色管理器

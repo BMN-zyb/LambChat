@@ -368,6 +368,7 @@ class SandboxFactory:
 
             from src.infra.backend.cubesandbox import CubeSandboxBackend
 
+            # 开启 auto_pause 时组装 lifecycle：超时自动暂停，并按配置决定下次操作是否自动恢复
             lifecycle = None
             if config.auto_pause:
                 lifecycle = {
@@ -389,6 +390,7 @@ class SandboxFactory:
                 ),
             )
             backend = CubeSandboxBackend(sandbox=sandbox, timeout=config.timeout)
+            # 注册到 registry 以便后续追踪和关闭
             cls._sandbox_registry[sandbox.sandbox_id] = (backend, sandbox)
             logger.info(
                 "Created CubeSandbox sandbox: %s, template=%s, timeout=%ss",

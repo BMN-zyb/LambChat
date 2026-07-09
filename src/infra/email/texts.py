@@ -1,5 +1,19 @@
 """Localized email text content for all supported languages."""
 
+# ---------------------------------------------------------------------------
+# 模块说明：多语言邮件文案表
+#
+# 本模块集中存放所有邮件类型在各语言下的文案，供 template.py 渲染时取用，
+# 使「文案」与「排版」解耦：改文案不必动模板。要点：
+#   - 数据结构为三层字典：语言码(zh/en/ja/ko/ru) -> 邮件类型 -> 文案字段；
+#   - 文案中的 {from_name}/{username}/{hours} 等为占位符，发送时由调用方用
+#     str.format 填充；
+#   - greeting/footer 等字段允许内嵌 <strong>/<br> 等 HTML 标签，因此在
+#     template.py 中它们作为「HTML 富文本」直接透传、不做转义，只有纯文本
+#     字段（如 subject/heading/button_text）才会被转义；
+#   - get_texts() 提供带回退的取值：语言或类型缺失时回退英文，最终兜底空字典。
+# ---------------------------------------------------------------------------
+
 # 多语言邮件文案表，三层结构：语言码 -> 邮件类型 -> 文案字段
 # 支持语言：zh/en/ja/ko/ru；邮件类型：password_reset/verify_email/welcome
 # 文案字段含占位符（如 {from_name}/{username}/{hours}），发送时用 str.format 填充

@@ -2,6 +2,15 @@
 会话存储层
 """
 
+# 会话存储层（SessionStorage）：封装会话文档在 MongoDB 中的全部读写细节。
+# 关键设计：
+#   - 双主键兼容：优先按业务自定义 session_id 定位，未命中再回退到 Mongo 的 _id，
+#     几乎所有增删改查都遵循「先 session_id、后 ObjectId」的两段式匹配；
+#   - 延迟建连 + 一次性后台建索引：collection 首次使用时才连库；索引通过类级
+#     双重检查 + 锁只在全进程创建一次（background=True，不阻塞启动与写入）；
+#   - 搜索索引：把会话名与用户消息拆成检索词落库，支持模糊搜索与高亮预览；增量
+#     追加/回填用 CAS（比对更新时间）乐观锁 + 有限次重试，避免并发写相互覆盖；
+#   - 会话级元数据维护：未读计数、收藏切换、项目归属、定时任务会话过滤等。
 import asyncio
 from datetime import datetime
 from typing import Any, Dict, Optional

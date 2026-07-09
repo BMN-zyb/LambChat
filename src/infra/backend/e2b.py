@@ -127,10 +127,12 @@ class E2BBackend(BaseSandbox):
             timeout or settings.E2B_TIMEOUT or int(os.environ.get("E2B_TIMEOUT", _DEFAULT_TIMEOUT))
         )
 
+    # 返回底层 E2B 沙箱的 ID
     @property
     def id(self) -> str:
         return self._sandbox.sandbox_id
 
+    # 返回沙箱内的工作目录（创建时确定，默认 /home/user）
     @property
     def work_dir(self) -> str:
         return self._work_dir
@@ -340,12 +342,15 @@ class E2BBackend(BaseSandbox):
             ls_result = BaseSandbox.ls(self, path)
             return ls_result.entries or []
 
+    # ls_info 的异步变体：放线程池执行，避免阻塞事件循环
     async def als_info(self, path: str) -> list[FileInfo]:
         return await run_blocking_io(self.ls_info, path)
 
+    # 把 ls_info 的条目列表包装成 LsResult
     def ls(self, path: str) -> LsResult:
         return LsResult(entries=self.ls_info(path))
 
+    # ls 的异步变体
     async def als(self, path: str) -> LsResult:
         return LsResult(entries=await self.als_info(path))
 
@@ -577,12 +582,15 @@ class E2BBackend(BaseSandbox):
             logger.warning(f"E2B glob({pattern}) failed: {e}, falling back to execute()")
             return super().glob_info(pattern, path)
 
+    # glob_info 的异步变体：放线程池执行，避免阻塞事件循环
     async def aglob_info(self, pattern: str, path: str = "/") -> list[FileInfo]:
         return await run_blocking_io(self.glob_info, pattern, path)
 
+    # 把 glob_info 的匹配列表包装成 GlobResult（_max_depth 透传给递归遍历上限）
     def glob(self, pattern: str, path: str | None = None, *, _max_depth: int = 10) -> GlobResult:
         return GlobResult(matches=self.glob_info(pattern, path or "/", _max_depth=_max_depth))
 
+    # glob 的异步变体
     async def aglob(self, pattern: str, path: str | None = None) -> GlobResult:
         return GlobResult(matches=await self.aglob_info(pattern, path or "/"))
 
@@ -622,6 +630,7 @@ class E2BBackend(BaseSandbox):
                 responses.append(FileUploadResponse(path=path, error=error_type))
         return responses
 
+    # upload_files 的异步变体：放线程池执行，避免阻塞事件循环
     async def aupload_files(self, files: list[tuple[str, bytes]]) -> list[FileUploadResponse]:
         return await run_blocking_io(self.upload_files, files)
 
@@ -677,6 +686,7 @@ class E2BBackend(BaseSandbox):
                     return None
         return None
 
+    # download_files 的异步变体：放线程池执行，避免阻塞事件循环
     async def adownload_files(self, paths: list[str]) -> list[FileDownloadResponse]:
         return await run_blocking_io(self.download_files, paths)
 

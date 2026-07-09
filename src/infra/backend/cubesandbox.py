@@ -82,6 +82,7 @@ class CubeSandboxBackend(E2BBackend):
             logger.warning("Failed to get CubeSandbox info: %s", e)
             return {"sandbox_id": self.id, "state": "unknown"}
 
+    # 暂停沙箱（保留文件系统/内存状态，可随后恢复）
     def pause(self) -> None:
         self._sandbox.pause()
         logger.info("[CubeSandbox] Paused sandbox %s", self.id)
@@ -131,11 +132,13 @@ class CubeSandboxBackend(E2BBackend):
             logger.warning("Failed to parse CubeSandbox ls output for %s: %s", path, e)
             return []
 
+    # ls_info 的异步变体：把同步实现放线程池执行，避免阻塞事件循环
     async def als_info(self, path: str) -> list[FileInfo]:
         from src.infra.async_utils import run_blocking_io
 
         return await run_blocking_io(self.ls_info, path)
 
+    # 把 ls_info 的条目列表包装成 LsResult
     def ls(self, path: str) -> LsResult:
         return LsResult(entries=self.ls_info(path))
 
@@ -181,6 +184,7 @@ class CubeSandboxBackend(E2BBackend):
             logger.warning("CubeSandbox files.read(%s) failed: %s", file_path, e)
             return ReadResult(error=str(e))
 
+    # 写文件：解析路径 → 确保父目录存在 → 走 CubeSandbox files.write；失败标记 file_not_found
     def write(self, file_path: str, content: str) -> WriteResult:
         file_path = self._resolve_path(file_path)
         try:

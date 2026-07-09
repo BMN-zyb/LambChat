@@ -332,6 +332,7 @@ class _CubeSandboxMixin:
             routes={"/skills/": create_skills_backend(user_id=user_id)},
         )
 
+    # 停止用户的 CubeSandbox：持用户锁，优先 pause 保留数据，成功后清缓存并把绑定标记为 paused。
     async def _stop_cubesandbox(self, user_id: str) -> bool:
         assert self._cube_adapter is not None
         lock = self._get_user_lock(user_id)

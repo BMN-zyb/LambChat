@@ -1,5 +1,21 @@
 """Team manager."""
 
+# ============================================================================
+# 模块说明
+# ----------------------------------------------------------------------------
+# 团队（team，多 agent 组合）的业务门面层（Manager），依赖 PersonaPresetManager。
+# 一个团队由若干成员组成，每个成员通过 persona_preset_id 引用一个人设预设。
+# 核心职责与难点：
+#   - 成员展示信息回填（_hydrate_member_display_metadata）：成员在库里只存
+#     persona_preset_id，角色名/头像/标签等展示字段每次读取时都从对应人设预设
+#     实时回填，而非在团队文档里保存可能过期的快照；单个预设查询失败不影响其余成员。
+#   - 成员访问校验：持久化前校验每个成员自定义的模型/agent 是否存在、启用、且在
+#     当前用户权限范围内；并禁止成员再嵌套选用 "team" agent，避免递归。
+#   - 运行时解析（resolve_team_for_runtime）：仅当团队存在且至少有一个有效的
+#     已启用成员时才返回，任何环节缺失都返回 None 交由上层降级，而不抛异常打断对话。
+# 通过 get_team_manager() 暴露进程级单例。
+# ============================================================================
+
 import logging
 from typing import Optional
 
@@ -211,6 +227,7 @@ class TeamManager:
         owner_user_id: str,
     ) -> TeamResponse:
         """Get a team by ID."""
+        # 按 owner_user_id 限定归属查询，查不到即抛 404；返回前回填成员展示信息
         team = await self.storage.get_team(team_id, owner_user_id=owner_user_id)
         if not team:
             raise NotFoundError("team_not_found")
@@ -297,6 +314,7 @@ class TeamManager:
         owner_user_id: str,
     ) -> bool:
         """Delete a team."""
+        # 仅能删除属于 owner_user_id 的团队；未删除到任何记录视为不存在，抛 404
         deleted = await self.storage.delete_team(team_id, owner_user_id=owner_user_id)
         if not deleted:
             raise NotFoundError("team_not_found")
@@ -310,6 +328,7 @@ class TeamManager:
         new_name: str | None = None,
     ) -> TeamResponse:
         """Clone a team."""
+        # 基于源团队复制出一份新团队（成员 member_id 由存储层重新生成）；源不存在抛 404
         cloned = await self.storage.clone_team(
             team_id,
             owner_user_id=owner_user_id,

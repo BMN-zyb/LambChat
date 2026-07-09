@@ -4,6 +4,19 @@ Provides discovery mechanism for built-in channel implementations and
 external plugins registered via entry points.
 """
 
+# ============================================================================
+# 模块说明
+# ----------------------------------------------------------------------------
+# 渠道类型的自动发现与注册表。发现来源有两处：
+#   1) 内置渠道——扫描 src.infra.channel 包内的单文件模块与带 __init__.py 的子包
+#      （如 feishu/），从中查找 BaseChannel / UserChannelManager 的具体子类；
+#   2) 外部插件——通过 setuptools entry_points 的 "lambchat.channels" 组加载。
+# 合并策略为"内置优先"：外部插件不可遮蔽同名(同 channel_type)的内置渠道。
+# ChannelRegistry 以单例 + 幂等 initialize 缓存发现结果，供协调器按类型查渠道类、
+# 取管理器类，以及汇总渠道元数据。
+# 关键依赖：pkgutil / importlib（模块扫描与动态导入）、importlib.metadata（插件）。
+# ============================================================================
+
 from __future__ import annotations
 
 import importlib
@@ -170,6 +183,8 @@ def discover_all_channels() -> dict[str, type["BaseChannel"]]:
     return {**external_keyed, **builtin}
 
 
+# 发现所有渠道管理器类：扫描内置模块，取每个模块中的 UserChannelManager 具体子类，
+# 以 channel_type.value 为键返回。
 def discover_all_managers() -> dict[str, type["UserChannelManager"]]:
     """
     Return all available channel managers.
@@ -220,6 +235,7 @@ class ChannelRegistry:
 
         logger.info(f"Channel registry initialized: {list(self._channels.keys())}")
 
+    # 按渠道类型取对应的渠道实现类（未注册返回 None）。
     def get_channel_class(self, channel_type: "ChannelType") -> Optional[type["BaseChannel"]]:
         """
         Get a channel class by type.
@@ -232,6 +248,7 @@ class ChannelRegistry:
         """
         return self._channels.get(channel_type.value)
 
+    # 按渠道类型取对应的管理器类（未注册返回 None）。
     def get_manager_class(
         self, channel_type: "ChannelType"
     ) -> Optional[type["UserChannelManager"]]:
@@ -246,10 +263,12 @@ class ChannelRegistry:
         """
         return self._managers.get(channel_type.value)
 
+    # 返回所有已注册渠道类的副本（返回副本以防外部改动内部缓存）。
     def get_all_channels(self) -> dict[str, type["BaseChannel"]]:
         """Get all registered channel classes."""
         return self._channels.copy()
 
+    # 返回所有已注册管理器类的副本。
     def get_all_managers(self) -> dict[str, type["UserChannelManager"]]:
         """Get all registered manager classes."""
         return self._managers.copy()

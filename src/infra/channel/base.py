@@ -4,6 +4,20 @@ Provides abstract base class for implementing various chat platform channels
 (Feishu, WeChat, DingTalk, Slack, etc.) with a unified interface.
 """
 
+# ============================================================================
+# 模块说明
+# ----------------------------------------------------------------------------
+# 多渠道接入的抽象基座。定义两个抽象基类，供各聊天平台（飞书 / 微信 / 钉钉 /
+# Slack 等）实现后接入 LambChat 的统一消息系统：
+#   - BaseChannel：单个渠道"连接实例"的统一接口——启动 / 停止 / 发送消息，并把
+#     收到的消息经 _handle_message 规整后转发给上层注册的 message_handler；同时
+#     通过一组类属性 + 类方法向前端暴露"渠道类型元数据"（能力、配置 schema、
+#     配置表单等）。
+#   - UserChannelManager：某一渠道类型下"多用户 / 多实例"的管理者，负责持有并按
+#     user_id[:instance_id] 键查找渠道实例，并以类级单例在进程内共享。
+# 关键依赖：ChannelType / ChannelCapability / ChannelMetadata 等 schema。
+# ============================================================================
+
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
@@ -50,24 +64,30 @@ class BaseChannel(ABC):
         # _running 标记渠道当前是否处于运行（已建立连接/正在监听）状态。
         self._running = False
 
+    # 抽象方法：返回该渠道类型支持的能力列表（如收发文本/图片/文件、流式回复等），
+    # 供前端展示与功能开关判断。子类必须实现。
     @classmethod
     @abstractmethod
     def get_capabilities(cls) -> list[ChannelCapability]:
         """Get the capabilities of this channel type."""
         pass
 
+    # 抽象方法：返回渠道配置的 JSON Schema（描述配置项结构与校验规则）。子类必须实现。
     @classmethod
     @abstractmethod
     def get_config_schema(cls) -> dict[str, Any]:
         """Get JSON schema for channel configuration."""
         pass
 
+    # 抽象方法：返回该渠道的接入引导步骤（逐条文案），供前端展示配置向导。子类必须实现。
     @classmethod
     @abstractmethod
     def get_setup_guide(cls) -> list[str]:
         """Get setup guide steps for this channel."""
         pass
 
+    # 可覆盖方法：返回供前端动态渲染配置表单的字段定义列表（字段名/标题/类型/是否
+    # 必填/是否敏感等）。默认返回空列表，具体渠道按需覆盖。
     @classmethod
     def get_config_fields(cls) -> list[dict[str, Any]]:
         """Get configuration fields for UI rendering.
@@ -87,6 +107,8 @@ class BaseChannel(ABC):
         """
         return []
 
+    # 汇总该渠道类型的完整元数据（合并上述各方法的结果）供前端消费。此方法通用，
+    # 一般无需子类覆盖。
     @classmethod
     def get_metadata(cls) -> dict[str, Any]:
         """Get full metadata for this channel type."""
@@ -105,6 +127,7 @@ class BaseChannel(ABC):
             config_fields=cls.get_config_fields(),
         ).model_dump()
 
+    # 抽象方法：启动渠道并开始监听消息，成功返回 True。子类实现具体的连接/长连接逻辑。
     @abstractmethod
     async def start(self) -> bool:
         """
@@ -115,11 +138,14 @@ class BaseChannel(ABC):
         """
         pass
 
+    # 抽象方法：停止渠道并清理资源（断开连接、取消后台任务等）。子类必须实现。
     @abstractmethod
     async def stop(self) -> None:
         """Stop the channel and clean up resources."""
         pass
 
+    # 抽象方法：通过本渠道向指定会话发送一条消息，成功返回 True；**kwargs 供各渠道
+    # 传递平台专属选项。子类必须实现。
     @abstractmethod
     async def send_message(self, chat_id: str, content: str, **kwargs) -> bool:
         """
@@ -135,16 +161,21 @@ class BaseChannel(ABC):
         """
         pass
 
+    # 只读属性：当前渠道是否处于运行态。
     @property
     def is_running(self) -> bool:
         """Check if the channel is running."""
         return self._running
 
+    # 只读属性：本渠道归属的用户 ID（从 config 读取，缺失时回退为 "unknown"）。
     @property
     def user_id(self) -> str:
         """Get the user ID this channel belongs to."""
         return getattr(self.config, "user_id", "unknown")
 
+    # 处理平台侧收到的入站消息：这是各渠道收到消息后的统一入口——先补全 metadata
+    # （注入 instance_id 等），再以关键字参数转发给注册的 message_handler；异常只记
+    # 日志、不外抛，以保证长连接稳定不中断。
     async def _handle_message(
         self,
         sender_id: str,
@@ -237,16 +268,19 @@ class UserChannelManager(ABC):
                 # 单个管理器停止失败不应阻断其余管理器的清理。
                 logger.warning("Error stopping %s singleton: %s", manager_cls.__name__, e)
 
+    # 抽象方法：启动该管理器下所有用户、所有启用中的渠道连接。子类实现（可含分布式分配）。
     @abstractmethod
     async def start(self) -> None:
         """Start all enabled channels for all users."""
         pass
 
+    # 抽象方法：停止该管理器下的所有渠道连接。子类必须实现。
     @abstractmethod
     async def stop(self) -> None:
         """Stop all channels."""
         pass
 
+    # 抽象方法：重新加载某用户（可指定 instance_id）的渠道配置并据此重启连接。子类必须实现。
     @abstractmethod
     async def reload_user(self, user_id: str, instance_id: Optional[str] = None) -> bool:
         """Reload a user's channel configuration."""
@@ -275,6 +309,7 @@ class UserChannelManager(ABC):
         # 全部落空时返回 None（此处 get 恒为 None，作为兜底返回）。
         return self._channels.get(user_id)
 
+    # 判断某用户（可指定实例）的渠道是否已连接：要求实例存在且处于运行态。
     def is_connected(self, user_id: str, instance_id: Optional[str] = None) -> bool:
         """Check if a user's channel is connected."""
         # 有 instance_id 用组合键、否则用裸 user_id；两者都要求实例存在且正在运行。
@@ -282,6 +317,7 @@ class UserChannelManager(ABC):
         channel = self._channels.get(channel_key)
         return channel is not None and channel.is_running
 
+    # 返回当前处于运行态的渠道键列表（键可能是 user_id 或 user_id:instance_id）。
     def get_connected_users(self) -> list[str]:
         """Get list of users with connected channels."""
         # 注意：此处返回的是 _channels 的键（可能是 user_id 或 user_id:instance_id），

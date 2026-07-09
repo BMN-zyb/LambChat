@@ -11,6 +11,8 @@ from pydantic import BaseModel, Field
 logger = logging.getLogger(__name__)
 
 
+# 一次 run 的目标规格：目标本身 + rubric 验收准则 + 迭代评审上限，
+# 三者一起驱动"带评分（rubric grading）的目标推进"，是本模块的核心数据结构。
 class GoalSpec(BaseModel):
     """A run-scoped goal with rubric criteria."""
 

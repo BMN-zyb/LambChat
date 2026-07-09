@@ -5,6 +5,21 @@ Feishu 消息处理器模块
 发送一条卡片消息，支持 markdown 渲染。
 """
 
+# ============================================================================
+# 模块说明
+# ----------------------------------------------------------------------------
+# 飞书消息处理入口：把"收到一条飞书消息"翻译成"提交一次 agent 运行并把产出回投到
+# 飞书"。create_feishu_message_handler 返回的回调是 BaseChannel 收到消息后的下游
+# 处理器——它解析 /new 命令、复用会话、按渠道实例加载 agent / 模型 / 项目 / 人设等
+# 绑定配置，把任务提交给 task_manager 后台执行，再用 FeishuResponseCollector 消费
+# 事件流，并把流式卡片 / 工具 / 审批 / 文件投递回去。
+# 兼容层：真正的实现已拆分到 approval / collector / events 等子模块，但历史测试与
+# 外部 monkeypatch 仍以本模块为目标，故这里重新导出各符号，并用自定义模块类型把
+# 对本模块的属性赋值同步到相应子模块（见 _PATCH_TARGETS / _FeishuHandlerCompatModule）。
+# 关键依赖：AgentFactory、task_manager、SessionManager、ChannelStorage、
+# PersonaPresetManager、events._process_events。
+# ============================================================================
+
 import asyncio
 import sys
 import types

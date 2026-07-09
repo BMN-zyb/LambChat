@@ -19,6 +19,7 @@ REVEALED_FILE_GROUPED_FILES_PER_SESSION_MAX = 10
 REVEALED_FILE_SESSION_LIST_LIMIT = 100
 
 
+# 把用户输入转义后再用作 MongoDB $regex 模式，防止用户输入里的正则元字符被解释执行（避免 ReDoS / 正则注入）。
 def _safe_search_pattern(text: str) -> str:
     """Escape user input for use as MongoDB $regex pattern to prevent ReDoS."""
     return re.escape(text)
@@ -65,6 +66,9 @@ def _build_dedupe_key(file_key: str, source: str, data: Dict[str, Any]) -> str:
     return f"key:{source}:{file_key}"
 
 
+# 揭示文件索引存储（MongoDB）：记录所有通过 agent 工具"揭示/生成"给用户的文件与项目，
+# 支持按用户/类型/会话/项目筛选、搜索、收藏、按会话分组分页等。
+# 核心难点是"同一资源"的去重（见 _build_dedupe_key）以及历史数据向 dedupe_key 唯一索引的迁移。
 class RevealedFileStorage:
     """MongoDB storage for revealed file records."""
 
@@ -274,6 +278,7 @@ class RevealedFileStorage:
             logger.warning(f"Failed to search sessions by name: {e}")
             return []
 
+    # 切换某条揭示文件记录的收藏状态（is_favorite 取反），返回切换后的新值；记录不存在则抛 ValueError。
     async def toggle_favorite(self, user_id: str, file_id: str) -> bool:
         """Toggle is_favorite on a revealed file record. Returns new value."""
         await self.ensure_indexes_if_needed()
@@ -376,6 +381,7 @@ class RevealedFileStorage:
 
         return {"items": items, "total": total, "skip": skip, "limit": limit}
 
+    # 统计该用户各文件类型（file_type）各有多少条揭示记录，用于前端做分类计数展示。
     async def get_stats(self, user_id: str) -> Dict[str, int]:
         """Get file count per type for a user."""
         await self.ensure_indexes_if_needed()
@@ -608,6 +614,7 @@ class RevealedFileStorage:
             "limit": limit,
         }
 
+    # 取该用户"有揭示文件"的会话列表（session_id + 会话名 + 文件数），按文件数倒序，作为按会话浏览的入口。
     async def get_user_sessions(self, user_id: str) -> list[Dict[str, Any]]:
         """Get distinct session_id + session_name pairs for a user's revealed files."""
         await self.ensure_indexes_if_needed()
@@ -649,12 +656,14 @@ class RevealedFileStorage:
             )
         return items
 
+    # 删除某会话下的全部揭示文件记录（如会话被删除时联动清理），返回删除条数。
     async def delete_by_session(self, session_id: str) -> int:
         """Delete all revealed file records for a session."""
         await self.ensure_indexes_if_needed()
         result = await self.collection.delete_many({"session_id": session_id})
         return result.deleted_count
 
+    # 把某会话下所有揭示文件的 project_id 批量改为指定值（会话被归入/移出项目时调用），返回更新条数。
     async def update_project_id_by_session(self, session_id: str, project_id: Optional[str]) -> int:
         """Update project_id on all revealed files belonging to a session."""
         await self.ensure_indexes_if_needed()
@@ -664,6 +673,7 @@ class RevealedFileStorage:
         )
         return result.modified_count
 
+    # 清空归属某项目的所有揭示文件的 project_id（如项目被删除时调用），返回更新条数。
     async def clear_project_id(self, project_id: str) -> int:
         """Clear project_id on all revealed files belonging to a project (e.g. on project delete)."""
         await self.ensure_indexes_if_needed()

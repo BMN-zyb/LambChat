@@ -1,5 +1,20 @@
 """Persona preset manager."""
 
+# ============================================================================
+# 模块说明
+# ----------------------------------------------------------------------------
+# 人设预设（persona preset）的业务门面层（Manager），位于 API 路由与存储层
+# PersonaPresetStorage 之间，集中承载"权限判定 + 业务规则"：
+#   - 作用域与权限：区分 USER（个人预设）与 GLOBAL（全局预设）两种 scope；
+#     GLOBAL 仅管理员可创建/编辑，普通用户只能看到"已发布且公开"的全局预设；
+#     查不到与无权限统一抛 NotFoundError，避免泄露资源是否存在。
+#   - 与技能（skill）联动：预设保存一批 skill_names，但技能可能被删除/停用/
+#     对该用户不可见，故 use_preset 生成运行时快照时会与"用户当前真正可用的
+#     技能集合"求交集，缺失部分单独放入 missing_skill_names 供前端提示。
+#   - 收藏/置顶等属于用户个人偏好，与预设本体解耦存储、读取时再合并返回。
+# 通过 get_persona_preset_manager() 暴露进程级单例，避免每次请求重建存储连接。
+# ============================================================================
+
 from typing import Optional
 
 from src.infra.persona_preset.storage import PersonaPresetStorage

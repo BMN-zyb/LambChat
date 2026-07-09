@@ -2,6 +2,18 @@
 会话分享存储层
 """
 
+# ---------------------------------------------------------------------------
+# 模块说明：会话分享存储层（Storage / DAO）
+#
+# 本模块把「分享会话」记录持久化到 MongoDB 的 shared_sessions 集合，供分享
+# 功能的路由/服务层使用。核心是两个 ID：
+#   - share_id：对外公开的短随机串（secrets.token_urlsafe 生成，不可预测），
+#     作为分享链接入口，唯一索引保证不冲突；更新分享设置时它保持不变。
+#   - _id / id：MongoDB 内部主键，仅内部使用。
+# 其余要点：集合延迟建连；写操作（删除/更新）都在查询条件里带上 owner_id 做
+# 所有权校验，防止越权；_build_shared_session 对历史数据缺失字段做默认值兜底。
+# ---------------------------------------------------------------------------
+
 import asyncio
 import secrets
 from typing import Optional
@@ -20,6 +32,8 @@ from src.kernel.schemas.share import (
 SHARE_LIST_LIMIT_MAX = 100
 
 
+# 会话分享存储：持有 shared_sessions 集合的延迟引用，提供分享记录的增删改查；
+# 对外访问以 share_id 为入口，写操作以 owner_id 兜底权限校验
 class ShareStorage:
     """
     会话分享存储类

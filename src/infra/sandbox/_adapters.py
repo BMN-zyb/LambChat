@@ -74,6 +74,8 @@ class E2BSandboxAdapter:
     - Pause/Resume：stop() 时暂停而非 kill，保留数据
     """
 
+    # 保存 E2B 连接与生命周期配置（api_key/模板/超时/自动暂停/自动恢复）；
+    # 具体值会在每次 create 前由 _sync_from_settings 从全局 settings 再次刷新。
     def __init__(
         self,
         api_key: str,
@@ -99,6 +101,7 @@ class E2BSandboxAdapter:
         self._auto_pause = getattr(settings, "E2B_AUTO_PAUSE", True)
         self._auto_resume = getattr(settings, "E2B_AUTO_RESUME", True)
 
+    # 延迟导入 e2b SDK 的 Sandbox 类（避免模块加载期强依赖 e2b）
     def _get_e2b_class(self):
         from e2b import Sandbox as E2BSandbox
 
@@ -169,9 +172,11 @@ class E2BSandboxAdapter:
         except Exception:
             return None
 
+    # 返回底层 E2B 沙箱的 ID
     def get_sandbox_id(self, sandbox) -> str:
         return sandbox.sandbox_id
 
+    # 返回沙箱内的默认工作目录（E2B 模板固定为 /home/user）
     def get_work_dir(self, sandbox) -> str:
         return "/home/user"
 
@@ -196,12 +201,14 @@ class E2BSandboxAdapter:
         """永久销毁沙箱（数据丢失）"""
         sandbox.kill()
 
+    # 健康检查：查询沙箱是否仍在运行，任何异常都保守地视为"未运行"
     def sandbox_is_running(self, sandbox) -> bool:
         try:
             return sandbox.is_running()
         except Exception:
             return False
 
+    # 续期：把沙箱的存活超时重置为 timeout 秒（用于活跃 session 保活）
     def extend_timeout(self, sandbox, timeout: int) -> None:
         sandbox.set_timeout(timeout)
 
@@ -224,6 +231,8 @@ class E2BSandboxAdapter:
 class CubeSandboxAdapter:
     """Native CubeSandbox lifecycle adapter."""
 
+    # 保存 CubeSandbox 的连接与生命周期配置（api_url/模板/代理节点/域名/超时等）；
+    # 具体值会在每次 create/connect 前由 _sync_from_settings 从全局 settings 再次刷新。
     def __init__(
         self,
         api_url: str,
@@ -246,6 +255,7 @@ class CubeSandboxAdapter:
         self._auto_pause = auto_pause
         self._auto_resume = auto_resume
 
+    # 每次创建/连接前从全局 settings 重新同步配置，使 DB/热更新后的配置立即生效
     def _sync_from_settings(self) -> None:
         from src.kernel.config.base import settings
 
@@ -259,6 +269,7 @@ class CubeSandboxAdapter:
         self._auto_pause = getattr(settings, "CUBE_AUTO_PAUSE", True)
         self._auto_resume = getattr(settings, "CUBE_AUTO_RESUME", True)
 
+    # 用当前配置构造 CubeSandbox SDK 的 Config 对象（连接沙箱平台所需的全部参数）
     def _get_config(self):
         from cubesandbox import Config
 
@@ -272,11 +283,14 @@ class CubeSandboxAdapter:
             request_timeout=self._request_timeout,
         )
 
+    # 延迟导入 cubesandbox SDK 的 Sandbox 类（避免模块加载期强依赖 cubesandbox）
     def _get_cube_class(self):
         from cubesandbox import Sandbox as CubeSandbox
 
         return CubeSandbox
 
+    # 创建 CubeSandbox：同步配置后按 auto_pause 组装 lifecycle、按 user_id 组装 metadata，
+    # 注入用户环境变量并下发到平台；返回 (沙箱对象, 工作目录)。
     def create_sandbox(
         self, user_id: str | None = None, envs: dict[str, str] | None = None
     ) -> tuple[object, str]:
@@ -306,6 +320,7 @@ class CubeSandboxAdapter:
         )
         return sandbox, "/home/user"
 
+    # 按 sandbox_id 重连到已有沙箱；失败（不存在/网络异常）返回 None
     def get_sandbox(self, sandbox_id: str) -> object | None:
         try:
             self._sync_from_settings()
@@ -331,18 +346,22 @@ class CubeSandboxAdapter:
             result.append(item)
         return sorted(result, key=lambda item: item.get("startedAt") or "", reverse=True)
 
+    # 返回底层 CubeSandbox 的 ID
     def get_sandbox_id(self, sandbox) -> str:
         return sandbox.sandbox_id
 
+    # 返回沙箱内的默认工作目录（模板固定为 /home/user）
     def get_work_dir(self, sandbox) -> str:
         return "/home/user"
 
+    # 暂停沙箱（保留状态）；失败仅告警，不抛出
     def pause_sandbox(self, sandbox) -> None:
         try:
             sandbox.pause()
         except Exception as e:
             logger.warning(f"[CubeSandbox] Failed to pause sandbox: {e}")
 
+    # 停止沙箱 — 优先 pause（保留状态），pause 失败再退回 kill
     def stop_sandbox(self, sandbox) -> None:
         try:
             sandbox.pause()
@@ -352,9 +371,11 @@ class CubeSandboxAdapter:
             except Exception:
                 pass
 
+    # 永久销毁沙箱（数据丢失）
     def kill_sandbox(self, sandbox) -> None:
         sandbox.kill()
 
+    # 健康检查：get_info 的 state 落在 READY_STATES 才算运行中，任何异常都视为"未运行"
     def sandbox_is_running(self, sandbox) -> bool:
         try:
             info = sandbox.get_info()
@@ -362,12 +383,15 @@ class CubeSandboxAdapter:
         except Exception:
             return False
 
+    # 续期占位：CubeSandbox SDK 无 set_timeout，超时由 connect/create 携带，
+    # 此处保留空实现只为与 SessionSandboxManager 的生命周期调用保持一致。
     def extend_timeout(self, sandbox, timeout: int) -> None:
         # CubeSandbox's native SDK does not expose set_timeout; connect/create
         # carry the desired timeout. Keep this method for SessionSandboxManager
         # lifecycle symmetry.
         del sandbox, timeout
 
+    # 获取沙箱状态信息（归一化 sandboxID/state），异常时返回最小可用信息
     def get_sandbox_info(self, sandbox) -> dict:
         try:
             info = sandbox.get_info()

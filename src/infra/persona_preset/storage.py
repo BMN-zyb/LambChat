@@ -1,5 +1,20 @@
 """Persona preset storage."""
 
+# ============================================================================
+# 模块说明
+# ----------------------------------------------------------------------------
+# 人设预设的 MongoDB 持久化层，服务于 PersonaPresetManager。核心职责与难点：
+#   - 可见性查询：_build_visible_query 统一构造"该用户能看到哪些预设"的条件，
+#     list_visible / count_visible 共用它，保证"列表"与"总数"口径一致。
+#   - 搜索分词：_build_persona_search_terms 对中英文分别处理，中文额外做二字
+#     滑窗子串但不对单字做过宽匹配，避免误召回；多分词之间是"与"关系。
+#   - 用户偏好：收藏/置顶不单独建表，而是存在 users.metadata 里，并对数量设上限
+#     （MAX_PINNED/MAX_FAVORITES），超限时静默拒绝并返回当前真实状态而非报错。
+#   - 排序：用聚合管道在数据库端为每条预设打上 is_pinned/is_favorite 标记，
+#     再按 置顶 > 收藏 > 更新时间 > 创建时间 > 使用次数 排序后分页。
+#   - 历史数据兼容：_to_model_dict 会为旧文档缺失的字段补默认值。
+# ============================================================================
+
 import re
 from typing import Any, Optional
 
@@ -374,6 +389,7 @@ class PersonaPresetStorage:
         return self._to_model_dict(doc) if doc else None
 
     async def delete(self, preset_id: str) -> bool:
+        # preset_id 非法（无法转为 ObjectId）时直接返回 False，不向上抛异常
         try:
             query_id = ObjectId(preset_id)
         except Exception:

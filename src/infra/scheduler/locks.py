@@ -22,6 +22,9 @@ _SLOT_PREFIX = "scheduler:task_slot:"
 _LOCK_TTL = 600  # 10 min default TTL
 _SLOT_TTL = 86400  # Keep completed schedule slots long enough to dedupe delayed peers.
 
+# 释放执行锁的 Lua 脚本：先 GET 比对键里存的 value 是否等于自己的 token，
+# 一致才执行 DEL。用 Lua 让「读取 + 比较 + 删除」在 Redis 内一次性原子完成，
+# 避免「本实例锁已过期、别的实例刚抢到同名锁」时把别人的锁误删掉。
 # Lua: atomic compare-and-delete to avoid releasing another instance's lock
 _RELEASE_LOCK_LUA = """
 if redis.call("GET", KEYS[1]) == ARGV[1] then
@@ -31,6 +34,9 @@ else
 end
 """
 
+# 续期执行锁的 Lua 脚本：仅当 value 仍等于自己的 token（锁还在自己手里）时，
+# 才对键执行 EXPIRE 延长 TTL。同样借助 Lua 保证「比较 + 续期」的原子性，
+# 防止在续期瞬间锁已被他人接管却仍被本实例延长。
 # Lua: atomic compare-and-expire to extend a lock we still own
 _EXTEND_LOCK_LUA = """
 if redis.call("GET", KEYS[1]) == ARGV[1] then
@@ -41,6 +47,14 @@ end
 """
 
 
+# 尝试为一个定时任务抢占「执行锁」（任务真正开跑之前调用）。
+# 用 Redis 的 SET NX EX 原子地「键不存在才写入并同时设置过期」，天然实现互斥获取。
+# 参数：task_id 定时任务标识；run_id 本次触发的运行标识（用于组装 token）；
+#       ttl 锁的自动过期秒数（防止持锁实例崩溃后锁永不释放）。
+# 返回：抢到返回唯一 token 字符串（后续释放/续期需凭它校验持有者身份），
+#       未抢到返回 None（说明已有其他实例正在执行该任务，本次应直接跳过）。
+# 副作用：向 Redis 写入 task_lock 键。
+# 为什么 token 带随机后缀：让每次持有都唯一，配合 compare-and-delete 避免误删他人的锁。
 async def acquire_task_lock(
     task_id: str,
     run_id: str,
@@ -65,6 +79,13 @@ async def acquire_task_lock(
     return None
 
 
+# 为某个「具体触发时刻（slot）」抢占占位锁，跨所有调度实例去重。
+# 与执行锁的关键区别：这把锁抢到后【故意不释放】——即使第一个实例已跑完并释放了
+# 执行锁，慢半拍才到达的其他实例也会因为 slot 锁仍在而放弃，从而避免「同一触发时刻
+# 被执行两次」。TTL 取得较长（默认一天），只要足够挡住延迟到达的同伴即可。
+# 参数：task_id 定时任务标识；slot_id 触发时刻标识；ttl 该占位记录的保留秒数。
+# 返回：True 表示本实例成功认领该触发时刻（可继续执行），False 表示已被他人认领。
+# 副作用：向 Redis 写入一个长期保留的 task_slot 键。
 async def acquire_task_slot_lock(
     task_id: str,
     slot_id: str,
@@ -86,6 +107,10 @@ async def acquire_task_slot_lock(
     return False
 
 
+# 释放执行锁（任务跑完时调用）。通过 _RELEASE_LOCK_LUA 做「比对 token 一致才删除」，
+# 因此只有锁的真正持有者才能释放，天然避免误删别的实例后来抢到的同名锁。
+# 参数：task_id 定时任务标识；token 抢锁时拿到的持有凭据。
+# 副作用：token 匹配时删除 Redis 中的 task_lock 键；不匹配则静默不动。
 async def release_task_lock(task_id: str, token: str) -> None:
     """Release the execution lock (only if *token* matches the current holder)."""
     redis = get_redis_client()
@@ -94,6 +119,10 @@ async def release_task_lock(task_id: str, token: str) -> None:
     logger.debug("[SchedulerLock] released lock for task=%s", task_id)
 
 
+# 为长时间运行的任务续期执行锁的 TTL，防止任务还没跑完锁就先过期、被别的实例抢走。
+# 通过 _EXTEND_LOCK_LUA 做「仍持有本锁才 EXPIRE」，只有当前持有者能续期。
+# 参数：task_id 定时任务标识；token 持有凭据；extra_seconds 续期后的新 TTL 秒数。
+# 返回：True 表示锁仍归本实例所有并已成功续期；False 表示已不再持有（不应再继续执行）。
 async def extend_task_lock(task_id: str, token: str, extra_seconds: int = 300) -> bool:
     """Extend the lock TTL for a long-running task.
 

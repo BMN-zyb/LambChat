@@ -4,6 +4,20 @@ Stores user-level channel configurations with encrypted sensitive fields.
 Supports multiple channel types (Feishu, WeChat, DingTalk, etc.)
 """
 
+# ============================================================================
+# 模块说明
+# ----------------------------------------------------------------------------
+# 通用的"渠道配置"持久化存储（MongoDB，集合 user_channel_configs）。相比旧版
+# feishu/storage.py（只存飞书、每用户一份），本模块面向所有渠道类型，且支持同一
+# 用户在同一渠道类型下拥有多份配置（多实例，以 instance_id 区分）。
+# 核心职责：
+#   - 敏感字段（app_secret / token / ... 见 SENSITIVE_FIELDS）落库前加密、对外脱敏；
+#   - 提供 CRUD、按用户/类型的列表与计数，以及供渠道管理器批量拉取"已启用配置"的游标；
+#   - 进程内"仅建一次索引"（唯一索引保证 user + type + instance 唯一）。
+# 加解密为阻塞操作，统一经 run_blocking_io 丢线程池执行，避免阻塞事件循环。
+# 关键依赖：get_mongo_client、encrypt_value / decrypt_value、ChannelType 等 schema。
+# ============================================================================
+
 import asyncio
 import types
 import uuid
@@ -114,6 +128,8 @@ class ChannelStorage:
             logger.warning(f"Failed to create channel indexes: {e}")
             return False
 
+    # 读取某用户在指定渠道类型（可选实例）下的配置：命中则解密并展开为扁平字典，
+    # 未命中返回 None。
     async def get_config(
         self,
         user_id: str,
@@ -133,6 +149,8 @@ class ChannelStorage:
             return await self._doc_to_config(doc)
         return None
 
+    # 新建一份渠道配置：自动生成唯一 instance_id，敏感字段加密后连同绑定关系
+    # （agent / model / project / team / persona）与时间戳一并写入，返回解密后的配置字典。
     async def create_config(
         self,
         user_id: str,
@@ -179,6 +197,9 @@ class ChannelStorage:
 
         return await self._doc_to_config(doc)
 
+    # 更新指定实例的配置：不存在返回 None。enabled/name 传 None 表示"不改"；
+    # 而 agent_id/model_id/... 用 Ellipsis(...) 作"未传参"哨兵，从而把"显式清空(None)"
+    # 与"保持不变"区分开（见下方逐字段判断）。更新后回读并返回最新配置。
     async def update_config(
         self,
         user_id: str,
@@ -236,6 +257,7 @@ class ChannelStorage:
         )
         return await self._doc_to_config(updated_doc) if updated_doc else None
 
+    # 删除配置：给定实例则精确删该实例，否则删该用户该类型下匹配的一条；删掉返回 True。
     async def delete_config(
         self,
         user_id: str,
@@ -257,6 +279,8 @@ class ChannelStorage:
             return True
         return False
 
+    # 批量清除某用户下所有引用了该 project_id 的配置（置空 project 绑定），
+    # 用于项目被删除时的级联清理；返回被修改的条数。
     async def clear_project_id(self, project_id: str, user_id: str) -> int:
         """Clear a project reference from channel configurations for a user."""
         await self.ensure_indexes_if_needed()
@@ -272,6 +296,7 @@ class ChannelStorage:
         )
         return result.modified_count
 
+    # 清除单条配置的 project 绑定（把该实例的 project_id 置空），返回被修改的条数。
     async def clear_config_project_id(
         self, user_id: str, channel_type: ChannelType, instance_id: str
     ) -> int:
@@ -289,6 +314,7 @@ class ChannelStorage:
         )
         return result.modified_count
 
+    # 取配置并构建对外响应（敏感字段脱敏）：无配置返回 None。
     async def get_response(
         self,
         user_id: str,
@@ -341,6 +367,7 @@ class ChannelStorage:
             updated_at=config.get("updated_at"),
         )
 
+    # 取配置并构建连接状态对象：无配置视为未启用、未连接。
     async def get_status(
         self,
         user_id: str,
@@ -354,6 +381,7 @@ class ChannelStorage:
 
         return self.build_status_from_config(config, channel_type)
 
+    # 从已加载的配置构建状态对象：connected 恒为 False，真实连接态由渠道管理器另行填充。
     def build_status_from_config(
         self,
         config: dict[str, Any],
@@ -377,6 +405,7 @@ class ChannelStorage:
             configs.append(await self._doc_to_config(doc))
         return configs
 
+    # 列出某用户在指定渠道类型下的所有配置（限量返回）。
     async def list_user_configs_by_type(
         self, user_id: str, channel_type: ChannelType
     ) -> list[dict[str, Any]]:
@@ -390,12 +419,14 @@ class ChannelStorage:
             configs.append(await self._doc_to_config(doc))
         return configs
 
+    # 统计某用户的配置总数（只计数、不加载/解密配置内容，避免无谓开销）。
     async def count_user_configs(self, user_id: str) -> int:
         """Count channel configurations for a user without loading config payloads."""
         await self.ensure_indexes_if_needed()
         collection = self._get_collection()
         return int(await collection.count_documents({"user_id": user_id}))
 
+    # 统计某用户在指定渠道类型下的配置数（同样只计数、不加载内容）。
     async def count_user_configs_by_type(self, user_id: str, channel_type: ChannelType) -> int:
         """Count channel configurations for a user and type without loading payloads."""
         await self.ensure_indexes_if_needed()
@@ -406,6 +437,7 @@ class ChannelStorage:
             )
         )
 
+    # 列出某渠道类型下所有已启用的配置（把 iter_enabled_configs 游标物化成列表）。
     async def list_enabled_configs(self, channel_type: ChannelType) -> list[dict[str, Any]]:
         """List all enabled configurations for a channel type (for channel manager)"""
         configs = []

@@ -50,6 +50,7 @@ def _prefix_file_info_path(info: FileInfo, workspace_path: str) -> FileInfo:
 class WorkflowScopedBackend(BackendProtocol):
     """Expose a session workflow path while storing files under a scoped backend root."""
 
+    # 记录被包装的内部 backend，并把对外前缀 workspace_path 去掉末尾 "/" 归一化
     def __init__(self, backend: BackendProtocol, workspace_path: str) -> None:
         self._backend = backend
         self.workspace_path = workspace_path.rstrip("/")
@@ -89,6 +90,7 @@ class WorkflowScopedBackend(BackendProtocol):
     async def aread(self, file_path: str, offset: int = 0, limit: int = 2000) -> ReadResult:
         return await self._backend.aread(self._strip_path(file_path), offset, limit)
 
+    # grep：strip 入参路径后转发；对返回的每条匹配再把其 path 前缀成对外的 workspace 路径
     def grep_raw(
         self,
         pattern: str,
@@ -125,6 +127,7 @@ class WorkflowScopedBackend(BackendProtocol):
         infos = await self._backend.aglob_info(pattern, self._strip_path(path))
         return [_prefix_file_info_path(info, self.workspace_path) for info in infos]
 
+    # write：strip 入参路径后转发；若结果带 path 再前缀回对外 workspace 路径
     def write(self, file_path: str, content: str) -> WriteResult:
         result = self._backend.write(self._strip_path(file_path), content)
         if getattr(result, "path", None):

@@ -4,6 +4,24 @@ Trace Context - 分布式追踪上下文
 使用 contextvars 存储追踪信息，支持跨异步调用传递。
 """
 
+# ---------------------------------------------------------------------------
+# 模块说明：分布式追踪 / 请求上下文（基于 contextvars）
+#
+# 本模块是「trace 信息自动注入日志」链路的源头，与 filter.py 配套使用：
+#   本模块负责「存」——把 trace_id/span_id 等写入 contextvars；
+#   filter.py 负责「取」——在每条日志产生时读出并写进 LogRecord。
+#
+# 为什么用 contextvars 而不是全局变量或手动传参：
+#   contextvars 的值绑定到「当前执行上下文」，会随 await / asyncio.Task 自动
+#   传播，且并发的不同请求各自隔离、互不串味。因此无需在函数间层层透传
+#   trace_id，任意深处的代码都能通过 TraceContext.get() 取到当前请求的追踪信息。
+#
+# 本模块维护两组相互独立的 contextvars：
+#   1) 追踪组：request_id / trace_id / span_id / parent_span_id —— 面向可观测性；
+#   2) 请求上下文组：session_id / run_id / user_id 等 —— 面向业务（供工具读取）。
+# 两组解耦、互不影响，各自拥有 set / get / clear 方法。
+# ---------------------------------------------------------------------------
+
 from __future__ import annotations
 
 from contextvars import ContextVar
@@ -11,6 +29,8 @@ from dataclasses import dataclass
 from typing import Optional
 
 
+# 追踪信息值对象：TraceContext.get() 的返回类型，聚合一次快照的追踪字段，
+# 并提供 is_set()/format() 便于日志渲染
 @dataclass
 class TraceInfo:
     """追踪信息数据类"""
@@ -38,6 +58,8 @@ class TraceInfo:
         return " ".join(parts)
 
 
+# 请求上下文值对象：TraceContext.get_request_context() 的返回类型，
+# 承载业务维度（会话/运行/用户）标识
 @dataclass
 class RequestContext:
     """请求上下文数据类"""
@@ -49,6 +71,8 @@ class RequestContext:
     trace_id: Optional[str] = None
 
 
+# 追踪上下文管理器：以「类属性 = ContextVar」的形式集中管理全部上下文变量，
+# 所有方法均为 classmethod（无需实例化，直接以 TraceContext.xxx 调用）
 class TraceContext:
     """
     追踪上下文管理器

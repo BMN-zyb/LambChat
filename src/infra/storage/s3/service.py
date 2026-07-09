@@ -5,6 +5,23 @@ Supports multiple providers through configuration, with automatic backend select
 Includes retry mechanism for transient upload failures.
 """
 
+# ---------------------------------------------------------------------------
+# 模块说明：S3 对象存储高层服务（多后端选择 + 上传重试 + 进程级单例）
+#
+# 本模块提供 S3StorageService，屏蔽不同存储后端的差异，对上层给出统一的
+# 上传/下载/删除/签名 URL 等能力。三个难点：
+#   1. 多后端选择（_get_backend）：按配置 provider 惰性选择并缓存后端——本地
+#      文件系统 / 阿里云 OSS / 其余走 MinIO(标准 S3 协议)；阿里云 SDK(oss2) 缺失时
+#      优雅降级到用 MinIO 客户端连接 OSS。configure() 换配置后会清缓存以便重建后端。
+#   2. 瞬时错误重试（_retry_async）：区分「瞬时错误」（网络/超时/5xx）与「非瞬时
+#      错误」（鉴权/校验）——只对前者做指数退避 + 随机抖动重试，后者立即抛出；
+#      对第三方 SDK 异常则靠模块名 + 错误关键字启发式判断。每次重试前都把文件指针
+#      seek 回起点，否则会从上次读到的位置继续读导致数据缺失。
+#   3. 单例管理：类级 _instance 与模块级 _storage_service 配合；get_or_init_storage
+#      按当前配置动态决定用对象存储还是本地存储，且仅当配置变化时才重建后端。
+# 私有 bucket 上传后会补签一个预签名 URL（有效期不超过云厂商 7 天上限）。
+# ---------------------------------------------------------------------------
+
 from __future__ import annotations
 
 import asyncio
@@ -36,6 +53,8 @@ UPLOAD_RETRY_BACKOFF_BASE = 2  # seconds, exponential backoff base
 UPLOAD_RETRY_BACKOFF_JITTER = 1  # seconds, random jitter
 
 
+# S3 存储高层服务：持有 S3Config 与惰性创建的后端实例，所有 upload_* 最终都汇聚到
+# upload_stream_to_key，统一走「大小校验 -> 选后端 -> 带重试上传 -> 私有桶补签名」流程
 class S3StorageService:
     """
     S3 Storage Service

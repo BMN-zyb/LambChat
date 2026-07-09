@@ -2,6 +2,22 @@
 MongoDB 存储实现
 """
 
+# ---------------------------------------------------------------------------
+# 模块说明：MongoDB 存储地基 + 审批(HITL)存储 + 分布式审批通知
+#
+# 本模块是数据层最底层的地基之一，包含三部分：
+#   1. MongoDB 客户端工厂（get_mongo_client / close_mongo_client）：
+#      难点——用 @lru_cache 实现「进程级单例」，全进程共享一个连接池（Motor
+#      异步客户端），避免重复建连；按是否配置账号密码拼接连接串，凭据经
+#      quote_plus URL 编码，并区分 mongodb:// 与 mongodb+srv:// 两种协议。
+#   2. MongoDBStorage：实现 StorageBase 的通用键值存储（以 key 作 _id、存 value），
+#      keys() 把 fnmatch 通配符转正则并限量返回，避免误扫全库。
+#   3. 审批存储（Human-in-the-Loop）：ApprovalStorage 用 MongoDB 存审批请求，
+#      配合 TTL 索引自动过期；respond_if_pending 用 find_one_and_update 做原子应答
+#      防竞态；wait_for_response_distributed 采用「Redis Pub/Sub 唤醒 + Mongo 轮询
+#      兜底」的双保险跨实例等待，Pub/Sub 只发轻量唤醒信号，响应主体仍以 Mongo 为准。
+# ---------------------------------------------------------------------------
+
 import asyncio
 import fnmatch
 import json
@@ -96,6 +112,8 @@ async def close_mongo_client() -> None:
         logger.warning(f"Error closing MongoDB client: {e}")
 
 
+# 通用键值存储的 MongoDB 实现：一个 collection 即一个键值空间，
+# 以文档 _id 存 key、value 字段存值，实现 StorageBase 定义的接口
 class MongoDBStorage(StorageBase):
     """
     MongoDB 存储实现
@@ -189,6 +207,8 @@ class ApprovalResponse(BaseModel):
     response: dict = {}  # 改为 dict 类型
 
 
+# 审批（HITL）存储：把待人工确认的审批请求存入独立集合，支持分布式部署；
+# 靠 TTL 索引自动清理过期请求，靠原子更新避免并发重复应答
 class ApprovalStorage:
     """
     审批存储类
